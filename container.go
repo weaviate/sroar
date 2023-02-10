@@ -296,7 +296,9 @@ func (c array) andNotBitmap(other bitmap, buf []uint16) []uint16 {
 	res[indexSize] = 4
 	for _, e := range c.all() {
 		if !other.has(e) {
-			res.add(e)
+			if res.add(e) {
+				res[indexSize]++
+			}
 		}
 	}
 	return res
