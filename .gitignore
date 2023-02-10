@@ -1,0 +1,6 @@
+# go mod
+vendor/
+
+# IDE files
+.idea/
+.vscode/
