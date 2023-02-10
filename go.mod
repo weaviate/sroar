@@ -1,4 +1,4 @@
-module github.com/dgraph-io/sroar
+module github.com/weaviate/sroar
 
 go 1.16
 
