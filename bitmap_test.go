@@ -871,3 +871,160 @@ func TestSplit(t *testing.T) {
 	run(1e3)
 	run(1e6)
 }
+
+// Test making sure out of range panic does not occur anymore
+// https://github.com/weaviate/sroar/issues/1
+//
+// panic: runtime error: slice bounds out of range [:204] with capacity 64
+func Test_Issue_1(t *testing.T) {
+
+	genBitmap := func(fromInc, toExc uint64) *Bitmap {
+		bm := NewBitmap()
+		for i := fromInc; i < toExc; i++ {
+			bm.Set(i)
+		}
+		return bm
+	}
+
+	genSlice := func(fromInc, toExc uint64) []uint64 {
+		slice := []uint64{}
+		for i := fromInc; i < toExc; i++ {
+			slice = append(slice, i)
+		}
+		return slice
+	}
+
+	type testCase struct {
+		name             string
+		leftBm           *Bitmap
+		rightBm          *Bitmap
+		nextLeftBm       *Bitmap
+		expectedElements []uint64
+	}
+
+	testCases := []testCase{
+		{
+			// returns 30x 65536 instead of 71970..71999
+			name:       "array of 60 elements in left bitmap, 2 internal containers (numbers > 2^16), empty bitmap on left Or",
+			leftBm:     genBitmap(71_970, 72_030),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: NewBitmap(),
+
+			expectedElements: genSlice(71_970, 72_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 60 elements in left bitmap, 1 internal container (numbers < 2^16), empty bitmap on left Or",
+			leftBm:     genBitmap(970, 1_030),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: NewBitmap(),
+
+			expectedElements: genSlice(970, 1_000),
+		},
+		{
+			// panic: runtime error: slice bounds out of range [:204] with capacity 64
+			name:       "array of 300 elements in left bitmap, 2 internal containers (numbers > 2^16), empty bitmap on left Or",
+			leftBm:     genBitmap(71_800, 72_100),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: NewBitmap(),
+
+			expectedElements: genSlice(71_800, 72_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 300 elements in left bitmap, 1 internal container (numbers < 2^16), empty bitmap on left Or",
+			leftBm:     genBitmap(800, 1_100),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: NewBitmap(),
+
+			expectedElements: genSlice(800, 1_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 60 elements in left bitmap, 2 internal containers (numbers > 2^16), non-empty bitmap on left Or",
+			leftBm:     genBitmap(71_970, 72_030),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: genBitmap(71_980, 72_000),
+
+			expectedElements: genSlice(71_970, 72_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 60 elements in left bitmap, 1 internal container (numbers < 2^16), non-empty bitmap on left Or",
+			leftBm:     genBitmap(970, 1_030),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: genBitmap(980, 1_000),
+
+			expectedElements: genSlice(970, 1_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 300 elements in left bitmap, 2 internal containers (numbers > 2^16), non-empty bitmap on left Or",
+			leftBm:     genBitmap(71_800, 72_100),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: genBitmap(71_900, 72_000),
+
+			expectedElements: genSlice(71_800, 72_000),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 300 elements in left bitmap, 1 internal container (numbers < 2^16), non-empty bitmap on left Or",
+			leftBm:     genBitmap(800, 1_100),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: genBitmap(900, 1_000),
+
+			expectedElements: genSlice(800, 1_000),
+		},
+		{
+			// returns 30x 65536 instead of 71970..71999
+			name:       "array of 60 elements in left bitmap, 2 internal containers (numbers > 2^16), non-empty (other container) bitmap on left Or",
+			leftBm:     genBitmap(71_970, 72_030),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: genBitmap(970, 1_000),
+
+			expectedElements: append(genSlice(970, 1_000), genSlice(71_970, 72_000)...),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 60 elements in left bitmap, 1 internal container (numbers < 2^16), non-empty bitmap (other container) on left Or",
+			leftBm:     genBitmap(970, 1_030),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: genBitmap(71_970, 72_000),
+
+			expectedElements: append(genSlice(970, 1_000), genSlice(71_970, 72_000)...),
+		},
+		{
+			// returns 200x 65536 instead of 71800..71999
+			name:       "array of 300 elements in left bitmap, 2 internal containers (numbers > 2^16), non-empty (other container) bitmap on left Or",
+			leftBm:     genBitmap(71_800, 72_100),
+			rightBm:    genBitmap(72_000, 75_000),
+			nextLeftBm: genBitmap(800, 1_000),
+
+			expectedElements: append(genSlice(800, 1_000), genSlice(71_800, 72_000)...),
+		},
+		{
+			// working (sanity check)
+			name:       "array of 300 elements in left bitmap, 1 internal container (numbers < 2^16), non-empty (other container) bitmap on left Or",
+			leftBm:     genBitmap(800, 1_100),
+			rightBm:    genBitmap(1_000, 4_000),
+			nextLeftBm: genBitmap(71_800, 72_000),
+
+			expectedElements: append(genSlice(800, 1_000), genSlice(71_800, 72_000)...),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			broken := tc.leftBm.Clone()
+			broken.AndNot(tc.rightBm)
+
+			failing := tc.nextLeftBm.Clone()
+			failing.Or(broken)
+
+			elements := failing.ToArray()
+
+			require.Len(t, elements, len(tc.expectedElements))
+			require.ElementsMatch(t, elements, tc.expectedElements)
+		})
+	}
+}
