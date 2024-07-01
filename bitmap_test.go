@@ -1,11 +1,13 @@
 package sroar
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
 	"time"
 
+	assert_ "github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1033,6 +1035,103 @@ func Test_Issue_1(t *testing.T) {
 
 			require.Len(t, elements, len(tc.expectedElements))
 			require.ElementsMatch(t, elements, tc.expectedElements)
+		})
+	}
+}
+
+func Test_Issue_2_ZeroInsteadMax(t *testing.T) {
+	for maxVal := uint64(2); maxVal <= 512; maxVal++ {
+		t.Run(fmt.Sprintf("max_%d", maxVal), func(t *testing.T) {
+			bm1 := NewBitmap()
+			bm2 := NewBitmap()
+
+			for i := uint64(0); i <= maxVal-2; i++ {
+				bm1.Set(i)
+			}
+			bm2.Set(maxVal)
+
+			bm1.Or(bm2)
+			bm1.Set(maxVal - 1)
+
+			assert_.Equal(t, maxVal+1, uint64(bm1.GetCardinality()), "should have cardinality")
+			assert_.Equal(t, maxVal, bm1.Maximum(), "should have maximum")
+			assert_.Equal(t, uint64(0), bm1.Minimum(), "should have minimum")
+			assert_.True(t, bm1.Contains(maxVal-2), "should contain maxVal-2")
+			assert_.True(t, bm1.Contains(maxVal-1), "should contain maxVal-1")
+			assert_.True(t, bm1.Contains(maxVal), "should contain maxVal")
+		})
+
+		t.Run(fmt.Sprintf("max_%d_sanity1", maxVal), func(t *testing.T) {
+			bm1 := NewBitmap()
+
+			for i := uint64(0); i <= maxVal; i++ {
+				bm1.Set(i)
+			}
+
+			assert_.Equal(t, maxVal+1, uint64(bm1.GetCardinality()), "should have cardinality")
+			assert_.Equal(t, maxVal, bm1.Maximum(), "should have maximum")
+			assert_.Equal(t, uint64(0), bm1.Minimum(), "should have minimum")
+			assert_.True(t, bm1.Contains(maxVal-2), "should contain maxVal-2")
+			assert_.True(t, bm1.Contains(maxVal-1), "should contain maxVal-1")
+			assert_.True(t, bm1.Contains(maxVal), "should contain maxVal")
+		})
+
+		t.Run(fmt.Sprintf("max_%d_sanity2", maxVal), func(t *testing.T) {
+			bm1 := NewBitmap()
+			bm2 := NewBitmap()
+
+			for i := uint64(0); i <= maxVal-2; i++ {
+				bm1.Set(i)
+			}
+			bm2.Set(maxVal)
+
+			bm1.Set(maxVal - 1)
+			bm1.Or(bm2)
+
+			assert_.Equal(t, maxVal+1, uint64(bm1.GetCardinality()), "should have cardinality")
+			assert_.Equal(t, maxVal, bm1.Maximum(), "should have maximum")
+			assert_.Equal(t, uint64(0), bm1.Minimum(), "should have minimum")
+			assert_.True(t, bm1.Contains(maxVal-2), "should contain maxVal-2")
+			assert_.True(t, bm1.Contains(maxVal-1), "should contain maxVal-1")
+			assert_.True(t, bm1.Contains(maxVal), "should contain maxVal")
+		})
+	}
+}
+
+func Test_Issue_2_OutOfRange(t *testing.T) {
+	for maxVal := uint64(2); maxVal <= 512; maxVal++ {
+		t.Run(fmt.Sprintf("max_%d", maxVal), func(t *testing.T) {
+			errCh := make(chan error, 1)
+			go func() {
+				defer func() {
+					r := recover()
+					if r != nil {
+						errCh <- fmt.Errorf("%v", r)
+					} else {
+						errCh <- nil
+					}
+				}()
+
+				bm1 := NewBitmap()
+				bm2 := NewBitmap()
+
+				for i := uint64(0); i <= maxVal-2; i++ {
+					bm1.Set(i)
+				}
+				bm2.Set(maxVal - 1)
+
+				bm1.Or(bm2)
+				bm1.Set(maxVal)
+
+				assert_.Equal(t, maxVal+1, uint64(bm1.GetCardinality()), "should have cardinality")
+				assert_.Equal(t, maxVal, bm1.Maximum(), "should have maximum")
+				assert_.Equal(t, uint64(0), bm1.Minimum(), "should have minimum")
+				assert_.True(t, bm1.Contains(maxVal-2), "should contain maxVal-2")
+				assert_.True(t, bm1.Contains(maxVal-1), "should contain maxVal-1")
+				assert_.True(t, bm1.Contains(maxVal), "should contain maxVal")
+			}()
+
+			assert_.NoError(t, <-errCh)
 		})
 	}
 }

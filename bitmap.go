@@ -918,6 +918,13 @@ func (dst *Bitmap) or(src *Bitmap, runMode int) {
 			if c := containerOr(dstCont, srcCont, buf, runMode|runInline); len(c) > 0 {
 				dst.copyAt(offset, c)
 				dst.setKey(key, offset)
+
+				dstCont = dst.getContainer(offset)
+				if dstCont[indexType] == typeArray {
+					if a := array(dstCont); a.isFull() {
+						dst.expandContainer(offset)
+					}
+				}
 			}
 		}
 	}
