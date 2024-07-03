@@ -282,11 +282,11 @@ func stepSize(n uint16) uint16 {
 // copyAt would copy over a given container via src, into the container at
 // offset. If src is a bitmap, it would copy it over directly. If src is an
 // array container, then it would follow these paths:
-// - If src is smaller than dst, copy it over.
-// - If not, look for target size for dst using the stepSize function.
-// - If target size is maxSize, then convert src to a bitmap container, and
-// 		copy to dst.
-// - If target size is not max size, then expand dst container and copy src.
+//   - If src is smaller than dst, copy it over.
+//   - If not, look for target size for dst using the stepSize function.
+//   - If target size is maxSize, then convert src to a bitmap container, and
+//     copy to dst.
+//   - If target size is not max size, then expand dst container and copy src.
 func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 	dstSize := ra.data[offset]
 	if dstSize == 0 {
@@ -385,17 +385,29 @@ func (ra *Bitmap) Set(x uint64) bool {
 		// offset might have been updated by setKey.
 		offset = ra.setKey(key, o)
 	}
+
+	// make sure there is enough space to put new value in array container
 	c := ra.getContainer(offset)
+	if c[indexType] == typeArray && array(c).isFull() {
+		ra.expandContainer(offset)
+
+		// not sure if needed after expanding,
+		// just in case get offset and container again
+		offset, has = ra.keys.getValue(key)
+		if !has {
+			// We need to add a container.
+			o := ra.newContainer(minContainerSize)
+			// offset might have been updated by setKey.
+			offset = ra.setKey(key, o)
+		}
+
+		c = ra.getContainer(offset)
+	}
+
 	switch c[indexType] {
 	case typeArray:
 		p := array(c)
-		if added := p.add(uint16(x)); !added {
-			return false
-		}
-		if p.isFull() {
-			ra.expandContainer(offset)
-		}
-		return true
+		return p.add(uint16(x))
 	case typeBitmap:
 		b := bitmap(c)
 		return b.add(uint16(x))
@@ -918,13 +930,6 @@ func (dst *Bitmap) or(src *Bitmap, runMode int) {
 			if c := containerOr(dstCont, srcCont, buf, runMode|runInline); len(c) > 0 {
 				dst.copyAt(offset, c)
 				dst.setKey(key, offset)
-
-				dstCont = dst.getContainer(offset)
-				if dstCont[indexType] == typeArray {
-					if a := array(dstCont); a.isFull() {
-						dst.expandContainer(offset)
-					}
-				}
 			}
 		}
 	}
