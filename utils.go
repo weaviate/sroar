@@ -74,7 +74,7 @@ func toByteSlice(b []uint16) []byte {
 // they are pointer-based (unsafe). The caller is responsible to
 // ensure that the input slice does not get garbage collected, deleted
 // or modified while you hold the returned slince.
-////
+// //
 func toUint16Slice(b []byte) (result []uint16) {
 	var u16s []uint16
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u16s))
@@ -84,7 +84,7 @@ func toUint16Slice(b []byte) (result []uint16) {
 	return u16s
 }
 
-// BytesToU32Slice converts the given byte slice to uint32 slice
+// toUint64Slice converts the given byte slice to uint64 slice
 func toUint64Slice(b []uint16) []uint64 {
 	var u64s []uint64
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u64s))
@@ -103,4 +103,24 @@ func Memclr(b []uint16) {
 	}
 	p := unsafe.Pointer(&b[0])
 	memclrNoHeapPointers(p, uintptr(len(b)))
+}
+
+// uint16To64Slice converts the given uint16 slice to uint64 slice
+func uint16To64Slice(u16s []uint16) (result []uint64) {
+	var u64s []uint64
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u64s))
+	hdr.Len = len(u16s) / 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&u16s[0]))
+	return u64s
+}
+
+// uint64To16Slice converts the given uint64 slice to uint16 slice
+func uint64To16Slice(u64s []uint64) (result []uint16) {
+	var u16s []uint16
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u16s))
+	hdr.Len = len(u64s) * 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&u64s[0]))
+	return u16s
 }
