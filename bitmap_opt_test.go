@@ -1,7 +1,9 @@
 package sroar
 
 import (
+	"fmt"
 	"math"
+	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -153,4 +155,161 @@ func TestMergeToSuperset(t *testing.T) {
 		require.Equal(t, 5548, dst.GetCardinality())
 		require.ElementsMatch(t, controlDst.ToArray(), dst.ToArray())
 	})
+}
+
+// go test -v -fuzz FuzzMergeToSuperset -fuzztime 600s -run ^$ github.com/weaviate/sroar
+func FuzzMergeToSuperset(f *testing.F) {
+	type testCase struct {
+		name          string
+		countElements int
+		countSubsets  int
+		countMerges   int
+		randSeed      int64
+	}
+
+	testCases := []testCase{
+		{
+			name:          "few elements, few subsets",
+			countElements: 1_000,
+			countSubsets:  3,
+			countMerges:   15,
+			randSeed:      1724861525311406000,
+		},
+		{
+			name:          "few elements, many subsets",
+			countElements: 2_000,
+			countSubsets:  15,
+			countMerges:   14,
+			randSeed:      172486152531140600,
+		},
+		{
+			name:          "more elements, few subsets",
+			countElements: 5_000,
+			countSubsets:  4,
+			countMerges:   13,
+			randSeed:      17248615253114060,
+		},
+		{
+			name:          "more elements, many subsets",
+			countElements: 7_000,
+			countSubsets:  16,
+			countMerges:   12,
+			randSeed:      1724861525311406,
+		},
+		{
+			name:          "many elements, few subsets",
+			countElements: 19_000,
+			countSubsets:  5,
+			countMerges:   11,
+			randSeed:      172486152531140,
+		},
+		{
+			name:          "many elements, many subsets",
+			countElements: 25_000,
+			countSubsets:  18,
+			countMerges:   10,
+			randSeed:      17248615253114,
+		},
+	}
+
+	for _, tc := range testCases {
+		f.Add(tc.countElements, tc.countSubsets, tc.countMerges, tc.randSeed)
+	}
+
+	f.Fuzz(runMergeToSuperSetTest)
+}
+
+func TestMergeToSuperset_VerifyFuzzCallback(t *testing.T) {
+	runMergeToSuperSetTest(t, 23_456, 17, 9, 1724861525311)
+}
+
+func runMergeToSuperSetTest(t *testing.T,
+	countElements int, countSubsets int, countMerges int, randSeed int64,
+) {
+	if countElements < 100 || countElements > 50_000 {
+		return
+	}
+	if countSubsets < 1 || countSubsets > 25 {
+		return
+	}
+	if countMerges < 1 || countMerges > 50 {
+		return
+	}
+
+	// max element is 3x bigger than capacity of single bm's container
+	maxX := (int(math.MaxUint16) + 1) * 3
+	buffer := make([]uint16, maxContainerSize)
+	rnd := rand.New(rand.NewSource(randSeed))
+
+	superset := NewBitmap()
+	subsets := make([]*Bitmap, countSubsets)
+	var control *Bitmap
+
+	t.Run("populate bitmaps", func(t *testing.T) {
+		for i := 0; i < countElements; i++ {
+			x := uint64(rnd.Intn(maxX))
+			superset.Set(x)
+		}
+
+		for i := range subsets {
+			subsets[i] = NewBitmap()
+			// each next subset bitmap contains fewer elements
+			// 1/2 of countElements, 1/3, 1/4, ...
+			for j, c := 0, countElements/(i+2); j < c; j++ {
+				x := uint64(rnd.Intn(maxX))
+				subsets[i].Set(x)
+				// ensure superset contains element of subset
+				superset.Set(x)
+			}
+		}
+
+		control = superset.Clone()
+	})
+
+	for i := 0; i < countMerges; i++ {
+		t.Run("merge bitmaps", func(t *testing.T) {
+			id := rnd.Intn(len(subsets))
+			subset := subsets[id]
+
+			switch mergeType := rnd.Intn(3); mergeType {
+			case 1:
+				t.Run(fmt.Sprintf("AND with %d", id), func(t *testing.T) {
+					superset.AndToSuperset(subset, buffer)
+					control.And(subset)
+					assertMatches(t, superset, control)
+				})
+			case 2:
+				t.Run(fmt.Sprintf("AND NOT with %d", id), func(t *testing.T) {
+					superset.AndNotToSuperset(subset, buffer)
+					control.AndNot(subset)
+					assertMatches(t, superset, control)
+				})
+			default:
+				t.Run(fmt.Sprintf("OR with %d", id), func(t *testing.T) {
+					superset.OrToSuperset(subset, buffer)
+					control.Or(subset)
+					assertMatches(t, superset, control)
+				})
+			}
+		})
+	}
+}
+
+func assertMatches(t *testing.T, bm1, bm2 *Bitmap) {
+	require.Equal(t, bm1.GetCardinality(), bm2.GetCardinality())
+
+	// check elements match using iterator as
+	// require.ElementsMatch(t, bm1.ToArray(), bm2.ToArray())
+	// causes fuzz test to fail frequently
+	cit := bm1.NewIterator()
+	sit := bm2.NewIterator()
+	for {
+		cx := cit.Next()
+		sx := sit.Next()
+		require.Equal(t, cx, sx)
+
+		if cx == 0 || sx == 0 {
+			break
+		}
+	}
 }
