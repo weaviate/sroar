@@ -113,65 +113,30 @@ type array []uint16
 // container.
 func (c array) find(x uint16) int {
 	N := getCardinality(c)
-	s := int(startIdx)
-	n := s + N
+	si := int(startIdx)
+	lo, hi := si, si+N-1
+	for lo+16 <= hi {
+		mid := lo + (hi-lo)/2
+		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, c[mid], x)
 
-	if len(c) < n {
-		panic(fmt.Sprintf("find: %d len(c) %d < n %d\n", x, len(c), n))
+		if c[mid] < x {
+			lo = mid + 1
+		} else if c[mid] > x {
+			// We should keep it equal, and not -1, because we'll take the first greater entry.
+			hi = mid
+		} else {
+			// fmt.Printf("returning mid: %d\n", mid)
+			return mid - si
+		}
 	}
-	for i := s; i < n; i++ {
-		if c[i] >= x {
-			return i - s
+	for ; lo <= hi; lo++ {
+		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, c[lo], x)
+		if c[lo] >= x {
+			return lo - si
 		}
 	}
 	return N
 }
-
-func (c array) find___(x uint16) int {
-	N := getCardinality(c)
-	for i := int(startIdx); i < int(startIdx)+N; i++ {
-		if len(c) <= int(i) {
-			panic(fmt.Sprintf("find: %d len(c) %d <= i %d\n", x, len(c), i))
-		}
-		if c[i] >= x {
-			return int(i - int(startIdx))
-		}
-	}
-	return N
-}
-
-// func (c array) find2(x uint16) int {
-// 	N := n.numKeys()
-// 	lo, hi := 0, N-1
-// 	for lo+16 <= hi {
-// 		mid := lo + (hi-lo)/2
-// 		ki := n.key(mid)
-// 		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, ki, k)
-
-// 		if ki < k {
-// 			lo = mid + 1
-// 		} else if ki > k {
-// 			hi = mid
-// 			// We should keep it equal, and not -1, because we'll take the first greater entry.
-// 		} else {
-// 			// fmt.Printf("returning mid: %d\n", mid)
-// 			return mid
-// 		}
-// 	}
-// 	for ; lo <= hi; lo++ {
-// 		ki := n.key(lo)
-// 		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, ki, k)
-// 		if ki >= k {
-// 			return lo
-// 		}
-// 	}
-// 	return N
-// 	// if N < 4 {
-// 	// simd.Search has a bug which causes this to return index 11 when it should be returning index
-// 	// 9.
-// 	// }
-// 	// return int(simd.Search(n[keyOffset(0):keyOffset(N)], k))
-// }
 
 func (c array) rank(x uint16) int {
 	N := getCardinality(c)
