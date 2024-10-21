@@ -345,7 +345,7 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 	ra.data[offset] = targetSz
 }
 
-func (ra Bitmap) getContainer(offset uint64) []uint16 {
+func (ra *Bitmap) getContainer(offset uint64) []uint16 {
 	data := ra.data[offset:]
 	if len(data) == 0 {
 		panic(fmt.Sprintf("No container found at offset: %d\n", offset))
