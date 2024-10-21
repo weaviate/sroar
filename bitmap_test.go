@@ -1137,11 +1137,13 @@ func Test_Issue_2_OutOfRange(t *testing.T) {
 
 var bm *Bitmap
 var control []uint64
+var batchThresholds []int
 
 func init() {
 	size := 100_000_000
-	setProb := float32(0.05)
+	setProb := float32(0.02)
 	controlProb := float32(0.01)
+	batchCount := 1000
 
 	bm = NewBitmap()
 	control = make([]uint64, 0, int(controlProb*float32(size)))
@@ -1155,17 +1157,40 @@ func init() {
 		}
 	}
 
+	delta := (len(control) + batchCount - 1) / batchCount
+	batchThresholds = make([]int, batchCount+1)
+	for i := 0; i < batchCount; i++ {
+		batchThresholds[i] = i * delta
+	}
+	batchThresholds[batchCount] = len(control)
+
 	fmt.Printf(" ==> num keys [%d]\n", bm.keys.numKeys())
 	fmt.Printf(" ==> card [%d]\n", bm.GetCardinality())
 	fmt.Printf(" ==> control [%d]\n", len(control))
+	fmt.Printf(" ==> batchThresholds %v\n", batchThresholds)
 	fmt.Println()
 }
 
-// go test -v -bench Benchmark_Contains_5Percent -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_Contains_5Percent(b *testing.B) {
+// go test -v -bench Benchmark_Contains -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_Contains(b *testing.B) {
 	for n := 0; n < b.N; n++ {
-		for _, x := range control {
-			bm.Contains(x)
+		for i, l := 0, len(batchThresholds); i < l-1; i++ {
+			from := batchThresholds[i]
+			to := batchThresholds[i+1]
+			for _, x := range control[from:to] {
+				bm.Contains(x)
+			}
+		}
+	}
+}
+
+// go test -v -bench Benchmark_Contained -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_Contained(b *testing.B) {
+	for n := 0; n < b.N; n++ {
+		for i, l := 0, len(batchThresholds); i < l-1; i++ {
+			from := batchThresholds[i]
+			to := batchThresholds[i+1]
+			bm.Contained(control[from:to])
 		}
 	}
 }
