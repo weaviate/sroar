@@ -1134,3 +1134,38 @@ func Test_Issue_2_OutOfRange(t *testing.T) {
 		})
 	}
 }
+
+var bm *Bitmap
+var control []uint64
+
+func init() {
+	size := 100_000_000
+	setProb := float32(0.05)
+	controlProb := float32(0.01)
+
+	bm = NewBitmap()
+	control = make([]uint64, 0, int(controlProb*float32(size)))
+
+	for x := 0; x < size; x++ {
+		if rand.Float32() < setProb {
+			bm.Set(uint64(x))
+		}
+		if rand.Float32() < controlProb {
+			control = append(control, uint64(x))
+		}
+	}
+
+	fmt.Printf(" ==> num keys [%d]\n", bm.keys.numKeys())
+	fmt.Printf(" ==> card [%d]\n", bm.GetCardinality())
+	fmt.Printf(" ==> control [%d]\n", len(control))
+	fmt.Println()
+}
+
+// go test -v -bench Benchmark_Contains_5Percent -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_Contains_5Percent(b *testing.B) {
+	for n := 0; n < b.N; n++ {
+		for _, x := range control {
+			bm.Contains(x)
+		}
+	}
+}
