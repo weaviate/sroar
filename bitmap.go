@@ -537,6 +537,29 @@ func (ra *Bitmap) Contains(x uint64) bool {
 	return false
 }
 
+func (ra *Bitmap) Contained(xs []uint64) []uint64 {
+	if ra == nil || ra.IsEmpty() {
+		return []uint64{}
+	}
+	if len(xs) == 0 {
+		return []uint64{}
+	}
+
+	// slices.SortFunc(xs, func(a, b uint64) int {
+	// 	if a > b {
+	// 		return 1
+	// 	}
+	// 	if a < b {
+	// 		return -1
+	// 	}
+	// 	return 0
+	// })
+
+	bm := FromSortedList(xs)
+	bm.And(ra)
+	return bm.ToArray()
+}
+
 func (ra *Bitmap) Remove(x uint64) bool {
 	if ra == nil {
 		return false
