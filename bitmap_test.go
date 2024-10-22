@@ -1167,7 +1167,7 @@ func init() {
 	fmt.Printf(" ==> num keys [%d]\n", bm.keys.numKeys())
 	fmt.Printf(" ==> card [%d]\n", bm.GetCardinality())
 	fmt.Printf(" ==> control [%d]\n", len(control))
-	fmt.Printf(" ==> batchThresholds %v\n", batchThresholds)
+	// fmt.Printf(" ==> batchThresholds %v\n", batchThresholds)
 	fmt.Println()
 }
 
@@ -1191,6 +1191,18 @@ func Benchmark_Contained(b *testing.B) {
 			from := batchThresholds[i]
 			to := batchThresholds[i+1]
 			bm.Contained(control[from:to])
+		}
+	}
+}
+
+// go test -v -bench Benchmark_Contained2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_Contained2(b *testing.B) {
+	buf := make([]uint16, maxContainerSize)
+	for n := 0; n < b.N; n++ {
+		for i, l := 0, len(batchThresholds); i < l-1; i++ {
+			from := batchThresholds[i]
+			to := batchThresholds[i+1]
+			bm.Contained2(control[from:to], buf)
 		}
 	}
 }
