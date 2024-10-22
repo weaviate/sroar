@@ -4,7 +4,7 @@ import (
 	"sync"
 )
 
-const minContainersForConcurrency = 16
+const minContainersForConcurrency = 4
 
 // AndToSuperset calculates intersection of current and incoming bitmap
 // It reuses containers present in current bitmap

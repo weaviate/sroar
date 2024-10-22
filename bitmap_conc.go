@@ -7,7 +7,7 @@ import (
 func (dst *Bitmap) AndConcurrently(src *Bitmap, containerBufs ...[]uint16) *Bitmap {
 	assert(len(containerBufs) > 0)
 
-	if src.IsEmpty() {
+	if src == nil {
 		dst.Reset()
 		return dst
 	}
@@ -20,15 +20,16 @@ func (dst *Bitmap) AndConcurrently(src *Bitmap, containerBufs ...[]uint16) *Bitm
 
 func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(from, to int, buf []uint16)) {
 	concurrency := len(bufs)
-	if numKeys < concurrency*minContainersForConcurrency {
+	if concurrency > 1 && numKeys < concurrency*minContainersForConcurrency {
 		concurrency = numKeys / minContainersForConcurrency
 	}
+
 	if concurrency <= 1 {
 		callback(0, numKeys, bufs[0])
 		return
 	}
 
-	delta := (numKeys + concurrency - 2) / concurrency
+	delta := (numKeys + concurrency - 1) / concurrency
 
 	wg := new(sync.WaitGroup)
 	wg.Add(concurrency - 1)
@@ -43,9 +44,8 @@ func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(f
 }
 
 func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
-	// ak := a.keys.key(ai)
-	// bi := b.keys.search(ak)
-	bi := 0
+	ak := a.keys.key(ai)
+	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
 
 	for ai < an && bi < bn {
