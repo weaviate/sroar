@@ -560,7 +560,7 @@ func (ra *Bitmap) Contained(xs []uint64) []uint64 {
 	return bm.ToArray()
 }
 
-func (ra *Bitmap) Contained2(xs []uint64, buf []uint16) []uint64 {
+func (ra *Bitmap) Contained2(xs []uint64, bufs [][]uint16) []uint64 {
 	if ra == nil || ra.IsEmpty() {
 		return []uint64{}
 	}
@@ -579,7 +579,7 @@ func (ra *Bitmap) Contained2(xs []uint64, buf []uint16) []uint64 {
 	// })
 
 	bm := FromSortedList(xs)
-	bm.AndConcurrently(ra, buf)
+	bm.AndConcurrently(ra, bufs...)
 	return bm.ToArray()
 }
 

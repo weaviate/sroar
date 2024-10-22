@@ -1197,12 +1197,17 @@ func Benchmark_Contained(b *testing.B) {
 
 // go test -v -bench Benchmark_Contained2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_Contained2(b *testing.B) {
-	buf := make([]uint16, maxContainerSize)
+	bufs := [][]uint16{
+		make([]uint16, maxContainerSize),
+		make([]uint16, maxContainerSize),
+		// make([]uint16, maxContainerSize),
+		// make([]uint16, maxContainerSize),
+	}
 	for n := 0; n < b.N; n++ {
 		for i, l := 0, len(batchThresholds); i < l-1; i++ {
 			from := batchThresholds[i]
 			to := batchThresholds[i+1]
-			bm.Contained2(control[from:to], buf)
+			bm.Contained2(control[from:to], bufs)
 		}
 	}
 }
