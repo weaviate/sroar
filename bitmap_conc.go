@@ -13,7 +13,7 @@ func (dst *Bitmap) AndConcurrently(src *Bitmap, containerBufs ...[]uint16) *Bitm
 	}
 
 	concurrentlyOnContainersRange(dst.keys.numKeys(), containerBufs, func(from, to int, buf []uint16) {
-		andRangeContainersInline(dst, src, from, to, buf)
+		andRangeContainersInline(dst, src, from, to, buf, runInline)
 	})
 	return dst
 }
@@ -55,7 +55,7 @@ func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(f
 	wg.Wait()
 }
 
-func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
+func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
@@ -68,7 +68,12 @@ func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			containerAndAlt(ac, bc, buf, runInline)
+			if c := containerAndAlt(ac, bc, buf, runMode); len(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+			}
 			ai++
 			bi++
 		} else if ak < bk {
@@ -89,6 +94,6 @@ func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
 
 func (ra *Bitmap) And3(bm *Bitmap) {
 
-	andRangeContainersInline(ra, bm, 0, ra.keys.numKeys(), make([]uint16, maxContainerSize))
+	andRangeContainersInline(ra, bm, 0, ra.keys.numKeys(), make([]uint16, maxContainerSize), runInline)
 
 }
