@@ -29,17 +29,29 @@ func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(f
 		return
 	}
 
-	delta := (numKeys + concurrency - 1) / concurrency
-
 	wg := new(sync.WaitGroup)
 	wg.Add(concurrency - 1)
-	for i := 0; i < concurrency-1; i++ {
-		go func(i int) {
-			callback(delta*i, delta*(i+1), bufs[i])
+
+	delta := numKeys / concurrency
+	rem := numKeys - delta*concurrency
+	from := 0
+	for i := 0; i < rem; i++ {
+		to := from + delta + 1
+		go func(i, from int) {
+			callback(from, to, bufs[i])
 			wg.Done()
-		}(i)
+		}(i, from)
+		from = to
 	}
-	callback(delta*(concurrency-1), numKeys, bufs[concurrency-1])
+	for i := rem; i < concurrency-1; i++ {
+		to := from + delta
+		go func(i, from int) {
+			callback(from, to, bufs[i])
+			wg.Done()
+		}(i, from)
+		from = to
+	}
+	callback(from, numKeys, bufs[concurrency-1])
 	wg.Wait()
 }
 
