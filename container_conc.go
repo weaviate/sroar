@@ -1,6 +1,8 @@
 package sroar
 
-import "math/bits"
+import (
+	"math/bits"
+)
 
 func containerAndConc(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
 	at := ac[indexType]
@@ -122,7 +124,9 @@ func (c array) andBitmapConc(other bitmap, buf []uint16, runMode int) []uint16 {
 }
 
 func (b bitmap) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
+	var obuf []uint16
 	if runMode&runInline > 0 {
+		obuf = buf
 		buf = b
 	} else {
 		copy(buf, b)
@@ -134,18 +138,28 @@ func (b bitmap) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
 		// reset bitmap
 		bitmap(buf).zeroOut()
 	} else {
-		// merge
-		for _, x := range other.all() {
-			idx := x / 16
-			pos := x % 16
-
-			val := &buf[startIdx+idx]
-			before := bits.OnesCount16(*val)
-			*val &= bitmapMask[pos]
-			after := bits.OnesCount16(*val)
-			bnum -= before - after
+		// convert array to bitmap
+		if obuf == nil {
+			// not inline mode, buf already in use, new one needed
+			obuf = make([]uint16, maxContainerSize)
+		} else {
+			copy(obuf, zeroContainer)
 		}
-		setCardinality(buf, bnum)
+		for _, x := range other.all() {
+			idx := x >> 4
+			pos := x & 0xF
+			obuf[startIdx+idx] |= bitmapMask[pos]
+		}
+		// merge
+		b64 := uint16To64Slice(buf[startIdx:])
+		o64 := uint16To64Slice(obuf[startIdx:])
+
+		var num int
+		for i := range b64 {
+			b64[i] &= o64[i]
+			num += bits.OnesCount64(b64[i])
+		}
+		setCardinality(buf, num)
 	}
 
 	if runMode&runInline > 0 {
