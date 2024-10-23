@@ -1158,20 +1158,32 @@ func init() {
 		}
 	}
 
-	delta := (len(control) + controlsCount - 1) / controlsCount
-	for i := 0; i < controlsCount-1; i++ {
-		controls[i] = control[i*delta : (i+1)*delta]
+	delta := len(control) / controlsCount
+	rem := len(control) - delta*controlsCount
+
+	from := 0
+	for i := 0; i < rem; i++ {
+		to := from + delta + 1
+		fmt.Printf("f[%d]t[%d] ", from, to)
+		controls[i] = control[from:to]
+		from = to
 	}
-	controls[controlsCount-1] = control[(controlsCount-1)*delta:]
+	for i := rem; i < controlsCount-1; i++ {
+		to := from + delta
+		fmt.Printf("f[%d]t[%d] ", from, to)
+		controls[i] = control[from:to]
+		from = to
+	}
+	controls[controlsCount-1] = control[from:]
 
 	fmt.Printf(" ==> num keys [%d]\n", bm.keys.numKeys())
 	fmt.Printf(" ==> card [%d]\n", bm.GetCardinality())
 	fmt.Printf(" ==> control [%d]\n", len(control))
-	fmt.Printf(" ==> controlsCount [%d]:", controlsCount)
-	for i := range controls {
-		fmt.Printf(" %d", len(controls[i]))
-	}
-	fmt.Println()
+	// fmt.Printf(" ==> controlsCount [%d]:", controlsCount)
+	// for i := range controls {
+	// 	fmt.Printf(" %d", len(controls[i]))
+	// }
+	// fmt.Println()
 	fmt.Println()
 }
 
