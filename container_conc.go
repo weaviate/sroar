@@ -4,34 +4,34 @@ import (
 	"math/bits"
 )
 
-func containerAndConc(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
+func containerAndAlt(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
 	at := ac[indexType]
 	bt := bc[indexType]
 
 	if at == typeArray && bt == typeArray {
 		left := array(ac)
 		right := array(bc)
-		return left.andArrayConc(right, buf, runMode)
+		return left.andArrayAlt(right, buf, runMode)
 	}
 	if at == typeArray && bt == typeBitmap {
 		left := array(ac)
 		right := bitmap(bc)
-		return left.andBitmapConc(right, buf, runMode)
+		return left.andBitmapAlt(right, buf, runMode)
 	}
 	if at == typeBitmap && bt == typeArray {
 		left := bitmap(ac)
 		right := array(bc)
-		return left.andArrayConc(right, buf, runMode)
+		return left.andArrayAlt(right, buf, runMode)
 	}
 	if at == typeBitmap && bt == typeBitmap {
 		left := bitmap(ac)
 		right := bitmap(bc)
-		return left.andBitmapConc(right, buf, runMode)
+		return left.andBitmapAlt(right, buf, runMode)
 	}
 	panic("containerAnd: We should not reach here")
 }
 
-func (c array) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
+func (c array) andArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 	if runMode&runInline == 0 {
 		if getCardinality(c) == 0 || getCardinality(other) == 0 {
 			out := buf[:minContainerSize]
@@ -67,7 +67,7 @@ func (c array) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
 	return nil
 }
 
-func (c array) andBitmapConc(other bitmap, buf []uint16, runMode int) []uint16 {
+func (c array) andBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	if runMode&runInline == 0 {
 		if getCardinality(c) == 0 || getCardinality(other) == 0 {
 			out := buf[:minContainerSize]
@@ -107,7 +107,7 @@ func (c array) andBitmapConc(other bitmap, buf []uint16, runMode int) []uint16 {
 	return nil
 }
 
-func (b bitmap) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
+func (b bitmap) andArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 	if runMode&runInline > 0 {
 		if bnum := getCardinality(b); bnum == 0 {
 			// do nothing, bitmap already empty
@@ -157,7 +157,7 @@ func (b bitmap) andArrayConc(other array, buf []uint16, runMode int) []uint16 {
 	return out
 }
 
-func (b bitmap) andBitmapConc(other bitmap, buf []uint16, runMode int) []uint16 {
+func (b bitmap) andBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	if runMode&runInline > 0 {
 		buf = b
 	} else {

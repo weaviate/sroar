@@ -68,7 +68,7 @@ func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			containerAndConc(ac, bc, buf, runInline)
+			containerAndAlt(ac, bc, buf, runInline)
 			ai++
 			bi++
 		} else if ak < bk {
@@ -85,4 +85,10 @@ func andRangeContainersInline(a, b *Bitmap, ai, an int, buf []uint16) {
 		ac := a.getContainer(off)
 		zeroOutContainer(ac)
 	}
+}
+
+func (ra *Bitmap) And3(bm *Bitmap) {
+
+	andRangeContainersInline(ra, bm, 0, ra.keys.numKeys(), make([]uint16, maxContainerSize))
+
 }
