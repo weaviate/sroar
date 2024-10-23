@@ -1137,16 +1137,17 @@ func Test_Issue_2_OutOfRange(t *testing.T) {
 
 var bm *Bitmap
 var control []uint64
-var batchThresholds []int
+var controls [][]uint64
 
 func init() {
 	size := 100_000_000
 	setProb := float32(0.02)
 	controlProb := float32(0.01)
-	batchCount := 1000
+	controlsCount := 1000
 
 	bm = NewBitmap()
 	control = make([]uint64, 0, int(controlProb*float32(size)))
+	controls = make([][]uint64, controlsCount)
 
 	for x := 0; x < size; x++ {
 		if rand.Float32() < setProb {
@@ -1157,41 +1158,47 @@ func init() {
 		}
 	}
 
-	delta := (len(control) + batchCount - 1) / batchCount
-	batchThresholds = make([]int, batchCount+1)
-	for i := 0; i < batchCount; i++ {
-		batchThresholds[i] = i * delta
+	delta := (len(control) + controlsCount - 1) / controlsCount
+	for i := 0; i < controlsCount-1; i++ {
+		controls[i] = control[i*delta : (i+1)*delta]
 	}
-	batchThresholds[batchCount] = len(control)
+	controls[controlsCount-1] = control[(controlsCount-1)*delta:]
 
 	fmt.Printf(" ==> num keys [%d]\n", bm.keys.numKeys())
 	fmt.Printf(" ==> card [%d]\n", bm.GetCardinality())
 	fmt.Printf(" ==> control [%d]\n", len(control))
-	// fmt.Printf(" ==> batchThresholds %v\n", batchThresholds)
+	fmt.Printf(" ==> controlsCount [%d]:", controlsCount)
+	for i := range controls {
+		fmt.Printf(" %d", len(controls[i]))
+	}
+	fmt.Println()
 	fmt.Println()
 }
 
 // go test -v -bench Benchmark_Contains -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_Contains(b *testing.B) {
 	for n := 0; n < b.N; n++ {
-		for i, l := 0, len(batchThresholds); i < l-1; i++ {
-			from := batchThresholds[i]
-			to := batchThresholds[i+1]
-			for _, x := range control[from:to] {
+		d := time.Duration(0)
+		for i := range controls {
+			for _, x := range controls[i] {
+				t := time.Now()
 				bm.Contains(x)
+				d += time.Since(t)
 			}
 		}
+		fmt.Printf(" ==> duration [%s]\n", d)
 	}
 }
 
 // go test -v -bench Benchmark_Contained -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_Contained(b *testing.B) {
 	for n := 0; n < b.N; n++ {
-		for i, l := 0, len(batchThresholds); i < l-1; i++ {
-			from := batchThresholds[i]
-			to := batchThresholds[i+1]
-			bm.Contained(control[from:to])
+		d := time.Duration(0)
+		for i := range controls {
+			_, d1 := bm.Contained(controls[i])
+			d += d1
 		}
+		fmt.Printf(" ==> duration [%s]\n", d)
 	}
 }
 
@@ -1200,14 +1207,40 @@ func Benchmark_Contained2(b *testing.B) {
 	bufs := [][]uint16{
 		make([]uint16, maxContainerSize),
 		make([]uint16, maxContainerSize),
-		// make([]uint16, maxContainerSize),
-		// make([]uint16, maxContainerSize),
+		make([]uint16, maxContainerSize),
+		make([]uint16, maxContainerSize),
 	}
 	for n := 0; n < b.N; n++ {
-		for i, l := 0, len(batchThresholds); i < l-1; i++ {
-			from := batchThresholds[i]
-			to := batchThresholds[i+1]
-			bm.Contained2(control[from:to], bufs)
+		d := time.Duration(0)
+		for i := range controls {
+			_, d1 := bm.Contained2(controls[i], bufs)
+			d += d1
 		}
+		fmt.Printf(" ==> duration [%s]\n", d)
 	}
 }
+
+// // go test -v -bench Benchmark_ContainedBoth -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_ContainedBoth(b *testing.B) {
+// 	bufs := [][]uint16{
+// 		make([]uint16, maxContainerSize),
+// 		make([]uint16, maxContainerSize),
+// 		make([]uint16, maxContainerSize),
+// 		make([]uint16, maxContainerSize),
+// 	}
+// 	for n := 0; n < b.N; n++ {
+// 		d1 := time.Duration(0)
+// 		d2 := time.Duration(0)
+// 		for i := range controls {
+// 			// bm.Contained(controls[i])
+// 			_, d11 := bm.Contained(controls[i])
+// 			d1 += d11
+
+// 			// bm.Contained2(controls[i], bufs)
+// 			_, d22 := bm.Contained2(controls[i], bufs)
+// 			d2 += d22
+// 		}
+// 		fmt.Printf(" ==> duration and      [%s]\n", d1)
+// 		fmt.Printf(" ==> duration and conc [%s]\n", d2)
+// 	}
+// }

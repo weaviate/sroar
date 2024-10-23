@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -537,12 +538,12 @@ func (ra *Bitmap) Contains(x uint64) bool {
 	return false
 }
 
-func (ra *Bitmap) Contained(xs []uint64) []uint64 {
+func (ra *Bitmap) Contained(xs []uint64) ([]uint64, time.Duration) {
 	if ra == nil || ra.IsEmpty() {
-		return []uint64{}
+		return []uint64{}, 0
 	}
 	if len(xs) == 0 {
-		return []uint64{}
+		return []uint64{}, 0
 	}
 
 	// slices.SortFunc(xs, func(a, b uint64) int {
@@ -556,16 +557,19 @@ func (ra *Bitmap) Contained(xs []uint64) []uint64 {
 	// })
 
 	bm := FromSortedList(xs)
+	t := time.Now()
 	bm.And(ra)
-	return bm.ToArray()
+	// a := bm.ToArray()
+	d := time.Since(t)
+	return nil, d
 }
 
-func (ra *Bitmap) Contained2(xs []uint64, bufs [][]uint16) []uint64 {
+func (ra *Bitmap) Contained2(xs []uint64, bufs [][]uint16) ([]uint64, time.Duration) {
 	if ra == nil || ra.IsEmpty() {
-		return []uint64{}
+		return []uint64{}, 0
 	}
 	if len(xs) == 0 {
-		return []uint64{}
+		return []uint64{}, 0
 	}
 
 	// slices.SortFunc(xs, func(a, b uint64) int {
@@ -579,8 +583,11 @@ func (ra *Bitmap) Contained2(xs []uint64, bufs [][]uint16) []uint64 {
 	// })
 
 	bm := FromSortedList(xs)
+	t := time.Now()
 	bm.AndConcurrently(ra, bufs...)
-	return bm.ToArray()
+	// a := bm.ToArray()
+	d := time.Since(t)
+	return nil, d
 }
 
 func (ra *Bitmap) Remove(x uint64) bool {
