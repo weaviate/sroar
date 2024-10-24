@@ -218,42 +218,36 @@ func (c array) andArrayAlt(other array, runMode int) []uint16 {
 	cnum := getCardinality(c)
 	onum := getCardinality(other)
 
-	if runMode&runInline == 0 {
-		if cnum == 0 || onum == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
+	if cnum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
 		}
-	} else if cnum == 0 {
 		// do nothing, array already empty
 		return nil
-	} else if onum == 0 {
+	}
+	if onum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
 		// reset array
 		c.zeroOut()
 		return nil
 	}
 
+	// merge
 	min := min(cnum, onum)
 	size := max(min+int(startIdx), minContainerSize)
 	out := make([]uint16, size)
-
-	// merge
 	setc := c.all()
 	seto := other.all()
 	num := intersection2by2(setc, seto, out[startIdx:])
-	pos := startIdx + uint16(num)
+	lastIdx := startIdx + uint16(num)
 
 	if runMode&runInline == 0 {
-		out = out[:max(int(pos), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
+		return bufAsArray(out, lastIdx)
 	}
 	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:pos])
+	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
 }
 
@@ -261,46 +255,40 @@ func (c array) andBitmapAlt(other bitmap, runMode int) []uint16 {
 	cnum := getCardinality(c)
 	onum := getCardinality(other)
 
-	if runMode&runInline == 0 {
-		if cnum == 0 || onum == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
+	if cnum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
 		}
-	} else if cnum == 0 {
 		// do nothing, array already empty
 		return nil
-	} else if onum == 0 {
+	}
+	if onum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
 		// reset array
 		c.zeroOut()
 		return nil
 	}
 
-	min := min(cnum, onum)
-	size := max(min+int(startIdx), minContainerSize)
-	out := make([]uint16, size)
-
 	// merge
-	pos := startIdx
+	min := min(cnum, onum)
+	size := max(int(startIdx)+min, minContainerSize)
+	out := make([]uint16, size)
+	lastIdx := startIdx
 	for _, x := range c.all() {
 		if other.bitValue(x) > 0 {
-			out[pos] = x
-			pos++
+			out[lastIdx] = x
+			lastIdx++
 		}
 	}
-	num := int(pos - startIdx)
+	num := int(lastIdx - startIdx)
 
 	if runMode&runInline == 0 {
-		out = out[:max(int(pos), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
+		return bufAsArray(out, lastIdx)
 	}
 	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:pos])
+	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
 }
 
@@ -390,33 +378,45 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 }
 
 func (b bitmap) andBitmapAlt(other bitmap, runMode int) []uint16 {
+	bnum := getCardinality(b)
+	onum := getCardinality(other)
+
+	if bnum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
+		// do nothing, array already empty
+		return nil
+	}
+	if onum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
+		// reset bitmap
+		bitmap(b).zeroOut()
+		return nil
+	}
+
+	// merge
 	out := b
 	if runMode&runInline == 0 {
 		out = make([]uint16, maxContainerSize)
 		copy(out, b)
 	}
 
-	if bnum := getCardinality(out); bnum == 0 {
-		// do nothing, bitmap already empty
-	} else if onum := getCardinality(other); onum == 0 {
-		// reset bitmap
-		bitmap(out).zeroOut()
-	} else {
-		// merge
-		b64 := uint16To64Slice(out[startIdx:])
-		o64 := uint16To64Slice(other[startIdx:])
-		var num int
-		for i := range b64 {
-			b64[i] &= o64[i]
-			num += bits.OnesCount64(b64[i])
-		}
-		setCardinality(out, num)
+	b64 := uint16To64Slice(out[startIdx:])
+	o64 := uint16To64Slice(other[startIdx:])
+	var num int
+	for i := range b64 {
+		b64[i] &= o64[i]
+		num += bits.OnesCount64(b64[i])
 	}
+	setCardinality(out, num)
 
-	if runMode&runInline > 0 {
-		return nil
+	if runMode&runInline == 0 {
+		return out
 	}
-	return out
+	return nil
 }
 
 func containerAndNotAlt(ac, bc []uint16, runMode int) []uint16 {
@@ -452,25 +452,14 @@ func (c array) andNotArrayAlt(other array, runMode int) []uint16 {
 
 	if cnum == 0 {
 		if runMode&runInline == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
+			return emptyArray()
 		}
 		// do nothing, array already empty
 		return nil
 	}
 	if onum == 0 {
 		if runMode&runInline == 0 {
-			lastIdx := startIdx + uint16(cnum)
-			size := max(int(lastIdx), minContainerSize)
-			out := make([]uint16, size)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, cnum)
-			copy(out, c[startIdx:lastIdx])
-			return out
+			return copyArray(c)
 		}
 		// do nothing, nothing to remove
 	}
@@ -484,11 +473,7 @@ func (c array) andNotArrayAlt(other array, runMode int) []uint16 {
 	lastIdx := startIdx + uint16(num)
 
 	if runMode&runInline == 0 {
-		out = out[:max(int(lastIdx), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
+		return bufAsArray(out, lastIdx)
 	}
 	setCardinality(c, num)
 	copy(c[startIdx:], out[startIdx:lastIdx])
@@ -501,25 +486,14 @@ func (c array) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 
 	if cnum == 0 {
 		if runMode&runInline == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
+			return emptyArray()
 		}
 		// do nothing, array already empty
 		return nil
 	}
 	if onum == 0 {
 		if runMode&runInline == 0 {
-			lastIdx := startIdx + uint16(cnum)
-			size := max(int(lastIdx), minContainerSize)
-			out := make([]uint16, size)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, cnum)
-			copy(out, c[startIdx:lastIdx])
-			return out
+			return copyArray(c)
 		}
 		// do nothing, nothing to remove
 	}
@@ -534,18 +508,20 @@ func (c array) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 			lastIdx++
 		}
 	}
-	num := int(lastIdx - startIdx)
 
 	if runMode&runInline == 0 {
-		out = out[:max(int(lastIdx), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
+		return bufAsArray(out, lastIdx)
 	}
-	setCardinality(c, num)
+	setCardinality(c, int(lastIdx-startIdx))
 	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
+}
+
+func (b bitmap) andNotArrayXXX(other array) []uint16 {
+	for _, e := range other.all() {
+		b.remove(e)
+	}
+	return b
 }
 
 func (b bitmap) andNotArrayAlt(other array, runMode int) []uint16 {
@@ -634,31 +610,76 @@ func (b bitmap) andNotArrayAlt(other array, runMode int) []uint16 {
 }
 
 func (b bitmap) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
-	out := b
-	if runMode&runInline == 0 {
-		out = make([]uint16, maxContainerSize)
-		copy(out, b)
-	}
+	bnum := getCardinality(b)
+	onum := getCardinality(other)
 
-	if bnum := getCardinality(out); bnum == 0 {
-		// do nothing, bitmap already empty
-	} else if onum := getCardinality(other); onum == 0 {
-		// reset bitmap
-		bitmap(out).zeroOut()
-	} else {
-		// merge
-		b64 := uint16To64Slice(out[startIdx:])
-		o64 := uint16To64Slice(other[startIdx:])
-		var num int
-		for i := range b64 {
-			b64[i] &= o64[i]
-			num += bits.OnesCount64(b64[i])
+	if bnum == 0 {
+		if runMode&runInline == 0 {
+			return emptyArray()
 		}
-		setCardinality(out, num)
-	}
-
-	if runMode&runInline > 0 {
+		// do nothing, array already empty
 		return nil
 	}
+	if onum == 0 {
+		if runMode&runInline == 0 {
+			return copyBitmap(b)
+		}
+		// do nothing, nothing to remove
+		return nil
+	}
+
+	// merge
+	out := b
+	if runMode&runInline == 0 {
+		out = copyBitmap(b)
+	}
+
+	b64 := uint16To64Slice(out[startIdx:])
+	o64 := uint16To64Slice(other[startIdx:])
+	var num int
+	for i := range b64 {
+		b64[i] &^= o64[i]
+		num += bits.OnesCount64(b64[i])
+	}
+	setCardinality(out, num)
+
+	if runMode&runInline == 0 {
+		return out
+	}
+	return nil
+}
+
+func emptyArray() []uint16 {
+	out := make([]uint16, minContainerSize)
+	out[indexType] = typeArray
+	out[indexSize] = uint16(len(out))
+	setCardinality(out, 0)
+	return out
+}
+
+func copyArray(c array) []uint16 {
+	cnum := getCardinality(c)
+	lastIdx := startIdx + uint16(cnum)
+	size := max(int(lastIdx), minContainerSize)
+
+	out := make([]uint16, size)
+	out[indexType] = typeArray
+	out[indexSize] = uint16(len(out))
+	setCardinality(out, cnum)
+	copy(out, c[startIdx:lastIdx])
+	return out
+}
+
+func copyBitmap(b bitmap) []uint16 {
+	out := make([]uint16, maxContainerSize)
+	copy(out, b)
+	return out
+}
+
+func bufAsArray(buf []uint16, lastIdx uint16) []uint16 {
+	out := buf[:max(int(lastIdx), minContainerSize)]
+	out[indexType] = typeArray
+	out[indexSize] = uint16(len(out))
+	setCardinality(out, int(lastIdx-startIdx))
 	return out
 }
