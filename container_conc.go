@@ -348,7 +348,7 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 	}
 
 	// if few elements, convert container to array
-	if onum < 2048 {
+	if onum < 1024 {
 		size := max(onum+int(startIdx), minContainerSize)
 		buf := make([]uint16, size)
 
