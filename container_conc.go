@@ -298,14 +298,14 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 		if runMode&runInline == 0 {
 			return emptyArray()
 		}
-		// do nothing, array already empty
+		// do nothing, bitmap already empty
 		return nil
 	}
 	if onum == 0 {
 		if runMode&runInline == 0 {
 			return emptyArray()
 		}
-		// reset array
+		// reset bitmap
 		b.zeroOut()
 		return nil
 	}
@@ -596,6 +596,54 @@ func containerOrAlt(ac, bc []uint16, runMode int) []uint16 {
 	panic("containerAnd: We should not reach here")
 }
 
+func (b bitmap) orArrayAlt(other array, runMode int) []uint16 {
+	bnum := getCardinality(b)
+	onum := getCardinality(other)
+
+	if bnum == 0 {
+		if runMode&runInline == 0 {
+			return copyArray(other)
+		}
+		// overwrite converting to array
+		b[indexType] = typeArray
+		setCardinality(b, onum)
+		copy(b[startIdx:], b[startIdx:startIdx+uint16(onum)])
+		return nil
+	}
+	if onum == 0 || bnum == maxCardinality {
+		if runMode&runInline == 0 {
+			return copyBitmap(b)
+		}
+		// do nothing, nothing to add
+		return nil
+	}
+
+	buf := make([]uint16, maxContainerSize)
+	for _, x := range other.all() {
+		idx := x >> 4
+		pos := x & 0xF
+		buf[startIdx+idx] |= bitmapMask[pos]
+	}
+
+	dst64 := uint16To64Slice(b[startIdx:])
+	src64 := uint16To64Slice(buf[startIdx:])
+	if runMode&runInline == 0 {
+		dst64, src64 = src64, dst64
+	}
+	var num int
+	for i := range dst64 {
+		dst64[i] |= src64[i]
+		num += bits.OnesCount64(dst64[i])
+	}
+
+	if runMode&runInline == 0 {
+		setCardinality(buf, num)
+		return buf
+	}
+	setCardinality(b, num)
+	return nil
+}
+
 func (b bitmap) orBitmapAlt(other bitmap, runMode int) []uint16 {
 	bnum := getCardinality(b)
 	onum := getCardinality(other)
@@ -623,12 +671,12 @@ func (b bitmap) orBitmapAlt(other bitmap, runMode int) []uint16 {
 		copy(out, b)
 	}
 
-	b64 := uint16To64Slice(out[startIdx:])
-	o64 := uint16To64Slice(other[startIdx:])
+	dst64 := uint16To64Slice(out[startIdx:])
+	src64 := uint16To64Slice(other[startIdx:])
 	var num int
-	for i := range b64 {
-		b64[i] |= o64[i]
-		num += bits.OnesCount64(b64[i])
+	for i := range dst64 {
+		dst64[i] |= src64[i]
+		num += bits.OnesCount64(dst64[i])
 	}
 	setCardinality(out, num)
 
