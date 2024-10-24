@@ -186,18 +186,18 @@ func AndAlt(a, b *Bitmap) *Bitmap {
 }
 
 func (ra *Bitmap) AndNotAlt(bm *Bitmap) *Bitmap {
-	if bm.IsEmpty() {
+	if bm.IsEmpty() || ra.IsEmpty() {
 		return ra
 	}
 
-	andNotContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
+	andNotContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys(), runInline)
 	return ra
 }
 
-func andNotContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
-	ak := a.keys.key(ai)
-	bi := b.keys.search(ak)
-	bn := b.keys.numKeys()
+func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int, runMode int) {
+	bk := b.keys.key(bi)
+	ai := a.keys.search(bk)
+	an := a.keys.numKeys()
 
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
