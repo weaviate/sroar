@@ -158,6 +158,7 @@ func andContainersInRangeAlt(a, b *Bitmap, ai, an int) {
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
 			if c := containerAndAlt(ac, bc, runInline); len(c) > 0 {
+				// TODO:AL copyAt?
 				// create a new container and update the key offset to this container.
 				offset := a.newContainer(uint16(len(c)))
 				copy(a.data[offset:], c)
@@ -214,6 +215,7 @@ func AndNotAlt(a, b *Bitmap) *Bitmap {
 			off := a.keys.val(ai)
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
+				// create a new container and update the key offset to this container.
 				offset := res.newContainer(uint16(len(ac)))
 				copy(res.data[offset:], ac)
 				res.setKey(ak, offset)
@@ -228,6 +230,7 @@ func AndNotAlt(a, b *Bitmap) *Bitmap {
 		ac := a.getContainer(off)
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
+			// create a new container and update the key offset to this container.
 			off = res.newContainer(uint16(len(ac)))
 			copy(res.data[off:], ac)
 			res.setKey(ak, off)
@@ -260,6 +263,7 @@ func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
 			if c := containerAndNotAlt(ac, bc, runInline); len(c) > 0 {
+				// TODO:AL copyAt?
 				// create a new container and update the key offset to this container.
 				offset := a.newContainer(uint16(len(c)))
 				copy(a.data[offset:], c)
@@ -275,85 +279,60 @@ func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
 	}
 }
 
-// func (ra *Bitmap) OrAlt(bm *Bitmap) *Bitmap {
-// 	if bm.IsEmpty() {
-// 		return ra
-// 	}
+func (ra *Bitmap) OrAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() {
+		return ra
+	}
 
-// 	orContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys())
-// 	return ra
-// }
+	orContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys())
+	return ra
+}
 
-// func orContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
-// 	bk := b.keys.key(bi)
-// 	ai := a.keys.search(bk)
-// 	an := a.keys.numKeys()
+func orContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
+	bk := b.keys.key(bi)
+	ai := a.keys.search(bk)
+	an := a.keys.numKeys()
 
-// 	for ai < an && bi < bn {
-// 		ak := a.keys.key(ai)
-// 		bk := b.keys.key(bi)
-// 		if ak == bk {
-// 			off := a.keys.val(ai)
-// 			ac := a.getContainer(off)
-// 			off = b.keys.val(bi)
-// 			bc := b.getContainer(off)
-// 			if c := containerOrAlt(ac, bc, runInline); len(c) > 0 {
-// 				// create a new container and update the key offset to this container.
-// 				offset := a.newContainer(uint16(len(c)))
-// 				copy(a.data[offset:], c)
-// 				a.setKey(ak, offset)
-// 			}
-// 			ai++
-// 			bi++
-// 		} else if ak < bk {
-// 			ai++
-// 		} else {
-// 			off := b.keys.val(bi)
-// 			bc := b.getContainer(off)
-// 			if getCardinality(bc) > 0 {
-// 				offset := a.newContainer(uint16(len(bc)))
-// 				copy(a.data[offset:], bc)
-// 				a.setKey(ak, offset)
-// 			}
-// 			bi++
-// 		}
-// 	}
-// 	for ; bi < bn; bi++ {
-// 		off := b.keys.val(bi)
-// 		bc := b.getContainer(off)
-// 		if getCardinality(bc) > 0 {
-// 			bk := b.keys.key(bi)
-// 			offset := a.newContainer(uint16(len(bc)))
-// 			copy(a.data[offset:], bc)
-// 			a.setKey(bk, offset)
-// 		}
-// 	}
-
-// 	srcIdx, numKeys := 0, src.keys.numKeys()
-
-// 	buf := make([]uint16, maxContainerSize)
-// 	for ; srcIdx < numKeys; srcIdx++ {
-// 		srcCont := src.getContainer(src.keys.val(srcIdx))
-// 		if getCardinality(srcCont) == 0 {
-// 			continue
-// 		}
-
-// 		key := src.keys.key(srcIdx)
-
-// 		dstIdx := dst.keys.search(key)
-// 		if dstIdx >= dst.keys.numKeys() || dst.keys.key(dstIdx) != key {
-// 			// srcCont doesn't exist in dst. So, copy it over.
-// 			offset := dst.newContainer(uint16(len(srcCont)))
-// 			copy(dst.getContainer(offset), srcCont)
-// 			dst.setKey(key, offset)
-// 		} else {
-// 			// Container exists in dst as well. Do an inline containerOr.
-// 			offset := dst.keys.val(dstIdx)
-// 			dstCont := dst.getContainer(offset)
-// 			if c := containerOr(dstCont, srcCont, buf, runMode|runInline); len(c) > 0 {
-// 				dst.copyAt(offset, c)
-// 				dst.setKey(key, offset)
-// 			}
-// 		}
-// 	}
-// }
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerOrAlt(ac, bc, runInline); len(c) > 0 {
+				// TODO:AL copyAt?
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			off := b.keys.val(bi)
+			bc := b.getContainer(off)
+			if getCardinality(bc) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(bc)))
+				copy(a.data[offset:], bc)
+				a.setKey(ak, offset)
+			}
+			bi++
+		}
+	}
+	for ; bi < bn; bi++ {
+		off := b.keys.val(bi)
+		bc := b.getContainer(off)
+		if getCardinality(bc) > 0 {
+			bk := b.keys.key(bi)
+			// create a new container and update the key offset to this container.
+			offset := a.newContainer(uint16(len(bc)))
+			copy(a.data[offset:], bc)
+			a.setKey(bk, offset)
+		}
+	}
+}

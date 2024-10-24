@@ -569,6 +569,75 @@ func (b bitmap) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 	return nil
 }
 
+func containerOrAlt(ac, bc []uint16, runMode int) []uint16 {
+	at := ac[indexType]
+	bt := bc[indexType]
+
+	if at == typeArray && bt == typeArray {
+		left := array(ac)
+		right := array(bc)
+		return left.orArrayAlt(right, runMode)
+	}
+	if at == typeArray && bt == typeBitmap {
+		left := array(ac)
+		right := bitmap(bc)
+		return left.orBitmapAlt(right, runMode)
+	}
+	if at == typeBitmap && bt == typeArray {
+		left := bitmap(ac)
+		right := array(bc)
+		return left.orArrayAlt(right, runMode)
+	}
+	if at == typeBitmap && bt == typeBitmap {
+		left := bitmap(ac)
+		right := bitmap(bc)
+		return left.orBitmapAlt(right, runMode)
+	}
+	panic("containerAnd: We should not reach here")
+}
+
+func (b bitmap) orBitmapAlt(other bitmap, runMode int) []uint16 {
+	bnum := getCardinality(b)
+	onum := getCardinality(other)
+
+	if bnum == 0 || onum == maxCardinality {
+		if runMode&runInline == 0 {
+			return copyBitmap(other)
+		}
+		// overwrite bitmap
+		copy(b, other)
+		return nil
+	}
+	if onum == 0 || bnum == maxCardinality {
+		if runMode&runInline == 0 {
+			return copyBitmap(b)
+		}
+		// do nothing, nothing to add
+		return nil
+	}
+
+	// merge
+	out := b
+	if runMode&runInline == 0 {
+		out = make([]uint16, maxContainerSize)
+		copy(out, b)
+	}
+
+	b64 := uint16To64Slice(out[startIdx:])
+	o64 := uint16To64Slice(other[startIdx:])
+	var num int
+	for i := range b64 {
+		b64[i] |= o64[i]
+		num += bits.OnesCount64(b64[i])
+	}
+	setCardinality(out, num)
+
+	if runMode&runInline == 0 {
+		return out
+	}
+	return nil
+}
+
 func emptyArray() []uint16 {
 	out := make([]uint16, minContainerSize)
 	out[indexType] = typeArray
