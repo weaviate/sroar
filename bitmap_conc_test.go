@@ -1,88 +1,81 @@
 package sroar
 
-import (
-	"math"
-	"math/rand"
-	"testing"
-	"time"
-)
+// var superset *Bitmap
+// var subsets []*Bitmap
 
-var superset *Bitmap
-var subsets []*Bitmap
+// func init() {
+// 	// randSeed := int64(1724861525311)
+// 	randSeed := time.Now().UnixNano()
+// 	countSubsets := 10
+// 	countElements := 56
 
-func init() {
-	// randSeed := int64(1724861525311)
-	randSeed := time.Now().UnixNano()
-	countSubsets := 10
-	countElements := 56
+// 	// max element is 3x bigger than capacity of single bm's container
+// 	maxX := (int(math.MaxUint16) + 1) * 3
+// 	// buffers := makeContainerBuffers(countBuffers)
+// 	rnd := rand.New(rand.NewSource(randSeed))
 
-	// max element is 3x bigger than capacity of single bm's container
-	maxX := (int(math.MaxUint16) + 1) * 3
-	// buffers := makeContainerBuffers(countBuffers)
-	rnd := rand.New(rand.NewSource(randSeed))
+// 	superset = NewBitmap()
+// 	subsets = make([]*Bitmap, countSubsets)
 
-	superset = NewBitmap()
-	subsets = make([]*Bitmap, countSubsets)
+// 	for i := 0; i < countElements; i++ {
+// 		x := uint64(rnd.Intn(maxX))
+// 		superset.Set(x)
+// 	}
 
-	for i := 0; i < countElements; i++ {
-		x := uint64(rnd.Intn(maxX))
-		superset.Set(x)
-	}
+// 	for i := range subsets {
+// 		subsets[i] = NewBitmap()
+// 		// each next subset bitmap contains fewer elements
+// 		// 1/2 of countElements, 1/3, 1/4, ...
+// 		for j, c := 0, countElements/(i+2); j < c; j++ {
+// 			x := uint64(rnd.Intn(maxX))
+// 			subsets[i].Set(x)
+// 			// ensure superset contains element of subset
+// 			superset.Set(x)
+// 		}
+// 	}
+// }
 
-	for i := range subsets {
-		subsets[i] = NewBitmap()
-		// each next subset bitmap contains fewer elements
-		// 1/2 of countElements, 1/3, 1/4, ...
-		for j, c := 0, countElements/(i+2); j < c; j++ {
-			x := uint64(rnd.Intn(maxX))
-			subsets[i].Set(x)
-			// ensure superset contains element of subset
-			superset.Set(x)
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Orig -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Orig(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.And(subsets[j])
+// 		}
+// 	}
+// }
 
-// go test -v -bench Benchmark_And_Orig -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Orig(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.And(subsets[j])
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Alt -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Alt(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.AndAlt(subsets[j])
+// 		}
+// 	}
+// }
 
-// go test -v -bench Benchmark_And_Alt -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Alt(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.AndAlt(subsets[j])
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Buf(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		buf := make([]uint16, maxContainerSize)
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.AndBuf(subsets[j], buf)
+// 		}
+// 	}
+// }
 
-// go test -v -bench Benchmark_And_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		buf := make([]uint16, maxContainerSize)
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.AndBuf(subsets[j], buf)
-		}
-	}
-}
-
-// go test -v -bench Benchmark_And_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf2(b *testing.B) {
-	buf := make([]uint16, maxContainerSize)
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.AndBuf(subsets[j], buf)
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Buf2(b *testing.B) {
+// 	buf := make([]uint16, maxContainerSize)
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.AndBuf(subsets[j], buf)
+// 		}
+// 	}
+// }
 
 // var bm *Bitmap
 // var control []uint64
