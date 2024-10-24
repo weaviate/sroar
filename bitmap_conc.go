@@ -1,153 +1,102 @@
 package sroar
 
-import (
-	"sync"
-)
+// func (dst *Bitmap) AndConcurrently(src *Bitmap, containerBufs ...[]uint16) *Bitmap {
+// 	assert(len(containerBufs) > 0)
 
-func (dst *Bitmap) AndConcurrently(src *Bitmap, containerBufs ...[]uint16) *Bitmap {
-	assert(len(containerBufs) > 0)
+// 	if src == nil {
+// 		dst.Reset()
+// 		return dst
+// 	}
 
-	if src == nil {
-		dst.Reset()
-		return dst
-	}
+// 	concurrentlyOnContainersRange(dst.keys.numKeys(), containerBufs, func(from, to int, buf []uint16) {
+// 		andContainersInRange(dst, src, from, to, buf, runInline)
+// 	})
+// 	return dst
+// }
 
-	concurrentlyOnContainersRange(dst.keys.numKeys(), containerBufs, func(from, to int, buf []uint16) {
-		andContainersInRange(dst, src, from, to, buf, runInline)
-	})
-	return dst
-}
+// func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(from, to int, buf []uint16)) {
+// 	concurrency := len(bufs)
+// 	if concurrency > 1 && numKeys < concurrency*minContainersForConcurrency {
+// 		concurrency = numKeys / minContainersForConcurrency
+// 	}
 
-func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(from, to int, buf []uint16)) {
-	concurrency := len(bufs)
-	if concurrency > 1 && numKeys < concurrency*minContainersForConcurrency {
-		concurrency = numKeys / minContainersForConcurrency
-	}
+// 	if concurrency <= 1 {
+// 		callback(0, numKeys, bufs[0])
+// 		return
+// 	}
 
-	if concurrency <= 1 {
-		callback(0, numKeys, bufs[0])
-		return
-	}
+// 	wg := new(sync.WaitGroup)
+// 	wg.Add(concurrency - 1)
 
-	wg := new(sync.WaitGroup)
-	wg.Add(concurrency - 1)
+// 	delta := numKeys / concurrency
+// 	rem := numKeys - delta*concurrency
+// 	from := 0
+// 	for i := 0; i < rem; i++ {
+// 		to := from + delta + 1
+// 		go func(i, from int) {
+// 			callback(from, to, bufs[i])
+// 			wg.Done()
+// 		}(i, from)
+// 		from = to
+// 	}
+// 	for i := rem; i < concurrency-1; i++ {
+// 		to := from + delta
+// 		go func(i, from int) {
+// 			callback(from, to, bufs[i])
+// 			wg.Done()
+// 		}(i, from)
+// 		from = to
+// 	}
+// 	callback(from, numKeys, bufs[concurrency-1])
+// 	wg.Wait()
+// }
 
-	delta := numKeys / concurrency
-	rem := numKeys - delta*concurrency
-	from := 0
-	for i := 0; i < rem; i++ {
-		to := from + delta + 1
-		go func(i, from int) {
-			callback(from, to, bufs[i])
-			wg.Done()
-		}(i, from)
-		from = to
-	}
-	for i := rem; i < concurrency-1; i++ {
-		to := from + delta
-		go func(i, from int) {
-			callback(from, to, bufs[i])
-			wg.Done()
-		}(i, from)
-		from = to
-	}
-	callback(from, numKeys, bufs[concurrency-1])
-	wg.Wait()
-}
+// func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
+// 	if bm.IsEmpty() {
+// 		ra.Reset()
+// 		return ra
+// 	}
 
-func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
-	if bm.IsEmpty() {
-		ra.Reset()
-		return ra
-	}
+// 	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf, runInline)
+// 	return ra
+// }
 
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf, runInline)
-	return ra
-}
+// func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
+// 	ak := a.keys.key(ai)
+// 	bi := b.keys.search(ak)
+// 	bn := b.keys.numKeys()
 
-func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
-	ak := a.keys.key(ai)
-	bi := b.keys.search(ak)
-	bn := b.keys.numKeys()
-
-	for ai < an && bi < bn {
-		ak := a.keys.key(ai)
-		bk := b.keys.key(bi)
-		if ak == bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			off = b.keys.val(bi)
-			bc := b.getContainer(off)
-			if c := containerAndBuf(ac, bc, buf, runMode); len(c) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := a.newContainer(uint16(len(c)))
-				copy(a.data[offset:], c)
-				a.setKey(ak, offset)
-			}
-			ai++
-			bi++
-		} else if ak < bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			zeroOutContainer(ac)
-			ai++
-		} else {
-			bi++
-		}
-	}
-	for ; ai < an; ai++ {
-		off := a.keys.val(ai)
-		ac := a.getContainer(off)
-		zeroOutContainer(ac)
-	}
-}
-
-func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
-	if bm.IsEmpty() {
-		ra.Reset()
-		return ra
-	}
-
-	andContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
-	return ra
-}
-
-func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
-	ak := a.keys.key(ai)
-	bi := b.keys.search(ak)
-	bn := b.keys.numKeys()
-
-	for ai < an && bi < bn {
-		ak := a.keys.key(ai)
-		bk := b.keys.key(bi)
-		if ak == bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			off = b.keys.val(bi)
-			bc := b.getContainer(off)
-			if c := containerAndAlt(ac, bc, runMode); len(c) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := a.newContainer(uint16(len(c)))
-				copy(a.data[offset:], c)
-				a.setKey(ak, offset)
-			}
-			ai++
-			bi++
-		} else if ak < bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			zeroOutContainer(ac)
-			ai++
-		} else {
-			bi++
-		}
-	}
-	for ; ai < an; ai++ {
-		off := a.keys.val(ai)
-		ac := a.getContainer(off)
-		zeroOutContainer(ac)
-	}
-}
+// 	for ai < an && bi < bn {
+// 		ak := a.keys.key(ai)
+// 		bk := b.keys.key(bi)
+// 		if ak == bk {
+// 			off := a.keys.val(ai)
+// 			ac := a.getContainer(off)
+// 			off = b.keys.val(bi)
+// 			bc := b.getContainer(off)
+// 			if c := containerAndBuf(ac, bc, buf, runMode); len(c) > 0 {
+// 				// create a new container and update the key offset to this container.
+// 				offset := a.newContainer(uint16(len(c)))
+// 				copy(a.data[offset:], c)
+// 				a.setKey(ak, offset)
+// 			}
+// 			ai++
+// 			bi++
+// 		} else if ak < bk {
+// 			off := a.keys.val(ai)
+// 			ac := a.getContainer(off)
+// 			zeroOutContainer(ac)
+// 			ai++
+// 		} else {
+// 			bi++
+// 		}
+// 	}
+// 	for ; ai < an; ai++ {
+// 		off := a.keys.val(ai)
+// 		ac := a.getContainer(off)
+// 		zeroOutContainer(ac)
+// 	}
+// }
 
 func AndAlt(a, b *Bitmap) *Bitmap {
 	res := NewBitmap()
@@ -185,19 +134,20 @@ func AndAlt(a, b *Bitmap) *Bitmap {
 	return res
 }
 
-func (ra *Bitmap) AndNotAlt(bm *Bitmap) *Bitmap {
-	if bm.IsEmpty() || ra.IsEmpty() {
+func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() {
+		ra.Reset()
 		return ra
 	}
 
-	andNotContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys(), runInline)
+	andContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys())
 	return ra
 }
 
-func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int, runMode int) {
-	bk := b.keys.key(bi)
-	ai := a.keys.search(bk)
-	an := a.keys.numKeys()
+func andContainersInRangeAlt(a, b *Bitmap, ai, an int) {
+	ak := a.keys.key(ai)
+	bi := b.keys.search(ak)
+	bn := b.keys.numKeys()
 
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
@@ -207,7 +157,7 @@ func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int, runMode int) {
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			if c := containerAndNotAlt(ac, bc, runMode); len(c) > 0 {
+			if c := containerAndAlt(ac, bc, runInline); len(c) > 0 {
 				// create a new container and update the key offset to this container.
 				offset := a.newContainer(uint16(len(c)))
 				copy(a.data[offset:], c)
@@ -216,10 +166,18 @@ func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int, runMode int) {
 			ai++
 			bi++
 		} else if ak < bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			zeroOutContainer(ac)
 			ai++
 		} else {
 			bi++
 		}
+	}
+	for ; ai < an; ai++ {
+		off := a.keys.val(ai)
+		ac := a.getContainer(off)
+		zeroOutContainer(ac)
 	}
 }
 
@@ -278,3 +236,124 @@ func AndNotAlt(a, b *Bitmap) *Bitmap {
 
 	return res
 }
+
+func (ra *Bitmap) AndNotAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() || ra.IsEmpty() {
+		return ra
+	}
+
+	andNotContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys())
+	return ra
+}
+
+func andNotContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
+	bk := b.keys.key(bi)
+	ai := a.keys.search(bk)
+	an := a.keys.numKeys()
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerAndNotAlt(ac, bc, runInline); len(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			bi++
+		}
+	}
+}
+
+// func (ra *Bitmap) OrAlt(bm *Bitmap) *Bitmap {
+// 	if bm.IsEmpty() {
+// 		return ra
+// 	}
+
+// 	orContainersInRangeAlt(ra, bm, 0, bm.keys.numKeys())
+// 	return ra
+// }
+
+// func orContainersInRangeAlt(a, b *Bitmap, bi, bn int) {
+// 	bk := b.keys.key(bi)
+// 	ai := a.keys.search(bk)
+// 	an := a.keys.numKeys()
+
+// 	for ai < an && bi < bn {
+// 		ak := a.keys.key(ai)
+// 		bk := b.keys.key(bi)
+// 		if ak == bk {
+// 			off := a.keys.val(ai)
+// 			ac := a.getContainer(off)
+// 			off = b.keys.val(bi)
+// 			bc := b.getContainer(off)
+// 			if c := containerOrAlt(ac, bc, runInline); len(c) > 0 {
+// 				// create a new container and update the key offset to this container.
+// 				offset := a.newContainer(uint16(len(c)))
+// 				copy(a.data[offset:], c)
+// 				a.setKey(ak, offset)
+// 			}
+// 			ai++
+// 			bi++
+// 		} else if ak < bk {
+// 			ai++
+// 		} else {
+// 			off := b.keys.val(bi)
+// 			bc := b.getContainer(off)
+// 			if getCardinality(bc) > 0 {
+// 				offset := a.newContainer(uint16(len(bc)))
+// 				copy(a.data[offset:], bc)
+// 				a.setKey(ak, offset)
+// 			}
+// 			bi++
+// 		}
+// 	}
+// 	for ; bi < bn; bi++ {
+// 		off := b.keys.val(bi)
+// 		bc := b.getContainer(off)
+// 		if getCardinality(bc) > 0 {
+// 			bk := b.keys.key(bi)
+// 			offset := a.newContainer(uint16(len(bc)))
+// 			copy(a.data[offset:], bc)
+// 			a.setKey(bk, offset)
+// 		}
+// 	}
+
+// 	srcIdx, numKeys := 0, src.keys.numKeys()
+
+// 	buf := make([]uint16, maxContainerSize)
+// 	for ; srcIdx < numKeys; srcIdx++ {
+// 		srcCont := src.getContainer(src.keys.val(srcIdx))
+// 		if getCardinality(srcCont) == 0 {
+// 			continue
+// 		}
+
+// 		key := src.keys.key(srcIdx)
+
+// 		dstIdx := dst.keys.search(key)
+// 		if dstIdx >= dst.keys.numKeys() || dst.keys.key(dstIdx) != key {
+// 			// srcCont doesn't exist in dst. So, copy it over.
+// 			offset := dst.newContainer(uint16(len(srcCont)))
+// 			copy(dst.getContainer(offset), srcCont)
+// 			dst.setKey(key, offset)
+// 		} else {
+// 			// Container exists in dst as well. Do an inline containerOr.
+// 			offset := dst.keys.val(dstIdx)
+// 			dstCont := dst.getContainer(offset)
+// 			if c := containerOr(dstCont, srcCont, buf, runMode|runInline); len(c) > 0 {
+// 				dst.copyAt(offset, c)
+// 				dst.setKey(key, offset)
+// 			}
+// 		}
+// 	}
+// }
