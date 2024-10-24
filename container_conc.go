@@ -296,75 +296,49 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 	bnum := getCardinality(b)
 	onum := getCardinality(other)
 
-	if runMode&runInline == 0 {
-		if bnum == 0 || onum == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
-		}
-
-		size := max(onum+int(startIdx), minContainerSize)
-		out := make([]uint16, size)
-
-		// merge
-		pos := startIdx
-		for _, x := range other.all() {
-			if b.bitValue(x) > 0 {
-				out[pos] = x
-				pos++
-			}
-		}
-		num := int(pos - startIdx)
-
-		out = out[:max(int(pos), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
-	}
-
 	if bnum == 0 {
-		// do nothing, bitmap already empty
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
+		// do nothing, array already empty
 		return nil
 	}
 	if onum == 0 {
-		// reset bitmap
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
+		// reset array
 		b.zeroOut()
 		return nil
 	}
 
-	// if few elements, convert container to array
-	if onum < 1024 {
+	// merge
+	if runMode&runInline == 0 || onum < 1024 {
 		size := max(onum+int(startIdx), minContainerSize)
-		buf := make([]uint16, size)
-
-		// merge
-		pos := startIdx
+		out := make([]uint16, size)
+		lastIdx := startIdx
 		for _, x := range other.all() {
 			if b.bitValue(x) > 0 {
-				buf[pos] = x
-				pos++
+				out[lastIdx] = x
+				lastIdx++
 			}
 		}
-		num := int(pos - startIdx)
 
+		if runMode&runInline == 0 {
+			return bufAsArray(out, lastIdx)
+		}
 		b[indexType] = typeArray
-		setCardinality(b, num)
-		copy(b[startIdx:], buf[startIdx:pos])
+		setCardinality(b, int(lastIdx-startIdx))
+		copy(b[startIdx:], out[startIdx:lastIdx])
 		return nil
 	}
 
-	// convert other array to bitmap
 	buf := make([]uint16, maxContainerSize)
 	for _, x := range other.all() {
 		idx := x >> 4
 		pos := x & 0xF
 		buf[startIdx+idx] |= bitmapMask[pos]
 	}
-
-	// merge
 	b64 := uint16To64Slice(b[startIdx:])
 	o64 := uint16To64Slice(buf[startIdx:])
 	var num int
@@ -373,7 +347,6 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 		num += bits.OnesCount64(b64[i])
 	}
 	setCardinality(b, num)
-
 	return nil
 }
 
@@ -462,6 +435,7 @@ func (c array) andNotArrayAlt(other array, runMode int) []uint16 {
 			return copyArray(c)
 		}
 		// do nothing, nothing to remove
+		return nil
 	}
 
 	// merge
@@ -496,6 +470,7 @@ func (c array) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 			return copyArray(c)
 		}
 		// do nothing, nothing to remove
+		return nil
 	}
 
 	// merge
@@ -517,95 +492,45 @@ func (c array) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 	return nil
 }
 
-func (b bitmap) andNotArrayXXX(other array) []uint16 {
-	for _, e := range other.all() {
-		b.remove(e)
-	}
-	return b
-}
-
 func (b bitmap) andNotArrayAlt(other array, runMode int) []uint16 {
 	bnum := getCardinality(b)
 	onum := getCardinality(other)
 
-	if runMode&runInline == 0 {
-		if bnum == 0 || onum == 0 {
-			out := make([]uint16, minContainerSize)
-			out[indexType] = typeArray
-			out[indexSize] = uint16(len(out))
-			setCardinality(out, 0)
-			return out
-		}
-
-		size := max(onum+int(startIdx), minContainerSize)
-		out := make([]uint16, size)
-
-		// merge
-		pos := startIdx
-		for _, x := range other.all() {
-			if b.bitValue(x) > 0 {
-				out[pos] = x
-				pos++
-			}
-		}
-		num := int(pos - startIdx)
-
-		out = out[:max(int(pos), minContainerSize)]
-		out[indexType] = typeArray
-		out[indexSize] = uint16(len(out))
-		setCardinality(out, num)
-		return out
-	}
-
 	if bnum == 0 {
-		// do nothing, bitmap already empty
+		if runMode&runInline == 0 {
+			return emptyArray()
+		}
+		// do nothing, array already empty
 		return nil
 	}
 	if onum == 0 {
-		// reset bitmap
-		b.zeroOut()
-		return nil
-	}
-
-	// if few elements, convert container to array
-	if onum < 1024 {
-		size := max(onum+int(startIdx), minContainerSize)
-		buf := make([]uint16, size)
-
-		// merge
-		pos := startIdx
-		for _, x := range other.all() {
-			if b.bitValue(x) > 0 {
-				buf[pos] = x
-				pos++
-			}
+		if runMode&runInline == 0 {
+			return copyBitmap(b)
 		}
-		num := int(pos - startIdx)
-
-		b[indexType] = typeArray
-		setCardinality(b, num)
-		copy(b[startIdx:], buf[startIdx:pos])
+		// do nothing, nothing to remove
 		return nil
-	}
-
-	// convert other array to bitmap
-	buf := make([]uint16, maxContainerSize)
-	for _, x := range other.all() {
-		idx := x >> 4
-		pos := x & 0xF
-		buf[startIdx+idx] |= bitmapMask[pos]
 	}
 
 	// merge
-	b64 := uint16To64Slice(b[startIdx:])
-	o64 := uint16To64Slice(buf[startIdx:])
-	var num int
-	for i := range b64 {
-		b64[i] &= o64[i]
-		num += bits.OnesCount64(b64[i])
+	out := b
+	if runMode&runInline == 0 {
+		out = copyBitmap(b)
 	}
-	setCardinality(b, num)
 
+	delnum := 0
+	for _, x := range other.all() {
+		idx := x >> 4
+		pos := x & 0xF
+		if has := out[startIdx+idx] & bitmapMask[pos]; has > 0 {
+			out[startIdx+idx] ^= bitmapMask[pos]
+			delnum++
+		}
+	}
+	setCardinality(out, bnum-delnum)
+
+	if runMode&runInline == 0 {
+		return out
+	}
 	return nil
 }
 
