@@ -148,3 +148,41 @@ func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
 		zeroOutContainer(ac)
 	}
 }
+
+func (ra *Bitmap) AndNotAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() {
+		return ra
+	}
+
+	andNotContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
+	return ra
+}
+
+func andNotContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
+	ak := a.keys.key(ai)
+	bi := b.keys.search(ak)
+	bn := b.keys.numKeys()
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerAndNotAlt(ac, bc, runMode); len(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			bi++
+		}
+	}
+}
