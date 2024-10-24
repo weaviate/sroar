@@ -591,7 +591,7 @@ func copyArray(c array) []uint16 {
 	out[indexType] = typeArray
 	out[indexSize] = uint16(len(out))
 	setCardinality(out, cnum)
-	copy(out, c[startIdx:lastIdx])
+	copy(out[startIdx:], c[startIdx:lastIdx])
 	return out
 }
 
