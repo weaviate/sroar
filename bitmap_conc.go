@@ -149,6 +149,42 @@ func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
 	}
 }
 
+func AndAlt(a, b *Bitmap) *Bitmap {
+	res := NewBitmap()
+
+	if a.IsEmpty() || b.IsEmpty() {
+		return res
+	}
+
+	ai, an := 0, a.keys.numKeys()
+	bi, bn := 0, b.keys.numKeys()
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := a.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerAndAlt(ac, bc, 0); len(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := res.newContainer(uint16(len(c)))
+				copy(res.data[offset:], c)
+				res.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			bi++
+		}
+	}
+
+	return res
+}
+
 func (ra *Bitmap) AndNotAlt(bm *Bitmap) *Bitmap {
 	if bm.IsEmpty() {
 		return ra
@@ -185,4 +221,60 @@ func andNotContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
 			bi++
 		}
 	}
+}
+
+func AndNotAlt(a, b *Bitmap) *Bitmap {
+	res := NewBitmap()
+
+	if a.IsEmpty() {
+		return res
+	}
+	if b.IsEmpty() {
+		return a.Clone()
+	}
+
+	ai, an := 0, a.keys.numKeys()
+	bi, bn := 0, b.keys.numKeys()
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := a.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerAndNotAlt(ac, bc, 0); len(c) > 0 && getCardinality(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := res.newContainer(uint16(len(c)))
+				copy(res.data[offset:], c)
+				res.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			if getCardinality(ac) > 0 {
+				offset := res.newContainer(uint16(len(ac)))
+				copy(res.data[offset:], ac)
+				res.setKey(ak, offset)
+			}
+			ai++
+		} else {
+			bi++
+		}
+	}
+	for ; ai < an; ai++ {
+		off := a.keys.val(ai)
+		ac := a.getContainer(off)
+		if getCardinality(ac) > 0 {
+			ak := a.keys.key(ai)
+			off = res.newContainer(uint16(len(ac)))
+			copy(res.data[off:], ac)
+			res.setKey(ak, off)
+		}
+	}
+
+	return res
 }
