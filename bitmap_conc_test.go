@@ -134,6 +134,16 @@ func Benchmark_AndNot_Alt(b *testing.B) {
 	}
 }
 
+// go test -v -bench Benchmark_AndNot_AltStandalone -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_AndNot_AltStandalone(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		bm := superset.Clone()
+		for j, l := 0, len(subsets); j < l; j++ {
+			bm = AndNotAlt(bm, subsets[j])
+		}
+	}
+}
+
 // var bm *Bitmap
 // var control []uint64
 // var controls [][]uint64
