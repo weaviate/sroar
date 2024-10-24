@@ -51,6 +51,16 @@ func Benchmark_And_Orig(b *testing.B) {
 	}
 }
 
+// go test -v -bench Benchmark_And_OrigStandalone -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_And_OrigStandalone(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		bm := superset.Clone()
+		for j, l := 0, len(subsets); j < l; j++ {
+			bm = And(bm, subsets[j])
+		}
+	}
+}
+
 // go test -v -bench Benchmark_And_Alt -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_And_Alt(b *testing.B) {
 	for i := 0; i < b.N; i++ {
@@ -61,38 +71,48 @@ func Benchmark_And_Alt(b *testing.B) {
 	}
 }
 
-// go test -v -bench Benchmark_And_Buf1 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf1(b *testing.B) {
+// go test -v -bench Benchmark_And_AltStandalone -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func Benchmark_And_AltStandalone(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		bm := superset.Clone()
 		for j, l := 0, len(subsets); j < l; j++ {
-			buf := make([]uint16, maxContainerSize)
-			bm.AndBuf(subsets[j], buf)
+			bm = AndAlt(bm, subsets[j])
 		}
 	}
 }
 
-// go test -v -bench Benchmark_And_Buf2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf2(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		buf := make([]uint16, maxContainerSize)
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.AndBuf(subsets[j], buf)
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Buf1 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Buf1(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			buf := make([]uint16, maxContainerSize)
+// 			bm.AndBuf(subsets[j], buf)
+// 		}
+// 	}
+// }
 
-// go test -v -bench Benchmark_And_Buf2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf3(b *testing.B) {
-	buf := make([]uint16, maxContainerSize)
-	for i := 0; i < b.N; i++ {
-		bm := superset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			bm.AndBuf(subsets[j], buf)
-		}
-	}
-}
+// // go test -v -bench Benchmark_And_Buf2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Buf2(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		buf := make([]uint16, maxContainerSize)
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.AndBuf(subsets[j], buf)
+// 		}
+// 	}
+// }
+
+// // go test -v -bench Benchmark_And_Buf2 -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+// func Benchmark_And_Buf3(b *testing.B) {
+// 	buf := make([]uint16, maxContainerSize)
+// 	for i := 0; i < b.N; i++ {
+// 		bm := superset.Clone()
+// 		for j, l := 0, len(subsets); j < l; j++ {
+// 			bm.AndBuf(subsets[j], buf)
+// 		}
+// 	}
+// }
 
 // go test -v -bench Benchmark_AndNot_Orig -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_AndNot_Orig(b *testing.B) {
