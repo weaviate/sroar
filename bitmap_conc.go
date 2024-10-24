@@ -92,8 +92,13 @@ func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 	}
 }
 
-func (ra *Bitmap) And3(bm *Bitmap) {
+func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() {
+		ra.Reset()
+		return ra
+	}
 
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), make([]uint16, maxContainerSize), runInline)
-
+	buf := make([]uint16, maxContainerSize)
+	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf, runInline)
+	return ra
 }
