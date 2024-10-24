@@ -68,7 +68,44 @@ func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			if c := containerAndAlt(ac, bc, buf, runMode); len(c) > 0 {
+			if c := containerAndBuf(ac, bc, buf, runMode); len(c) > 0 {
+				// create a new container and update the key offset to this container.
+				offset := a.newContainer(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			zeroOutContainer(ac)
+			ai++
+		} else {
+			bi++
+		}
+	}
+	for ; ai < an; ai++ {
+		off := a.keys.val(ai)
+		ac := a.getContainer(off)
+		zeroOutContainer(ac)
+	}
+}
+
+func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
+	ak := a.keys.key(ai)
+	bi := b.keys.search(ak)
+	bn := b.keys.numKeys()
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+		if ak == bk {
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			if c := containerAndAlt(ac, bc, runMode); len(c) > 0 {
 				// create a new container and update the key offset to this container.
 				offset := a.newContainer(uint16(len(c)))
 				copy(a.data[offset:], c)
@@ -93,7 +130,13 @@ func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 }
 
 func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
-	return ra.AndBuf(bm, make([]uint16, maxContainerSize))
+	if bm.IsEmpty() {
+		ra.Reset()
+		return ra
+	}
+
+	andContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
+	return ra
 }
 
 func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
