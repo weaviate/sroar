@@ -366,7 +366,7 @@ func (b bitmap) andArrayAlt(other array, runMode int) []uint16 {
 func (b bitmap) andBitmapAlt(other bitmap, runMode int) []uint16 {
 	out := b
 	if runMode&runInline == 0 {
-		out = make([]uint16, minContainerSize)
+		out = make([]uint16, maxContainerSize)
 		copy(out, b)
 	}
 
