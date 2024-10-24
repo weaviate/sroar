@@ -463,21 +463,21 @@ func (c array) andNotArrayAlt(other array, runMode int) []uint16 {
 	}
 	if onum == 0 {
 		if runMode&runInline == 0 {
-			size := max(cnum+int(startIdx), minContainerSize)
+			lastIdx := startIdx + uint16(cnum)
+			size := max(int(lastIdx), minContainerSize)
 			out := make([]uint16, size)
 			out[indexType] = typeArray
 			out[indexSize] = uint16(len(out))
 			setCardinality(out, cnum)
-			copy(out, c[startIdx:startIdx+uint16(cnum)])
+			copy(out, c[startIdx:lastIdx])
 			return out
 		}
 		// do nothing, nothing to remove
 	}
 
 	// merge
-	size := max(cnum+int(startIdx), minContainerSize)
+	size := max(int(startIdx)+cnum, minContainerSize)
 	out := make([]uint16, size)
-
 	setc := c.all()
 	seto := other.all()
 	num := difference(setc, seto, out[startIdx:])
@@ -499,46 +499,52 @@ func (c array) andNotBitmapAlt(other bitmap, runMode int) []uint16 {
 	cnum := getCardinality(c)
 	onum := getCardinality(other)
 
-	if runMode&runInline == 0 {
-		if cnum == 0 || onum == 0 {
+	if cnum == 0 {
+		if runMode&runInline == 0 {
 			out := make([]uint16, minContainerSize)
 			out[indexType] = typeArray
 			out[indexSize] = uint16(len(out))
 			setCardinality(out, 0)
 			return out
 		}
-	} else if cnum == 0 {
 		// do nothing, array already empty
 		return nil
-	} else if onum == 0 {
-		// reset array
-		c.zeroOut()
-		return nil
 	}
-
-	min := min(cnum, onum)
-	size := max(min+int(startIdx), minContainerSize)
-	out := make([]uint16, size)
+	if onum == 0 {
+		if runMode&runInline == 0 {
+			lastIdx := startIdx + uint16(cnum)
+			size := max(int(lastIdx), minContainerSize)
+			out := make([]uint16, size)
+			out[indexType] = typeArray
+			out[indexSize] = uint16(len(out))
+			setCardinality(out, cnum)
+			copy(out, c[startIdx:lastIdx])
+			return out
+		}
+		// do nothing, nothing to remove
+	}
 
 	// merge
-	pos := startIdx
+	size := max(int(startIdx)+cnum, minContainerSize)
+	out := make([]uint16, size)
+	lastIdx := startIdx
 	for _, x := range c.all() {
-		if other.bitValue(x) > 0 {
-			out[pos] = x
-			pos++
+		if !other.has(x) {
+			out[lastIdx] = x
+			lastIdx++
 		}
 	}
-	num := int(pos - startIdx)
+	num := int(lastIdx - startIdx)
 
 	if runMode&runInline == 0 {
-		out = out[:max(int(pos), minContainerSize)]
+		out = out[:max(int(lastIdx), minContainerSize)]
 		out[indexType] = typeArray
 		out[indexSize] = uint16(len(out))
 		setCardinality(out, num)
 		return out
 	}
 	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:pos])
+	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
 }
 
