@@ -55,6 +55,16 @@ func concurrentlyOnContainersRange(numKeys int, bufs [][]uint16, callback func(f
 	wg.Wait()
 }
 
+func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
+	if bm.IsEmpty() {
+		ra.Reset()
+		return ra
+	}
+
+	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf, runInline)
+	return ra
+}
+
 func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
@@ -92,6 +102,16 @@ func andContainersInRange(a, b *Bitmap, ai, an int, buf []uint16, runMode int) {
 	}
 }
 
+func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
+	if bm.IsEmpty() {
+		ra.Reset()
+		return ra
+	}
+
+	andContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
+	return ra
+}
+
 func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
@@ -127,24 +147,4 @@ func andContainersInRangeAlt(a, b *Bitmap, ai, an int, runMode int) {
 		ac := a.getContainer(off)
 		zeroOutContainer(ac)
 	}
-}
-
-func (ra *Bitmap) AndAlt(bm *Bitmap) *Bitmap {
-	if bm.IsEmpty() {
-		ra.Reset()
-		return ra
-	}
-
-	andContainersInRangeAlt(ra, bm, 0, ra.keys.numKeys(), runInline)
-	return ra
-}
-
-func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
-	if bm.IsEmpty() {
-		ra.Reset()
-		return ra
-	}
-
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf, runInline)
-	return ra
 }
