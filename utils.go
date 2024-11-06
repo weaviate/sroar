@@ -105,22 +105,12 @@ func Memclr(b []uint16) {
 	memclrNoHeapPointers(p, uintptr(len(b)))
 }
 
-// uint16To64Slice converts the given uint16 slice to uint64 slice
-func uint16To64Slice(u16s []uint16) (result []uint64) {
-	var u64s []uint64
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u64s))
-	hdr.Len = len(u16s) / 4
-	hdr.Cap = hdr.Len
-	hdr.Data = uintptr(unsafe.Pointer(&u16s[0]))
-	return u64s
+// uint16To64SliceUnsafe converts the given uint16 slice to uint64 slice
+func uint16To64SliceUnsafe(u16s []uint16) []uint64 {
+	return unsafe.Slice((*uint64)(unsafe.Pointer(&u16s[0])), len(u16s)/4)
 }
 
-// uint64To16Slice converts the given uint64 slice to uint16 slice
-func uint64To16Slice(u64s []uint64) (result []uint16) {
-	var u16s []uint16
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u16s))
-	hdr.Len = len(u64s) * 4
-	hdr.Cap = hdr.Len
-	hdr.Data = uintptr(unsafe.Pointer(&u64s[0]))
-	return u16s
+// uint64To16SliceUnsafe converts the given uint64 slice to uint16 slice
+func uint64To16SliceUnsafe(u64s []uint64) []uint16 {
+	return unsafe.Slice((*uint16)(unsafe.Pointer(&u64s[0])), len(u64s)*4)
 }

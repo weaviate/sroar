@@ -345,7 +345,18 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 	ra.data[offset] = targetSz
 }
 
-func (ra Bitmap) getContainer(offset uint64) []uint16 {
+func (ra *Bitmap) insertAt(offset uint64, src []uint16) {
+	dstSize := ra.data[offset]
+	targetSz := src[indexSize]
+	bySize := targetSz - dstSize
+
+	ra.scootRight(offset+uint64(dstSize), uint64(bySize))
+	ra.keys.updateOffsets(offset, uint64(bySize), true)
+	assert(copy(ra.data[offset:], src) == len(src))
+	ra.data[offset] = targetSz
+}
+
+func (ra *Bitmap) getContainer(offset uint64) []uint16 {
 	data := ra.data[offset:]
 	if len(data) == 0 {
 		panic(fmt.Sprintf("No container found at offset: %d\n", offset))
@@ -782,7 +793,7 @@ func (ra *Bitmap) extreme(dir int) uint64 {
 	}
 }
 
-func (ra *Bitmap) And(bm *Bitmap) {
+func (ra *Bitmap) AndOld(bm *Bitmap) {
 	if bm == nil {
 		ra.Reset()
 		return
@@ -827,7 +838,7 @@ func (ra *Bitmap) And(bm *Bitmap) {
 	}
 }
 
-func And(a, b *Bitmap) *Bitmap {
+func AndOld(a, b *Bitmap) *Bitmap {
 	ai, an := 0, a.keys.numKeys()
 	bi, bn := 0, b.keys.numKeys()
 
@@ -860,7 +871,7 @@ func And(a, b *Bitmap) *Bitmap {
 	return res
 }
 
-func (ra *Bitmap) AndNot(bm *Bitmap) {
+func (ra *Bitmap) AndNotOld(bm *Bitmap) {
 	if bm == nil {
 		return
 	}
@@ -898,7 +909,7 @@ func (ra *Bitmap) AndNot(bm *Bitmap) {
 }
 
 // TODO: Check if we want to use lazyMode
-func (dst *Bitmap) Or(src *Bitmap) {
+func (dst *Bitmap) OrOld(src *Bitmap) {
 	if src == nil {
 		return
 	}
@@ -935,7 +946,7 @@ func (dst *Bitmap) or(src *Bitmap, runMode int) {
 	}
 }
 
-func Or(a, b *Bitmap) *Bitmap {
+func OrOld(a, b *Bitmap) *Bitmap {
 	ai, an := 0, a.keys.numKeys()
 	bi, bn := 0, b.keys.numKeys()
 

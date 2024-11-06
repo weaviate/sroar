@@ -113,12 +113,26 @@ type array []uint16
 // container.
 func (c array) find(x uint16) int {
 	N := getCardinality(c)
-	for i := int(startIdx); i < int(startIdx)+N; i++ {
-		if len(c) <= int(i) {
-			panic(fmt.Sprintf("find: %d len(c) %d <= i %d\n", x, len(c), i))
+	si := int(startIdx)
+	lo, hi := si, si+N-1
+	for lo+16 <= hi {
+		mid := lo + (hi-lo)/2
+		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, c[mid], x)
+
+		if c[mid] < x {
+			lo = mid + 1
+		} else if c[mid] > x {
+			// We should keep it equal, and not -1, because we'll take the first greater entry.
+			hi = mid
+		} else {
+			// fmt.Printf("returning mid: %d\n", mid)
+			return mid - si
 		}
-		if c[i] >= x {
-			return int(i - int(startIdx))
+	}
+	for ; lo <= hi; lo++ {
+		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, c[lo], x)
+		if c[lo] >= x {
+			return lo - si
 		}
 	}
 	return N
@@ -587,7 +601,7 @@ func (b bitmap) all() []uint16 {
 	return res
 }
 
-//TODO: It can be optimized.
+// TODO: It can be optimized.
 func (b bitmap) selectAt(idx int) uint16 {
 	data := b[startIdx:]
 	n := uint16(len(data))
@@ -647,7 +661,7 @@ func (b bitmap) maximum() uint16 {
 		if tz == 16 {
 			continue
 		}
-		return uint16(16*(i - int(startIdx)) + 15 - tz)
+		return uint16(16*(i-int(startIdx)) + 15 - tz)
 	}
 	panic("We shouldn't reach here")
 }
