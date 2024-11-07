@@ -383,6 +383,9 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 				offset := a.newContainer(uint16(len(bc)))
 				copy(a.data[offset:], bc)
 				a.setKey(bk, offset)
+				// key was added to a bitmap. manually increase ai (current index) and an (length)
+				ai++
+				an++
 			}
 			bi++
 		}

@@ -681,6 +681,196 @@ func TestCompareMergeImplementations(t *testing.T) {
 	})
 }
 
+// checks if all exclusive containers from src bitmap
+// are copied to dst bitmap
+func TestIssue_Or_NotMergeContainers(t *testing.T) {
+	t.Run("fixed values", func(t *testing.T) {
+		x0 := uint64(58248)
+		x2 := uint64(139024)
+		y1 := uint64(123143)
+		y2 := uint64(131972)
+
+		bmX := NewBitmap()
+		bmX.Set(x0) // container 0
+		bmX.Set(x2) // container 2
+
+		bmY := NewBitmap()
+		bmY.Set(y1) // container 1
+		bmY.Set(y2) // container 2
+
+		require.Equal(t, 2, bmX.GetCardinality())
+		require.Equal(t, 2, bmY.GetCardinality())
+
+		// before fix container 2 was copied from bm2 instead
+		// being merged with matching container of bm1
+		// resulting in one value being lost
+		bmX.Or(bmY)
+
+		require.Equal(t, 4, bmX.GetCardinality())
+		require.ElementsMatch(t, []uint64{x0, x2, y1, y2}, bmX.ToArray())
+	})
+
+	t.Run("generated combinations", func(t *testing.T) {
+		// each value belongs to different container
+		xs := []uint64{
+			1,
+			1 + uint64(maxCardinality),
+			1 + uint64(maxCardinality)*2,
+			1 + uint64(maxCardinality)*3,
+			1 + uint64(maxCardinality)*4,
+			1 + uint64(maxCardinality)*5,
+			1 + uint64(maxCardinality)*6,
+			1 + uint64(maxCardinality)*7,
+		}
+
+		// values are unique, but belongs to same containers
+		// (matching containers should be merged into common ones)
+		ys := []uint64{
+			1 + uint64(maxCardinality)*8,
+			1 + uint64(maxCardinality)*9,
+		}
+		zs := []uint64{
+			2 + uint64(maxCardinality)*8,
+			2 + uint64(maxCardinality)*9,
+		}
+		all := append(append(xs, ys...), zs...)
+
+		assertOr := func(t *testing.T, dst, src *Bitmap) {
+			bm := dst.Clone().Or(src)
+
+			require.Equal(t, len(all), bm.GetCardinality())
+			require.ElementsMatch(t, all, bm.ToArray())
+		}
+
+		// 8 values belonging to 8 different containers are spread
+		// between 2 bitmaps in all combinations.
+		// 4 values belonging to 2 different containers are added
+		// to both bitmaps, so both of them have matching containers
+		// that are supposed to be merged (contrary to above containers,
+		// that will be entirely copied)
+
+		t.Run("1 of 8", func(t *testing.T) {
+			for a := 0; a < len(xs); a++ {
+				bmA := NewBitmap()
+				bmB := NewBitmap()
+
+				for i := 0; i < len(xs); i++ {
+					if i != a {
+						bmA.Set(xs[i])
+					} else {
+						bmB.Set(xs[i])
+					}
+				}
+				for i := 0; i < len(ys); i++ {
+					bmA.Set(ys[i])
+				}
+				for i := 0; i < len(zs); i++ {
+					bmB.Set(zs[i])
+				}
+
+				require.Equal(t, len(ys)+len(xs)-1, bmA.GetCardinality())
+				require.Equal(t, len(zs)+1, bmB.GetCardinality())
+
+				assertOr(t, bmA, bmB)
+				assertOr(t, bmB, bmA)
+			}
+		})
+
+		t.Run("2 of 8", func(t *testing.T) {
+			for a := 0; a < len(xs)-1; a++ {
+				for b := a + 1; b < len(xs); b++ {
+					bmA := NewBitmap()
+					bmB := NewBitmap()
+
+					for i := 0; i < len(xs); i++ {
+						if i != a && i != b {
+							bmA.Set(xs[i])
+						} else {
+							bmB.Set(xs[i])
+						}
+					}
+					for i := 0; i < len(ys); i++ {
+						bmA.Set(ys[i])
+					}
+					for i := 0; i < len(zs); i++ {
+						bmB.Set(zs[i])
+					}
+
+					require.Equal(t, len(ys)+len(xs)-2, bmA.GetCardinality())
+					require.Equal(t, len(zs)+2, bmB.GetCardinality())
+
+					assertOr(t, bmA, bmB)
+					assertOr(t, bmB, bmA)
+				}
+			}
+		})
+
+		t.Run("3 of 8", func(t *testing.T) {
+			for a := 0; a < len(xs)-2; a++ {
+				for b := a + 1; b < len(xs)-1; b++ {
+					for c := b + 1; c < len(xs); c++ {
+						bmA := NewBitmap()
+						bmB := NewBitmap()
+
+						for i := 0; i < len(xs); i++ {
+							if i != a && i != b && i != c {
+								bmA.Set(xs[i])
+							} else {
+								bmB.Set(xs[i])
+							}
+						}
+						for i := 0; i < len(ys); i++ {
+							bmA.Set(ys[i])
+						}
+						for i := 0; i < len(zs); i++ {
+							bmB.Set(zs[i])
+						}
+
+						require.Equal(t, len(ys)+len(xs)-3, bmA.GetCardinality())
+						require.Equal(t, len(zs)+3, bmB.GetCardinality())
+
+						assertOr(t, bmA, bmB)
+						assertOr(t, bmB, bmA)
+					}
+				}
+			}
+		})
+
+		t.Run("4 of 8", func(t *testing.T) {
+			for a := 0; a < len(xs)-3; a++ {
+				for b := a + 1; b < len(xs)-2; b++ {
+					for c := b + 1; c < len(xs)-1; c++ {
+						for d := c + 1; d < len(xs); d++ {
+							bmA := NewBitmap()
+							bmB := NewBitmap()
+
+							for i := 0; i < len(xs); i++ {
+								if i != a && i != b && i != c && i != d {
+									bmA.Set(xs[i])
+								} else {
+									bmB.Set(xs[i])
+								}
+							}
+							for i := 0; i < len(ys); i++ {
+								bmA.Set(ys[i])
+							}
+							for i := 0; i < len(zs); i++ {
+								bmB.Set(zs[i])
+							}
+
+							require.Equal(t, len(ys)+len(xs)-4, bmA.GetCardinality())
+							require.Equal(t, len(zs)+4, bmB.GetCardinality())
+
+							assertOr(t, bmA, bmB)
+							assertOr(t, bmB, bmA)
+						}
+					}
+				}
+			}
+		})
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
