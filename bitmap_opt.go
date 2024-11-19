@@ -458,6 +458,50 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	}
 }
 
+func (ra *Bitmap) ContainsMany(xs []uint64) []uint64 {
+	if xs == nil {
+		xs = []uint64{}
+	}
+
+	if len(xs) == 0 || ra.IsEmpty() {
+		return xs[:0]
+	}
+	if len(xs) == 1 {
+		if ra.Contains(xs[0]) {
+			return xs
+		}
+		return xs[:0]
+	}
+
+	keyToContainer := map[uint64][]uint16{}
+	j := 0
+	for i, x := range xs {
+		key := x & mask
+		container, ok := keyToContainer[key]
+		if !ok {
+			if offset, has := ra.keys.getValue(key); has {
+				container = ra.getContainer(offset)
+			}
+			keyToContainer[key] = container
+		}
+		if container != nil {
+			y := uint16(x)
+			contains := false
+			switch container[indexType] {
+			case typeArray:
+				contains = array(container).has(y)
+			case typeBitmap:
+				contains = bitmap(container).has(y)
+			}
+			if contains {
+				xs[j] = xs[i]
+				j++
+			}
+		}
+	}
+	return xs[:j]
+}
+
 const minContainersForConcurrency = 16
 
 // AndToSuperset calculates intersection of current and incoming bitmap

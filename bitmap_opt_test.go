@@ -871,6 +871,32 @@ func TestIssue_Or_NotMergeContainers(t *testing.T) {
 	})
 }
 
+func TestContainsMany(t *testing.T) {
+	t.Run("contains even", func(t *testing.T) {
+		maxI := 10
+		maxJ := 100
+
+		set := make([]uint64, 0, maxI*maxJ)
+		control := make([]uint64, 0, maxI*maxJ)
+		bm := NewBitmap()
+
+		for i := 0; i < maxI; i++ {
+			for j := 0; j < maxJ; j++ {
+				x := uint64(maxCardinality*i + j)
+				set = append(set, x)
+				if j%2 == 0 {
+					control = append(control, x)
+					bm.Set(x)
+				}
+			}
+		}
+
+		contained := bm.ContainsMany(set)
+		require.Len(t, contained, len(control))
+		require.ElementsMatch(t, contained, control)
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
