@@ -152,14 +152,21 @@ func (ra *Bitmap) setKey(k uint64, offset uint64) uint64 {
 	}
 
 	// ra.keys is full. We should expand its size.
+	bySize := ra.expandKeys(0)
+	return offset + bySize
+}
+
+func (ra *Bitmap) expandKeys(bySize uint64) uint64 {
 	curSize := uint64(len(ra.keys) * 4) // Multiply by 4 for U64 -> U16.
-	bySize := curSize
+	if bySize == 0 {
+		bySize = curSize
+	}
 	if bySize > math.MaxUint16 {
 		bySize = math.MaxUint16
 	}
 
 	ra.scootRight(curSize, bySize)
-	ra.keys = toUint64Slice(ra.data[:curSize+bySize])
+	ra.keys = uint16To64SliceUnsafe(ra.data[:curSize+bySize])
 	ra.keys.setNodeSize(int(curSize + bySize))
 
 	// All containers have moved to the right by bySize bytes.
@@ -171,31 +178,35 @@ func (ra *Bitmap) setKey(k uint64, offset uint64) uint64 {
 			n.setAt(valOffset(i), val+uint64(bySize))
 		}
 	}
-	return offset + bySize
+	return bySize
 }
 
 func (ra *Bitmap) fastExpand(bySize uint64) {
-	prev := len(ra.keys) * 4 // Multiply by 4 to convert from u16 to u64.
+	toSize := ra.expandNoLengthChange(bySize)
+	ra.data = ra.data[:toSize]
+}
 
+func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 	// This following statement also works. But, given how much fastExpand gets
 	// called (a lot), probably better to control allocation.
 	// ra.data = append(ra.data, empty[:bySize]...)
 
-	toSize := len(ra.data) + int(bySize)
+	toSize = len(ra.data) + int(bySize)
 	if toSize <= cap(ra.data) {
-		ra.data = ra.data[:toSize]
 		return
 	}
 	growBy := cap(ra.data)
 	if growBy < int(bySize) {
 		growBy = int(bySize)
 	}
-	out := make([]uint16, cap(ra.data)+growBy)
+	out := make([]uint16, len(ra.data), cap(ra.data)+growBy)
 	copy(out, ra.data)
-	ra.data = out[:toSize]
+	prev := len(ra.keys) * 4 // Multiply by 4 to convert from u16 to u64.
+	ra.data = out
 	ra._ptr = nil // Allow Go to GC whatever this was pointing to.
 	// Re-reference ra.keys correctly because underlying array has changed.
-	ra.keys = toUint64Slice(ra.data[:prev])
+	ra.keys = uint16To64SliceUnsafe(ra.data[:prev])
+	return
 }
 
 // scootRight isn't aware of containers. It's going to create empty space of
@@ -221,10 +232,15 @@ func (ra *Bitmap) scootLeft(offset uint64, size uint64) {
 }
 
 func (ra *Bitmap) newContainer(sz uint16) uint64 {
+	offset := ra.newContainerNoClr(sz)
+	ra.data[offset] = sz
+	Memclr(ra.data[offset+1 : offset+uint64(sz)])
+	return offset
+}
+
+func (ra *Bitmap) newContainerNoClr(sz uint16) uint64 {
 	offset := uint64(len(ra.data))
 	ra.fastExpand(uint64(sz))
-	Memclr(ra.data[offset : offset+uint64(sz)])
-	ra.data[offset] = sz
 	return offset
 }
 
