@@ -284,12 +284,11 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
 			if c := containerOrAlt(ac, bc, buf, 0); len(c) > 0 && getCardinality(c) > 0 {
-				// create a new container and update the key offset to this container.
-
 				// Since buffer is used in containers merge, result container has to be copied
-				// to the bitmap immediately and to let buffer be reused for next merge.
-				// Therefore container can not be copied at the end of method execution like
-				// other containers from bitmaps a or b.
+				// to the bitmap immediately to let buffer be reused in next merge,
+				// contrary to unique containers from bitmap a and b copied at the end of method execution
+
+				// create a new container and update the key offset to this container.
 				offset := res.newContainerNoClr(uint16(len(c)))
 				copy(res.data[offset:], c)
 				res.setKey(ak, offset)
@@ -399,26 +398,24 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 			boff := b.keys.val(bi)
 			bc := b.getContainer(boff)
 			if c := containerOrAlt(ac, bc, buf, runInline); len(c) > 0 {
-				// Previously merged container were replacing the old one,
-				// first moving data to the right to free enough space for the
-				// merged container to fit.
-				// That solution turned out to be slower for large datasets than
-				// appending bitmap with entirely new container, as moving data
-				// is not needed in that case.
-				// Reference to prev container is then forgotten resulting in
-				// memory not being used optimally.
-
 				// Since buffer is used in containers merge, result container has to be copied
-				// to the bitmap immediately and to let buffer be reused for next merge.
-				// Therefore container can not be copied at the end of method execution like
-				// other containers from bitmap b.
-				offset := a.newContainerNoClr(uint16(len(c)))
-				copy(a.data[offset:], c)
-				a.setKey(ak, offset)
+				// to the bitmap immediately to let buffer be reused in next merge,
+				// contrary to unique containers from bitmap b copied at the end of method execution
 
-				// // make room for container, replacing smaller one and update key offset to new container.
-				// a.insertAt(aoff, c)
-				// a.setKey(ak, aoff)
+				// Replacing previous container with merged one, that requires moving data
+				// to the right to make enough space for merged container is slower
+				// than appending bitmap with entirely new container and "forgetting" old one
+				// for large bitmaps, so it is performed only on small ones
+				if an > 10 {
+					// create a new container and update the key offset to this container.
+					offset := a.newContainerNoClr(uint16(len(c)))
+					copy(a.data[offset:], c)
+					a.setKey(ak, offset)
+				} else {
+					// make room for container, replacing smaller one and update key offset to new container.
+					a.insertAt(aoff, c)
+					a.setKey(ak, aoff)
+				}
 			}
 			ai++
 			bi++
@@ -448,7 +445,7 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 
 	if sizeContainers > 0 {
 		// ensure enough space for new containers and keys,
-		// allocate required memory just once avoid copying underlying data slice multiple times
+		// allocate required memory just once to avoid copying underlying data slice multiple times
 		a.expandNoLengthChange(sizeContainers + sizeKeys)
 		a.expandKeys(sizeKeys)
 
