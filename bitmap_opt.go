@@ -40,7 +40,7 @@ func andContainers(a, b, res *Bitmap, optBuf []uint16) {
 			bc := b.getContainer(off)
 			if c := containerAndAlt(ac, bc, optBuf, 0); len(c) > 0 && getCardinality(c) > 0 {
 				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(c)))
+				offset := res.newContainerNoClr(uint16(len(c)))
 				copy(res.data[offset:], c)
 				res.setKey(ak, offset)
 			}
@@ -154,7 +154,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			bc := b.getContainer(off)
 			if c := containerAndNotAlt(ac, bc, optBuf, 0); len(c) > 0 && getCardinality(c) > 0 {
 				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(c)))
+				offset := res.newContainerNoClr(uint16(len(c)))
 				copy(res.data[offset:], c)
 				res.setKey(ak, offset)
 			}
@@ -165,7 +165,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
 				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(ac)))
+				offset := res.newContainerNoClr(uint16(len(ac)))
 				copy(res.data[offset:], ac)
 				res.setKey(ak, offset)
 			}
@@ -175,14 +175,14 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 		}
 	}
 	for ; ai < an; ai++ {
-		off := a.keys.val(ai)
-		ac := a.getContainer(off)
+		offset := a.keys.val(ai)
+		ac := a.getContainer(offset)
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
 			// create a new container and update the key offset to this container.
-			off = res.newContainer(uint16(len(ac)))
-			copy(res.data[off:], ac)
-			res.setKey(ak, off)
+			offset = res.newContainerNoClr(uint16(len(ac)))
+			copy(res.data[offset:], ac)
+			res.setKey(ak, offset)
 		}
 	}
 }
@@ -270,6 +270,11 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 	ai, an := 0, a.keys.numKeys()
 	bi, bn := 0, b.keys.numKeys()
 
+	akToAc := map[uint64][]uint16{}
+	bkToBc := map[uint64][]uint16{}
+	sizeContainers := uint64(0)
+	sizeKeys := uint64(0)
+
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
@@ -280,7 +285,12 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 			bc := b.getContainer(off)
 			if c := containerOrAlt(ac, bc, buf, 0); len(c) > 0 && getCardinality(c) > 0 {
 				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(c)))
+
+				// Since buffer is used in containers merge, result container has to be copied
+				// to the bitmap immediately and to let buffer be reused for next merge.
+				// Therefore container can not be copied at the end of method execution like
+				// other containers from bitmaps a or b.
+				offset := res.newContainerNoClr(uint16(len(c)))
 				copy(res.data[offset:], c)
 				res.setKey(ak, offset)
 			}
@@ -290,20 +300,18 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 			off := a.keys.val(ai)
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(ac)))
-				copy(res.data[offset:], ac)
-				res.setKey(ak, offset)
+				akToAc[ak] = ac
+				sizeContainers += uint64(len(ac))
+				sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
 			}
 			ai++
 		} else {
 			off := b.keys.val(bi)
 			bc := b.getContainer(off)
 			if getCardinality(bc) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := res.newContainer(uint16(len(bc)))
-				copy(res.data[offset:], bc)
-				res.setKey(bk, offset)
+				bkToBc[bk] = bc
+				sizeContainers += uint64(len(bc))
+				sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
 			}
 			bi++
 		}
@@ -313,10 +321,9 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 		ac := a.getContainer(off)
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
-			// create a new container and update the key offset to this container.
-			offset := res.newContainer(uint16(len(ac)))
-			copy(res.data[offset:], ac)
-			res.setKey(ak, offset)
+			akToAc[ak] = ac
+			sizeContainers += uint64(len(ac))
+			sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
 		}
 	}
 	for ; bi < bn; bi++ {
@@ -324,8 +331,27 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 		bc := b.getContainer(off)
 		if getCardinality(bc) > 0 {
 			bk := b.keys.key(bi)
+			bkToBc[bk] = bc
+			sizeContainers += uint64(len(bc))
+			sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
+		}
+	}
+
+	if sizeContainers > 0 {
+		// ensure enough space for new containers and keys,
+		// allocate required memory just once avoid copying underlying data slice multiple times
+		res.expandNoLengthChange(sizeContainers + sizeKeys)
+		res.expandKeys(sizeKeys)
+
+		for ak, ac := range akToAc {
 			// create a new container and update the key offset to this container.
-			offset := res.newContainer(uint16(len(bc)))
+			offset := res.newContainerNoClr(uint16(len(ac)))
+			copy(res.data[offset:], ac)
+			res.setKey(ak, offset)
+		}
+		for bk, bc := range bkToBc {
+			// create a new container and update the key offset to this container.
+			offset := res.newContainerNoClr(uint16(len(bc)))
 			copy(res.data[offset:], bc)
 			res.setKey(bk, offset)
 		}
@@ -358,6 +384,12 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
 
+	// copy containers from b to a all at once
+	// expanding underlying data slice and keys subslice once
+	bkToBc := map[uint64][]uint16{}
+	sizeContainers := uint64(0)
+	sizeKeys := uint64(0)
+
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
@@ -367,9 +399,26 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 			boff := b.keys.val(bi)
 			bc := b.getContainer(boff)
 			if c := containerOrAlt(ac, bc, buf, runInline); len(c) > 0 {
-				// make room for container, replacing smaller one and update key offset to new container.
-				a.insertAt(aoff, c)
-				a.setKey(ak, aoff)
+				// Previously merged container were replacing the old one,
+				// first moving data to the right to free enough space for the
+				// merged container to fit.
+				// That solution turned out to be slower for large datasets than
+				// appending bitmap with entirely new container, as moving data
+				// is not needed in that case.
+				// Reference to prev container is then forgotten resulting in
+				// memory not being used optimally.
+
+				// Since buffer is used in containers merge, result container has to be copied
+				// to the bitmap immediately and to let buffer be reused for next merge.
+				// Therefore container can not be copied at the end of method execution like
+				// other containers from bitmap b.
+				offset := a.newContainerNoClr(uint16(len(c)))
+				copy(a.data[offset:], c)
+				a.setKey(ak, offset)
+
+				// // make room for container, replacing smaller one and update key offset to new container.
+				// a.insertAt(aoff, c)
+				// a.setKey(ak, aoff)
 			}
 			ai++
 			bi++
@@ -379,13 +428,9 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 			off := b.keys.val(bi)
 			bc := b.getContainer(off)
 			if getCardinality(bc) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := a.newContainer(uint16(len(bc)))
-				copy(a.data[offset:], bc)
-				a.setKey(bk, offset)
-				// key was added to a bitmap. manually increase ai (current index) and an (length)
-				ai++
-				an++
+				bkToBc[bk] = bc
+				sizeContainers += uint64(len(bc))
+				sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
 			}
 			bi++
 		}
@@ -395,8 +440,21 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 		bc := b.getContainer(off)
 		if getCardinality(bc) > 0 {
 			bk := b.keys.key(bi)
+			bkToBc[bk] = bc
+			sizeContainers += uint64(len(bc))
+			sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
+		}
+	}
+
+	if sizeContainers > 0 {
+		// ensure enough space for new containers and keys,
+		// allocate required memory just once avoid copying underlying data slice multiple times
+		a.expandNoLengthChange(sizeContainers + sizeKeys)
+		a.expandKeys(sizeKeys)
+
+		for bk, bc := range bkToBc {
 			// create a new container and update the key offset to this container.
-			offset := a.newContainer(uint16(len(bc)))
+			offset := a.newContainerNoClr(uint16(len(bc)))
 			copy(a.data[offset:], bc)
 			a.setKey(bk, offset)
 		}
