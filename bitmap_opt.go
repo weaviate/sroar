@@ -647,3 +647,22 @@ func andNotSelectedContainers(a, b *Bitmap, ai, an, bi, bn int, containerBuf []u
 		}
 	}
 }
+
+func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
+	if dst == nil && src == nil {
+		return 0
+	}
+	if src == nil {
+		return 1
+	}
+	if dst == nil {
+		return -1
+	}
+	if dstN, srcN := dst.keys.numKeys(), src.keys.numKeys(); dstN > srcN {
+		return 1
+	} else if dstN < srcN {
+		return -1
+	} else {
+		return 0
+	}
+}
