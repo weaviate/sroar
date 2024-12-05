@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"fmt"
+	"math"
 	"sync"
 )
 
@@ -705,5 +706,89 @@ func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
 	// adjust length to src length, keep capacity as entire buffer
 	bm := FromBuffer(dstbuf)
 	bm.data = bm.data[:srclen/2]
+	return bm
+}
+
+// Prefill creates bitmap prefilled with elements [0-maxX]
+func Prefill(maxX uint64) *Bitmap {
+	maxCard64 := uint64(maxCardinality)
+
+	// maxX should be included, therefore +1
+	n := maxX / maxCard64
+	rem := maxX % maxCard64
+	if rem == maxCard64-1 {
+		n++
+	}
+	rem = (rem + 1) % maxCard64
+
+	// create additional container for remaining values (or empty if there are not)
+	// +1 additional key to avoid keys expanding (there should always be 1 spare)
+	bm := newBitmapWith(int(n)+1+1, maxContainerSize, int(n)*maxContainerSize)
+
+	var refContainer []uint16
+	var remOffset = bm.keys.val(0)
+
+	if n > 0 {
+		refContainer = bm.getContainer(remOffset)
+		refContainer[indexSize] = maxContainerSize
+		refContainer[indexType] = typeBitmap
+		setCardinality(refContainer, maxCardinality)
+
+		// fill entire bitmap container with ones
+		refContainer64 := uint16To64SliceUnsafe(refContainer[startIdx:])
+		for i := range refContainer64 {
+			refContainer64[i] = math.MaxUint64
+		}
+
+		// fill remaining containers by copying reference one
+		for i := uint64(1); i < n; i++ {
+			key := (i * maxCard64) & mask
+			offset := bm.newContainerNoClr(maxContainerSize)
+			bm.setKey(key, offset)
+
+			copy(bm.data[offset:], refContainer)
+		}
+
+		// create container for remaining values
+		key := (n * maxCard64) & mask
+		remOffset = bm.newContainer(maxContainerSize)
+		bm.setKey(key, remOffset)
+	}
+
+	container := bm.getContainer(remOffset)
+	container[indexSize] = maxContainerSize
+	container[indexType] = typeBitmap
+	setCardinality(container, int(rem))
+
+	if rem > 0 {
+		n16 := uint16(rem) / 16
+		rem16 := uint16(rem) % 16
+
+		if refContainer != nil {
+			// refContainer available (maxX >= math.MaxUint16-1),
+			// fill remaining values container by copying biggest possible slice of refContainer (batches of 16s)
+			copy(bm.data[remOffset+uint64(startIdx):], refContainer[startIdx:startIdx+n16])
+			// set remaining bits
+			for i := uint16(0); i < rem16; i++ {
+				container[startIdx+n16] |= bitmapMask[i]
+			}
+		} else {
+			// refContainer not available (maxX < math.MaxUint16-1),
+			// set bits by copying MaxUint64 first, then MaxUint16, then single bits
+			n64 := uint16(rem) / 64
+
+			container64 := uint16To64SliceUnsafe(container[startIdx:])
+			for i := uint16(0); i < n64; i++ {
+				container64[i] = math.MaxUint64
+			}
+			for i := uint16(n64 * 4); i < n16; i++ {
+				container[startIdx+i] = math.MaxUint16
+			}
+			for i := uint16(0); i < rem16; i++ {
+				container[startIdx+n16] |= bitmapMask[i]
+			}
+		}
+	}
+
 	return bm
 }

@@ -1107,6 +1107,32 @@ func TestCloneToBuf(t *testing.T) {
 	})
 }
 
+func TestPrefill(t *testing.T) {
+	for _, maxX := range []int{
+		0, 1, 123_456,
+		maxCardinality / 2,
+		maxCardinality - 1, maxCardinality, maxCardinality + 1,
+		maxCardinality*3 - 1, maxCardinality * 3, maxCardinality*3 + 1,
+	} {
+		t.Run(fmt.Sprintf("value %d", maxX), func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+
+			assertPrefilled(t, bm, maxX)
+		})
+	}
+}
+
+func assertPrefilled(t *testing.T, bm *Bitmap, maxX int) {
+	require.Equal(t, maxX+1, bm.GetCardinality())
+
+	arr := bm.ToArray()
+	require.Len(t, arr, maxX+1)
+
+	for i, x := range arr {
+		require.Equal(t, uint64(i), x)
+	}
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)

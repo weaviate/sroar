@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+// go test -v -bench BenchmarkPrefillNative -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func BenchmarkPrefillNative(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Prefill(200_000_000)
+	}
+}
+
+// go test -v -bench BenchmarkPrefillFromSortedList -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func BenchmarkPrefillFromSortedList(b *testing.B) {
+	prefillBufferSize := 65_536
+	maxVal := uint64(200_000_000)
+	inc := uint64(prefillBufferSize)
+	buf := make([]uint64, prefillBufferSize)
+
+	for i := 0; i < b.N; i++ {
+		finalBM := NewBitmap()
+
+		for i := uint64(0); i <= maxVal; i += inc {
+			j := uint64(0)
+			for ; j < inc && i+j <= maxVal; j++ {
+				buf[j] = i + j
+			}
+			finalBM.Or(FromSortedList(buf[:j]))
+		}
+	}
+}
+
 // ================================================================================
 //
 // BENCHMARKS comparing performance of different merge implementations
