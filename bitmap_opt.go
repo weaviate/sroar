@@ -752,3 +752,17 @@ func Prefill(maxX uint64) *Bitmap {
 
 	return bm
 }
+
+func (ra *Bitmap) LenBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return len(ra.data) * 2
+}
+
+func (ra *Bitmap) CapBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return cap(ra.data) * 2
+}

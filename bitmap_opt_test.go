@@ -946,6 +946,43 @@ func TestPrefill(t *testing.T) {
 	}
 }
 
+func TestLenBytes(t *testing.T) {
+	t.Run("nil bitmap", func(t *testing.T) {
+		var bm *Bitmap
+
+		require.Equal(t, 0, bm.LenBytes())
+	})
+
+	t.Run("non-nil bitmap", func(t *testing.T) {
+		bm := NewBitmap()
+
+		for _, x := range []int{1, 1 + maxCardinality, 1 + maxCardinality*2} {
+			bm.Set(uint64(x))
+
+			require.Equal(t, len(bm.ToBuffer()), bm.LenBytes())
+		}
+	})
+}
+
+func TestCapBytes(t *testing.T) {
+	t.Run("nil bitmap", func(t *testing.T) {
+		var bm *Bitmap
+
+		require.Equal(t, 0, bm.CapBytes())
+	})
+
+	t.Run("non-nil bitmap", func(t *testing.T) {
+		bm := NewBitmap()
+
+		for _, x := range []int{1, 1 + maxCardinality, 1 + maxCardinality*2} {
+			bm.Set(uint64(x))
+
+			// ToBuffer sets cap to len, so real cap is >= than buffer's one
+			require.LessOrEqual(t, cap(bm.ToBuffer()), bm.CapBytes())
+		}
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
