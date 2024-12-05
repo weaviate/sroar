@@ -977,6 +977,136 @@ func TestCapBytes(t *testing.T) {
 	})
 }
 
+func TestCloneToBuf(t *testing.T) {
+	assertEqualBitmaps := func(t *testing.T, bm, cloned *Bitmap) {
+		require.Equal(t, bm.GetCardinality(), cloned.GetCardinality())
+		require.Equal(t, bm.LenInBytes(), cloned.LenInBytes())
+		require.ElementsMatch(t, bm.ToArray(), cloned.ToArray())
+	}
+
+	t.Run("non-nil bitmap", func(t *testing.T) {
+		bmEmpty := NewBitmap()
+
+		bm1 := NewBitmap()
+		bm1.Set(1)
+
+		bm2 := NewBitmap()
+		bm2.Set(1)
+		bm2.Set(1 + uint64(maxCardinality))
+		bm2.Set(2 + uint64(maxCardinality))
+
+		bm3 := NewBitmap()
+		bm3.Set(1)
+		bm3.Set(1 + uint64(maxCardinality))
+		bm3.Set(2 + uint64(maxCardinality))
+		bm3.Set(1 + uint64(maxCardinality)*2)
+		bm3.Set(2 + uint64(maxCardinality)*2)
+		bm3.Set(3 + uint64(maxCardinality)*2)
+
+		for name, bm := range map[string]*Bitmap{
+			"empty": bmEmpty,
+			"bm1":   bm1,
+			"bm2":   bm2,
+			"bm3":   bm3,
+		} {
+			t.Run(name, func(t *testing.T) {
+				lenInBytes := bm.LenInBytes()
+				for name, buf := range map[string][]byte{
+					"buf equal len":            make([]byte, lenInBytes),
+					"buf greater len":          make([]byte, lenInBytes*3/2),
+					"buf equal cap":            make([]byte, 0, lenInBytes),
+					"buf greater cap":          make([]byte, 0, lenInBytes*3/2),
+					"buf less len greater cap": make([]byte, lenInBytes/2, lenInBytes*3/2),
+				} {
+					t.Run(name, func(t *testing.T) {
+						cloned := bm.CloneToBuf(buf)
+
+						assertEqualBitmaps(t, bm, cloned)
+						require.Equal(t, cap(buf), cloned.capInBytes())
+					})
+				}
+			})
+		}
+	})
+
+	t.Run("nil bitmap, cloned as empty bitmap", func(t *testing.T) {
+		var bmNil *Bitmap
+		bmEmpty := NewBitmap()
+
+		buf := make([]byte, 0, bmEmpty.LenInBytes()*2)
+		cloned := bmNil.CloneToBuf(buf)
+
+		assertEqualBitmaps(t, bmEmpty, cloned)
+		require.Equal(t, cap(buf), cloned.capInBytes())
+	})
+
+	t.Run("source bitmap is not changed on cloned updates", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(1)
+		bmLen := bm.LenInBytes()
+		bmCap := bm.capInBytes()
+
+		buf := make([]byte, 0, bm.LenInBytes()*4)
+		cloned := bm.CloneToBuf(buf)
+		cloned.Set(1 + uint64(maxCardinality))
+		cloned.Set(1 + uint64(maxCardinality)*2)
+
+		require.Equal(t, bmLen, bm.LenInBytes())
+		require.Equal(t, bmCap, bm.capInBytes())
+		require.Equal(t, 1, bm.GetCardinality())
+		require.ElementsMatch(t, []uint64{1}, bm.ToArray())
+
+		require.Less(t, bmLen, cloned.LenInBytes())
+		require.LessOrEqual(t, bmCap, cloned.capInBytes())
+		require.Equal(t, 3, cloned.GetCardinality())
+		require.Equal(t, []uint64{1, 1 + uint64(maxCardinality), 1 + uint64(maxCardinality)*2}, cloned.ToArray())
+	})
+
+	t.Run("reuse bigger buffer to expand size", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(1)
+
+		// buf big enough for additional containers
+		buf := make([]byte, 0, bm.LenInBytes()*4)
+		cloned := bm.CloneToBuf(buf)
+		clonedLen := cloned.LenInBytes()
+		clonedCap := cloned.capInBytes()
+
+		cloned.Set(1 + uint64(maxCardinality))
+		cloned.Set(1 + uint64(maxCardinality)*2)
+
+		require.Less(t, clonedLen, cloned.LenInBytes())
+		require.Equal(t, clonedCap, cloned.capInBytes())
+	})
+
+	t.Run("panic on smaller buffer size", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			require.NotNil(t, r)
+			require.Contains(t, r, "Buffer too small")
+		}()
+
+		bm := NewBitmap()
+		bm.Set(1)
+		bmLen := bm.LenInBytes()
+
+		buf := make([]byte, 0, bmLen-1)
+		bm.CloneToBuf(buf)
+	})
+
+	t.Run("allow buffer of odd size", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(1)
+		bmLen := bm.LenInBytes()
+
+		buf := make([]byte, 0, bmLen+3)
+		cloned := bm.CloneToBuf(buf)
+
+		require.Equal(t, bmLen, cloned.LenInBytes())
+		require.Equal(t, bmLen+2, cloned.capInBytes())
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
