@@ -666,3 +666,17 @@ func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
 		return 0
 	}
 }
+
+func (ra *Bitmap) LenInBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return len(ra.data) * 2
+}
+
+func (ra *Bitmap) capInBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return cap(ra.data) * 2
+}
