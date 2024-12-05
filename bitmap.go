@@ -106,25 +106,32 @@ func newBitmapWithSize(numKeys, initialContainerSize, additionalContainersSize i
 	if numKeys < 2 {
 		panic("Must contain at least two keys.")
 	}
-	// Each key must also keep an offset. So, we need to double the number
-	// of uint64s allocated. Plus, we need to make space for the first 2
-	// uint64s to store the number of keys and node size.
-	keysLen := 4 * (2*numKeys + 2)
+	keysLen := calculateKeysLen(numKeys)
 	containersLen := initialContainerSize + additionalContainersSize
-	ra := &Bitmap{
-		data: make([]uint16, keysLen, keysLen+containersLen),
-	}
+	buf := make([]uint16, keysLen+containersLen)
+	return newBitampWithBuf(keysLen, initialContainerSize, buf)
+}
+
+func newBitampWithBuf(keysLen, containerSize int, buf []uint16) *Bitmap {
+	ra := &Bitmap{data: buf[:keysLen]}
 	ra.keys = toUint64Slice(ra.data[:keysLen])
 	ra.keys.setNodeSize(keysLen)
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused
 	// about whether a zero key is a new key or not.
-	offset := ra.newContainer(uint16(initialContainerSize))
+	offset := ra.newContainer(uint16(containerSize))
 	// First two are for num keys. index=2 -> 0 key. index=3 -> offset.
 	ra.keys.setAt(indexNodeStart+1, offset)
 	ra.keys.setNumKeys(1)
 
 	return ra
+}
+
+func calculateKeysLen(numKeys int) int {
+	// Each key must also keep an offset. So, we need to double the number
+	// of uint64s allocated. Plus, we need to make space for the first 2
+	// uint64s to store the number of keys and node size.
+	return 4 * (2*numKeys + 2)
 }
 
 func (ra *Bitmap) initSpaceForKeys(N int) {
