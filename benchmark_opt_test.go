@@ -5,10 +5,29 @@ import (
 	"testing"
 )
 
+var prefilled *Bitmap
+var prefilledBuf []byte
+
+// func init() {
+// 	initPrefilled()
+// }
+
+func initPrefilled() {
+	prefilled = Prefill(200_000_000)
+	prefilledBuf = make([]byte, prefilled.LenBytes())
+}
+
 // go test -v -bench BenchmarkPrefillNative -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func BenchmarkPrefillNative(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		Prefill(200_000_000)
+	}
+}
+
+// go test -v -bench BenchmarkPrefillCloneToBuf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func BenchmarkPrefillCloneToBuf(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		prefilled.CloneToBuf(prefilledBuf)
 	}
 }
 
