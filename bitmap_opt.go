@@ -1,6 +1,7 @@
 package sroar
 
 import (
+	"fmt"
 	"math"
 	"sync"
 )
@@ -765,4 +766,23 @@ func (ra *Bitmap) CapBytes() int {
 		return 0
 	}
 	return cap(ra.data) * 2
+}
+
+func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
+	if len(buf)%2 != 0 {
+		panic(fmt.Sprintf("Buffer size should be even, given %d", len(buf)))
+	}
+
+	a := ra
+	if ra == nil {
+		a = NewBitmap()
+	}
+
+	if alen := a.LenBytes(); alen > len(buf) {
+		panic(fmt.Sprintf("Buffer too small, given %d, required %d", len(buf), alen))
+	}
+
+	abuf := toByteSlice(a.data)
+	copy(buf, abuf)
+	return FromBuffer(buf)
 }

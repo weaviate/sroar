@@ -983,6 +983,50 @@ func TestCapBytes(t *testing.T) {
 	})
 }
 
+func TestCloneToBuf(t *testing.T) {
+	t.Run("non-nil bitmap", func(t *testing.T) {
+		bmEmpty := NewBitmap()
+
+		bm1 := NewBitmap()
+		bm1.Set(1)
+
+		bm2 := NewBitmap()
+		bm2.Set(1)
+		bm2.Set(1 + uint64(maxCardinality))
+
+		bm3 := NewBitmap()
+		bm3.Set(1)
+		bm3.Set(1 + uint64(maxCardinality))
+		bm3.Set(1 + uint64(maxCardinality)*2)
+
+		for name, bm := range map[string]*Bitmap{
+			"empty": bmEmpty,
+			"bm1":   bm1,
+			"bm2":   bm2,
+			"bm3":   bm3,
+		} {
+			t.Run(name, func(t *testing.T) {
+				buf := make([]byte, bm.LenBytes())
+				cloned := bm.CloneToBuf(buf)
+
+				require.Equal(t, bm.GetCardinality(), cloned.GetCardinality())
+				require.Equal(t, bm.LenBytes(), cloned.LenBytes())
+			})
+		}
+	})
+
+	t.Run("nil bitmap", func(t *testing.T) {
+		var bmNil *Bitmap
+		bmEmpty := NewBitmap()
+
+		buf := make([]byte, bmEmpty.LenBytes())
+		cloned := bmNil.CloneToBuf(buf)
+
+		require.Equal(t, bmEmpty.GetCardinality(), cloned.GetCardinality())
+		require.Equal(t, bmEmpty.LenBytes(), cloned.LenBytes())
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
