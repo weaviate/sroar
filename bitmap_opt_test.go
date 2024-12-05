@@ -924,6 +924,28 @@ func TestCompareNumKeys(t *testing.T) {
 	})
 }
 
+func TestPrefill(t *testing.T) {
+	for _, maxX := range []int{
+		0, 1,
+		math.MaxInt16,
+		math.MaxUint16 - 1, math.MaxUint16, math.MaxUint16 + 1,
+		math.MaxUint16*3 - 1, math.MaxUint16 * 3, math.MaxUint16*3 + 1,
+		234_567,
+	} {
+		t.Run(fmt.Sprintf("value %d", maxX), func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+			require.Equal(t, maxX+1, bm.GetCardinality())
+
+			arr := bm.ToArray()
+			require.Len(t, arr, maxX+1)
+
+			for i, x := range arr {
+				require.Equal(t, uint64(i), x)
+			}
+		})
+	}
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
