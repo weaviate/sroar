@@ -672,24 +672,20 @@ func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
 
 // Prefill creates bitmap prefilled with elements [0-maxX]
 func Prefill(maxX uint64) *Bitmap {
-	maxCard64 := uint64(maxCardinality)
-
-	// maxX should be included, therefore +1
-	n := maxX / maxCard64
-	rem := maxX % maxCard64
-	if rem == maxCard64-1 {
-		n++
-	}
-	rem = (rem + 1) % maxCard64
+	n, rem := prefillNoOfFullContAndRem(maxX)
 
 	// create additional container for remaining values (or empty if there are not)
 	// +1 additional key to avoid keys expanding (there should always be 1 spare)
 	bm := newBitmapWithSize(int(n)+1+1, maxContainerSize, int(n)*maxContainerSize)
+	prefill(n, rem, bm)
+	return bm
+}
 
+func prefill(noFullContainers, remainder uint64, bm *Bitmap) {
 	var refContainer []uint16
 	var remOffset = bm.keys.val(0)
 
-	if n > 0 {
+	if noFullContainers > 0 {
 		refContainer = bm.getContainer(remOffset)
 		refContainer[indexSize] = maxContainerSize
 		refContainer[indexType] = typeBitmap
@@ -702,8 +698,8 @@ func Prefill(maxX uint64) *Bitmap {
 		}
 
 		// fill remaining containers by copying reference one
-		for i := uint64(1); i < n; i++ {
-			key := (i * maxCard64) & mask
+		for i := uint64(1); i < noFullContainers; i++ {
+			key := (i * uint64(maxCardinality)) & mask
 			offset := bm.newContainerNoClr(maxContainerSize)
 			bm.setKey(key, offset)
 
@@ -711,7 +707,7 @@ func Prefill(maxX uint64) *Bitmap {
 		}
 
 		// create container for remaining values
-		key := (n * maxCard64) & mask
+		key := (noFullContainers * uint64(maxCardinality)) & mask
 		remOffset = bm.newContainer(maxContainerSize)
 		bm.setKey(key, remOffset)
 	}
@@ -719,11 +715,11 @@ func Prefill(maxX uint64) *Bitmap {
 	container := bm.getContainer(remOffset)
 	container[indexSize] = maxContainerSize
 	container[indexType] = typeBitmap
-	setCardinality(container, int(rem))
+	setCardinality(container, int(remainder))
 
-	if rem > 0 {
-		n16 := uint16(rem) / 16
-		rem16 := uint16(rem) % 16
+	if remainder > 0 {
+		n16 := uint16(remainder) / 16
+		rem16 := uint16(remainder) % 16
 
 		if refContainer != nil {
 			// refContainer available (maxX >= math.MaxUint16-1),
@@ -736,7 +732,7 @@ func Prefill(maxX uint64) *Bitmap {
 		} else {
 			// refContainer not available (maxX < math.MaxUint16-1),
 			// set bits by copying MaxUint64 first, then MaxUint16, then single bits
-			n64 := uint16(rem) / 64
+			n64 := uint16(remainder) / 64
 
 			container64 := uint16To64SliceUnsafe(container[startIdx:])
 			for i := uint16(0); i < n64; i++ {
@@ -750,9 +746,63 @@ func Prefill(maxX uint64) *Bitmap {
 			}
 		}
 	}
-
-	return bm
 }
+
+func prefillNoOfFullContAndRem(maxX uint64) (uint64, uint64) {
+	maxCard64 := uint64(maxCardinality)
+
+	// maxX should be included, therefore +1
+	n := maxX / maxCard64
+	rem := maxX % maxCard64
+	if rem == maxCard64-1 {
+		n++
+	}
+	rem = (rem + 1) % maxCard64
+	return n, rem
+}
+
+func (ra *Bitmap) FillUp(maxX uint64) {
+	if ra == nil {
+		return
+	}
+	if ra.IsEmpty() {
+		n, rem := prefillNoOfFullContAndRem(maxX)
+		keysLen := calculateKeysLen(int(n + 1 + 1))
+		containersLen := int(n+1) * maxContainerSize
+		minSize := keysLen + containersLen
+
+		var bm *Bitmap
+		if minSize <= cap(ra.data) {
+			bm = newBitampWithBuf(keysLen, maxContainerSize, ra.data)
+		} else {
+			buf := make([]uint16, minSize)
+			bm = newBitampWithBuf(keysLen, maxContainerSize, buf)
+		}
+		prefill(n, rem, bm)
+		ra.data = bm.data
+		ra._ptr = bm._ptr
+		ra.keys = bm.keys
+		return
+	}
+}
+
+/*
+	fillup:
+
+	- if empty
+		- if size < required - replace with new prefilled
+		- if size >= required - reuse memory
+			reset memory, create prefilled from scratch
+	- if filled
+		- if size < required - replace with new prefilled
+		- if size >= required - reuse memory
+			- if will fit new containers and last one as bitmap
+				convert last to bitmap (if needed)
+				add missing containers as bitmaps
+			- if not
+				reset memory, create prefilled from scratch
+
+*/
 
 func (ra *Bitmap) LenBytes() int {
 	if ra == nil {

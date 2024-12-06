@@ -946,6 +946,49 @@ func TestPrefill(t *testing.T) {
 	}
 }
 
+func TestFillup(t *testing.T) {
+	t.Run("nil bitmap, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		var bmNil *Bitmap
+		bmNil.FillUp(uint64(maxX))
+
+		require.Nil(t, bmNil)
+	})
+
+	t.Run("empty small bitmap, data slice extended", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmSmall := NewBitmap()
+		capBytes := bmSmall.CapBytes()
+
+		bmSmall.FillUp(uint64(maxX))
+		require.Less(t, capBytes, bmSmall.CapBytes())
+
+		require.Equal(t, maxX+1, bmSmall.GetCardinality())
+		arr := bmSmall.ToArray()
+		require.Len(t, arr, maxX+1)
+		for i, x := range arr {
+			require.Equal(t, uint64(i), x)
+		}
+	})
+
+	t.Run("empty big bitmap, data slice reused", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmBig := NewBitmap()
+		bmBig.expandNoLengthChange(3 * maxContainerSize)
+		capBytes := bmBig.CapBytes()
+
+		bmBig.FillUp(uint64(maxX))
+		require.Equal(t, capBytes, bmBig.CapBytes())
+
+		require.Equal(t, maxX+1, bmBig.GetCardinality())
+		arr := bmBig.ToArray()
+		require.Len(t, arr, maxX+1)
+		for i, x := range arr {
+			require.Equal(t, uint64(i), x)
+		}
+	})
+}
+
 func TestLenBytes(t *testing.T) {
 	t.Run("nil bitmap", func(t *testing.T) {
 		var bm *Bitmap
