@@ -32,6 +32,44 @@ func BenchmarkPrefillFromSortedList(b *testing.B) {
 	}
 }
 
+// go test -v -bench BenchmarkFillUpNative -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func BenchmarkFillUpNative(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		bm := Prefill(100_000_000)
+		bm.FillUp(150_000_000)
+		bm.FillUp(200_000_000)
+	}
+}
+
+// go test -v -bench BenchmarkPrefillFromSortedList -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
+func BenchmarkFillUpFromSortedList(b *testing.B) {
+	prefillBufferSize := 65_536
+	prefillX := uint64(100_000_000)
+	fillupX1 := uint64(150_000_000)
+	fillupX2 := uint64(200_000_000)
+	inc := uint64(prefillBufferSize)
+	buf := make([]uint64, prefillBufferSize)
+
+	for i := 0; i < b.N; i++ {
+		bm := Prefill(prefillX)
+
+		for i := prefillX + 1; i <= fillupX1; i += inc {
+			j := uint64(0)
+			for ; j < inc && i+j <= fillupX1; j++ {
+				buf[j] = i + j
+			}
+			bm.Or(FromSortedList(buf[:j]))
+		}
+		for i := fillupX1 + 1; i <= fillupX2; i += inc {
+			j := uint64(0)
+			for ; j < inc && i+j <= fillupX2; j++ {
+				buf[j] = i + j
+			}
+			bm.Or(FromSortedList(buf[:j]))
+		}
+	}
+}
+
 // ================================================================================
 //
 // BENCHMARKS comparing performance of different merge implementations
