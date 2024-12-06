@@ -106,7 +106,7 @@ func newBitmapWithSize(numKeys, initialContainerSize, additionalContainersSize i
 	if numKeys < 2 {
 		panic("Must contain at least two keys.")
 	}
-	keysLen := calculateKeysLen(numKeys)
+	keysLen := calculateInitialKeysLen(numKeys)
 	containersLen := initialContainerSize + additionalContainersSize
 	buf := make([]uint16, keysLen+containersLen)
 	return newBitampWithBuf(keysLen, initialContainerSize, buf)
@@ -127,7 +127,7 @@ func newBitampWithBuf(keysLen, containerSize int, buf []uint16) *Bitmap {
 	return ra
 }
 
-func calculateKeysLen(numKeys int) int {
+func calculateInitialKeysLen(numKeys int) int {
 	// Each key must also keep an offset. So, we need to double the number
 	// of uint64s allocated. Plus, we need to make space for the first 2
 	// uint64s to store the number of keys and node size.
