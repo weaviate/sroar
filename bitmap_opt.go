@@ -765,6 +765,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 	if ra == nil {
 		return
 	}
+
 	if ra.IsEmpty() {
 		n, rem := prefillNoOfFullContAndRem(maxX)
 		keysLen := calculateKeysLen(int(n + 1 + 1))
@@ -782,6 +783,12 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		ra.data = bm.data
 		ra._ptr = bm._ptr
 		ra.keys = bm.keys
+		return
+	}
+
+	curMaxX := ra.Maximum()
+	if curMaxX >= maxX {
+		fmt.Println("lower")
 		return
 	}
 }

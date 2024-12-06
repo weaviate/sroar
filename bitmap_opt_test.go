@@ -987,6 +987,39 @@ func TestFillup(t *testing.T) {
 			require.Equal(t, uint64(i), x)
 		}
 	})
+
+	t.Run("max value already >= than given maxX, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
+
+		t.Run("prefilled", func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+			lenBytes := bm.LenBytes()
+			capBytes := bm.CapBytes()
+
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+		})
+
+		t.Run("single element", func(t *testing.T) {
+			bm := NewBitmap()
+			bm.Set(uint64(maxX))
+			lenBytes := bm.LenBytes()
+			capBytes := bm.CapBytes()
+
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+		})
+	})
 }
 
 func TestLenBytes(t *testing.T) {
