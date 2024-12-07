@@ -950,7 +950,8 @@ func TestFillup(t *testing.T) {
 	assertPrefilled := func(t *testing.T, maxX int, prefilled *Bitmap) {
 		require.Equal(t, maxX+1, prefilled.GetCardinality())
 		arr := prefilled.ToArray()
-		require.Len(t, arr, maxX+1)
+		// fmt.Println(arr)
+		require.Equal(t, maxX+1, len(arr))
 		for i, x := range arr {
 			require.Equal(t, uint64(i), x)
 		}
@@ -1022,10 +1023,10 @@ func TestFillup(t *testing.T) {
 
 	t.Run("max value in same container as given maxX", func(t *testing.T) {
 		for _, prefillX := range []int{
-			1023, 1024, 1025, // 1039, 1040, 1041,
+			1023, 1024, 1025, 1039, 1040, 1041,
 		} {
 			for _, fillupX := range []int{
-				4095, //4096, 4097, 4111, 4112, 4113,
+				4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, //maxCardinality - 1,
 			} {
 				t.Run(fmt.Sprintf("prefilled %d to %d", prefillX, fillupX), func(t *testing.T) {
 					prefilled := Prefill(uint64(prefillX))

@@ -850,7 +850,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 				pos := y % 16
 				c16[idx] |= bitmapMask[pos]
 			}
-			for y, r := r16, maxY; y < r; i++ {
+			for y, r := r16, maxY; y <= r; y++ {
 				idx := y / 16
 				pos := y % 16
 				c16[idx] |= bitmapMask[pos]
