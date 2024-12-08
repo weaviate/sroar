@@ -1042,24 +1042,52 @@ func TestFillUp(t *testing.T) {
 		// 	}
 		// }
 
+		// for _, currentMaxX := range []int{
+		// 	1023, 1024, 1025, 1039, 1040, 1041,
+		// } {
+		// 	for _, fillUpX := range []int{
+		// 		1055, 1056, 1057, 1082,
+		// 	} {
+		// 		t.Run(fmt.Sprintf("single elem array %d to %d, no resize", currentMaxX, fillUpX), func(t *testing.T) {
+		// 			singleElem := NewBitmap()
+		// 			singleElem.Set(uint64(currentMaxX))
+		// 			lenBytes := singleElem.LenBytes()
+		// 			capBytes := singleElem.CapBytes()
+
+		// 			singleElem.FillUp(uint64(fillUpX))
+		// 			require.Equal(t, lenBytes, singleElem.LenBytes())
+		// 			require.Equal(t, capBytes, singleElem.CapBytes())
+
+		// 			require.Equal(t, fillUpX-currentMaxX+1, singleElem.GetCardinality())
+		// 			arr := singleElem.ToArray()
+		// 			require.Equal(t, fillUpX-currentMaxX+1, len(arr))
+		// 			for i, x := range arr {
+		// 				require.Equal(t, uint64(i+currentMaxX), x)
+		// 			}
+		// 		})
+		// 	}
+		// }
+
 		for _, currentMaxX := range []int{
 			1023, 1024, 1025, 1039, 1040, 1041,
 		} {
 			for _, fillUpX := range []int{
-				1055, 1056, 1057, 1082,
+				4095, 4096, 4097, maxCardinality - 1,
 			} {
-				t.Run(fmt.Sprintf("single elem array %d to %d, no resize", currentMaxX, fillUpX), func(t *testing.T) {
-					arraySingleElem := NewBitmap()
-					arraySingleElem.Set(uint64(currentMaxX))
-					lenBytes := arraySingleElem.LenBytes()
-					capBytes := arraySingleElem.CapBytes()
+				t.Run(fmt.Sprintf("single elem array %d to %d, convert to bitmap", currentMaxX, fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(currentMaxX))
+					singleElem.expandNoLengthChange(maxContainerSize)
+					lenBytes := singleElem.LenBytes()
+					capBytes := singleElem.CapBytes()
 
-					arraySingleElem.FillUp(uint64(fillUpX))
-					require.Equal(t, lenBytes, arraySingleElem.LenBytes())
-					require.Equal(t, capBytes, arraySingleElem.CapBytes())
+					singleElem.FillUp(uint64(fillUpX))
+					require.Less(t, lenBytes, singleElem.LenBytes())
+					require.Equal(t, capBytes, singleElem.CapBytes())
 
-					require.Equal(t, fillUpX-currentMaxX+1, arraySingleElem.GetCardinality())
-					arr := arraySingleElem.ToArray()
+					require.Equal(t, fillUpX-currentMaxX+1, singleElem.GetCardinality())
+					arr := singleElem.ToArray()
+					// fmt.Println(arr)
 					require.Equal(t, fillUpX-currentMaxX+1, len(arr))
 					for i, x := range arr {
 						require.Equal(t, uint64(i+currentMaxX), x)

@@ -852,14 +852,14 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 			} else {
 				prevArray := commonContainer
 				offset = ra.newContainer(maxContainerSize)
-				commonContainer := ra.getContainer(offset)
+				commonContainer = ra.getContainer(offset)
 				commonContainer[indexSize] = maxContainerSize
 				commonContainer[indexType] = typeBitmap
 				ra.setKey(maxXCurKey, offset)
 
 				for i := 0; i < card; i++ {
 					y := prevArray[startIdx+uint16(i)]
-					commonContainer[y/16] |= bitmapMask[y%16]
+					commonContainer[startIdx+y/16] |= bitmapMask[y%16]
 				}
 				bitmap(commonContainer).setRange(maxYCur, maxY, nil)
 			}
