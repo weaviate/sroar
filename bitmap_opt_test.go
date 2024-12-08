@@ -1026,7 +1026,7 @@ func TestFillup(t *testing.T) {
 			1023, 1024, 1025, 1039, 1040, 1041,
 		} {
 			for _, fillupX := range []int{
-				4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, //maxCardinality - 1,
+				4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, maxCardinality - 1,
 			} {
 				t.Run(fmt.Sprintf("prefilled %d to %d", prefillX, fillupX), func(t *testing.T) {
 					prefilled := Prefill(uint64(prefillX))

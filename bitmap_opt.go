@@ -820,8 +820,8 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		offset := ra.keys.val(i)
 		commonContainer := ra.getContainer(offset)
 
-		maxY := uint16(maxX)
-		maxYCur := uint16(maxXCur)
+		maxY := int(uint16(maxX))
+		maxYCur := int(uint16(maxXCur))
 
 		switch commonContainer[indexType] {
 		case typeBitmap:
@@ -831,31 +831,44 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 			r64 := (maxY + 1) / 64 * 64
 
 			fmt.Printf("  ==> maxYCur [%d] l16 [%d] l64 [%d]\n", maxYCur, l16, l64)
-			fmt.Printf("  ==> maxY [%d] r16 [%d] r64 [%d]\n\n", maxY, r16, r64)
+			fmt.Printf("  ==> maxY [%d] r16 [%d] r64 [%d]\n", maxY, r16, r64)
 
 			c16 := commonContainer[startIdx:]
 			c64 := uint16To64SliceUnsafe(commonContainer[startIdx:])
 
+			count64 := 0
+			count16left := 0
+			count16right := 0
+			count1left := 0
+			count1right := 0
 			for i, r := l64/64, r64/64; i < r; i++ {
+				count64++
 				c64[i] = math.MaxUint64
 			}
 			for i, r := l16/16, l64/16; i < r; i++ {
+				count16left++
 				c16[i] = math.MaxUint16
 			}
 			for i, r := r64/16, r16/16; i < r; i++ {
+				count16right++
 				c16[i] = math.MaxUint16
 			}
 			for y, r := maxYCur+1, l16; y < r; y++ {
+				count1left++
 				idx := y / 16
 				pos := y % 16
 				c16[idx] |= bitmapMask[pos]
 			}
 			for y, r := r16, maxY; y <= r; y++ {
+				count1right++
 				idx := y / 16
 				pos := y % 16
 				c16[idx] |= bitmapMask[pos]
 			}
 			setCardinality(commonContainer, getCardinality(commonContainer)+int(maxY-maxYCur))
+
+			fmt.Printf("  ==> count64 [%d] count16left [%d] count16right [%d] count1left [%d] count1right [%d]\n\n",
+				count64, count16left, count16right, count1left, count1right)
 		case typeArray:
 
 		}
