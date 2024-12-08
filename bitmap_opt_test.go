@@ -1057,6 +1057,13 @@ func TestFillUp(t *testing.T) {
 					arraySingleElem.FillUp(uint64(fillUpX))
 					require.Equal(t, lenBytes, arraySingleElem.LenBytes())
 					require.Equal(t, capBytes, arraySingleElem.CapBytes())
+
+					require.Equal(t, fillUpX-currentMaxX+1, arraySingleElem.GetCardinality())
+					arr := arraySingleElem.ToArray()
+					require.Equal(t, fillUpX-currentMaxX+1, len(arr))
+					for i, x := range arr {
+						require.Equal(t, uint64(i+currentMaxX), x)
+					}
 				})
 			}
 		}
