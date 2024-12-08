@@ -715,41 +715,17 @@ func prefill(noFullContainers, remainder uint64, bm *Bitmap) {
 			remOffset = bm.newContainer(maxContainerSize)
 			bm.setKey(key, remOffset)
 		} else {
+			// get first container
 			remOffset = bm.keys.val(0)
 		}
+
+		// fmt.Printf("  ==> remainder [%d][%d]\n", remainder, int(remainder))
 
 		container := bm.getContainer(remOffset)
 		container[indexSize] = maxContainerSize
 		container[indexType] = typeBitmap
 		setCardinality(container, int(remainder))
-
-		n16 := uint16(remainder) / 16
-		rem16 := uint16(remainder) % 16
-
-		if refContainer != nil {
-			// refContainer available (maxX >= math.MaxUint16-1),
-			// fill remaining values container by copying biggest possible slice of refContainer (batches of 16s)
-			copy(bm.data[remOffset+uint64(startIdx):], refContainer[startIdx:startIdx+n16])
-			// set remaining bits
-			for i := uint16(0); i < rem16; i++ {
-				container[startIdx+n16] |= bitmapMask[i]
-			}
-		} else {
-			// refContainer not available (maxX < math.MaxUint16-1),
-			// set bits by copying MaxUint64 first, then MaxUint16, then single bits
-			n64 := uint16(remainder) / 64
-
-			container64 := uint16To64SliceUnsafe(container[startIdx:])
-			for i := uint16(0); i < n64; i++ {
-				container64[i] = math.MaxUint64
-			}
-			for i := uint16(n64 * 4); i < n16; i++ {
-				container[startIdx+i] = math.MaxUint16
-			}
-			for i := uint16(0); i < rem16; i++ {
-				container[startIdx+n16] |= bitmapMask[i]
-			}
-		}
+		bitmap(container).setRange(0, int(remainder)-1, refContainer)
 	}
 }
 
@@ -763,10 +739,11 @@ func prefillNoOfFullContAndRem(maxX uint64) (uint64, uint64) {
 		n++
 	}
 	rem = (rem + 1) % maxCard64
+	// fmt.Printf("  ==> maxX [%d] n [%d] rem [%d]\n", maxX, n, rem)
 	return n, rem
 }
 
-func (b bitmap) setRange(leftY, rightY int, onesContainer []uint16) {
+func (b bitmap) setRange(leftY, rightY int, onesBitmap bitmap) {
 	leftY16 := (leftY + 15) / 16 * 16
 	leftY64 := (leftY + 63) / 64 * 64
 	rightY16 := (rightY + 1) / 16 * 16
@@ -776,8 +753,9 @@ func (b bitmap) setRange(leftY, rightY int, onesContainer []uint16) {
 	// fmt.Printf("  ==> maxY [%d] r16 [%d] r64 [%d]\n", rightY, rightY16, rightY64)
 
 	container16 := b[startIdx:]
-	if onesContainer != nil {
-		copy(container16[leftY16:rightY16], onesContainer[startIdx+uint16(leftY16):startIdx+uint16(rightY16)])
+	if onesBitmap != nil {
+		l, r := uint16(leftY16/16), uint16(rightY16/16)
+		copy(container16[l:r], onesBitmap[startIdx+l:startIdx+r])
 	} else {
 		for i, r := leftY16/16, leftY64/16; i < r; i++ {
 			container16[i] = math.MaxUint16
@@ -792,7 +770,7 @@ func (b bitmap) setRange(leftY, rightY int, onesContainer []uint16) {
 			}
 		}
 	}
-	for y, r := leftY+1, leftY16; y < r; y++ {
+	for y, r := leftY, leftY16; y < r; y++ {
 		container16[y/16] |= bitmapMask[y%16]
 	}
 	for y, r := rightY16, rightY; y <= r; y++ {
@@ -850,12 +828,12 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 
 	// same container
 	if maxXKey == maxXCurKey {
+		maxY := int(uint16(maxX))
+		maxYCur := int(uint16(maxXCur))
+
 		i := ra.keys.searchRev(maxXKey)
 		offset := ra.keys.val(i)
 		commonContainer := ra.getContainer(offset)
-
-		maxY := int(uint16(maxX))
-		maxYCur := int(uint16(maxXCur))
 
 		switch commonContainer[indexType] {
 		case typeBitmap:

@@ -946,7 +946,7 @@ func TestPrefill(t *testing.T) {
 	}
 }
 
-func TestFillup(t *testing.T) {
+func TestFillUp(t *testing.T) {
 	assertPrefilled := func(t *testing.T, maxX int, prefilled *Bitmap) {
 		require.Equal(t, maxX+1, prefilled.GetCardinality())
 		arr := prefilled.ToArray()
