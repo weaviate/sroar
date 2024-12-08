@@ -745,29 +745,31 @@ func prefillNoOfFullContAndRem(maxX uint64) (uint64, uint64) {
 
 func (b bitmap) setRange(leftY, rightY int, onesBitmap bitmap) {
 	leftY16 := (leftY + 15) / 16 * 16
-	leftY64 := (leftY + 63) / 64 * 64
 	rightY16 := (rightY + 1) / 16 * 16
-	rightY64 := (rightY + 1) / 64 * 64
 
 	// fmt.Printf("  ==> maxYCur [%d] l16 [%d] l64 [%d]\n", leftY, leftY16, leftY64)
 	// fmt.Printf("  ==> maxY [%d] r16 [%d] r64 [%d]\n", rightY, rightY16, rightY64)
 
 	container16 := b[startIdx:]
 	if onesBitmap != nil {
-		l, r := uint16(leftY16/16), uint16(rightY16/16)
+		l := uint16(leftY16 / 16)
+		r := uint16(rightY16 / 16)
 		copy(container16[l:r], onesBitmap[startIdx+l:startIdx+r])
 	} else {
-		for i, r := leftY16/16, leftY64/16; i < r; i++ {
-			container16[i] = math.MaxUint16
-		}
-		for i, r := rightY64/16, rightY16/16; i < r; i++ {
-			container16[i] = math.MaxUint16
-		}
+		leftY64 := (leftY + 63) / 64 * 64
+		rightY64 := (rightY + 1) / 64 * 64
+
 		if l, r := leftY64/64, rightY64/64; l < r {
 			container64 := uint16To64SliceUnsafe(container16)
 			for i := l; i < r; i++ {
 				container64[i] = math.MaxUint64
 			}
+		}
+		for i, r := leftY16/16, leftY64/16; i < r; i++ {
+			container16[i] = math.MaxUint16
+		}
+		for i, r := rightY64/16, rightY16/16; i < r; i++ {
+			container16[i] = math.MaxUint16
 		}
 	}
 	for y, r := leftY, leftY16; y < r; y++ {
