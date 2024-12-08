@@ -957,69 +957,69 @@ func TestFillup(t *testing.T) {
 		}
 	}
 
-	// t.Run("nil bitmap, noop", func(t *testing.T) {
-	// 	maxX := maxCardinality + 1
-	// 	var bmNil *Bitmap
-	// 	bmNil.FillUp(uint64(maxX))
+	t.Run("nil bitmap, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		var bmNil *Bitmap
+		bmNil.FillUp(uint64(maxX))
 
-	// 	require.Nil(t, bmNil)
-	// })
+		require.Nil(t, bmNil)
+	})
 
-	// t.Run("empty small bitmap, data slice extended", func(t *testing.T) {
-	// 	maxX := maxCardinality + 1
-	// 	bmSmall := NewBitmap()
-	// 	capBytes := bmSmall.CapBytes()
+	t.Run("empty small bitmap, data slice extended", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmSmall := NewBitmap()
+		capBytes := bmSmall.CapBytes()
 
-	// 	bmSmall.FillUp(uint64(maxX))
-	// 	require.Less(t, capBytes, bmSmall.CapBytes())
+		bmSmall.FillUp(uint64(maxX))
+		require.Less(t, capBytes, bmSmall.CapBytes())
 
-	// 	assertPrefilled(t, maxX, bmSmall)
-	// })
+		assertPrefilled(t, maxX, bmSmall)
+	})
 
-	// t.Run("empty big bitmap, data slice reused", func(t *testing.T) {
-	// 	maxX := maxCardinality + 1
-	// 	bmBig := NewBitmap()
-	// 	bmBig.expandNoLengthChange(3 * maxContainerSize)
-	// 	capBytes := bmBig.CapBytes()
+	t.Run("empty big bitmap, data slice reused", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmBig := NewBitmap()
+		bmBig.expandNoLengthChange(3 * maxContainerSize)
+		capBytes := bmBig.CapBytes()
 
-	// 	bmBig.FillUp(uint64(maxX))
-	// 	require.Equal(t, capBytes, bmBig.CapBytes())
+		bmBig.FillUp(uint64(maxX))
+		require.Equal(t, capBytes, bmBig.CapBytes())
 
-	// 	assertPrefilled(t, maxX, bmBig)
-	// })
+		assertPrefilled(t, maxX, bmBig)
+	})
 
-	// t.Run("max value already >= than given maxX, noop", func(t *testing.T) {
-	// 	maxX := maxCardinality + 1
+	t.Run("max value already >= than given maxX, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
 
-	// 	t.Run("prefilled", func(t *testing.T) {
-	// 		bm := Prefill(uint64(maxX))
-	// 		lenBytes := bm.LenBytes()
-	// 		capBytes := bm.CapBytes()
+		t.Run("prefilled", func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+			lenBytes := bm.LenBytes()
+			capBytes := bm.CapBytes()
 
-	// 		bm.FillUp(uint64(maxX - 10))
-	// 		require.Equal(t, lenBytes, bm.LenBytes())
-	// 		require.Equal(t, capBytes, bm.CapBytes())
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
 
-	// 		bm.FillUp(uint64(maxX))
-	// 		require.Equal(t, lenBytes, bm.LenBytes())
-	// 		require.Equal(t, capBytes, bm.CapBytes())
-	// 	})
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+		})
 
-	// 	t.Run("single element", func(t *testing.T) {
-	// 		bm := NewBitmap()
-	// 		bm.Set(uint64(maxX))
-	// 		lenBytes := bm.LenBytes()
-	// 		capBytes := bm.CapBytes()
+		t.Run("single element", func(t *testing.T) {
+			bm := NewBitmap()
+			bm.Set(uint64(maxX))
+			lenBytes := bm.LenBytes()
+			capBytes := bm.CapBytes()
 
-	// 		bm.FillUp(uint64(maxX - 10))
-	// 		require.Equal(t, lenBytes, bm.LenBytes())
-	// 		require.Equal(t, capBytes, bm.CapBytes())
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
 
-	// 		bm.FillUp(uint64(maxX))
-	// 		require.Equal(t, lenBytes, bm.LenBytes())
-	// 		require.Equal(t, capBytes, bm.CapBytes())
-	// 	})
-	// })
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenBytes())
+			require.Equal(t, capBytes, bm.CapBytes())
+		})
+	})
 
 	t.Run("max value in same container as given maxX", func(t *testing.T) {
 		for _, prefillX := range []int{
