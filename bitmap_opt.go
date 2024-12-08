@@ -836,18 +836,38 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		i := ra.keys.searchRev(maxXKey)
 		offset := ra.keys.val(i)
 		commonContainer := ra.getContainer(offset)
+		card := getCardinality(commonContainer)
+		newElems := maxY - maxYCur
 
 		switch commonContainer[indexType] {
 		case typeBitmap:
 			bitmap(commonContainer).setRange(maxYCur, maxY, nil)
 		case typeArray:
+			size := commonContainer[indexSize]
+			// fmt.Printf("  ==> size [%d] card [%d] newElems [%d] space [%d]\n", size, card, newElems, int(size-startIdx)-card)
+			if spaceLeft := int(size-startIdx) - card; spaceLeft >= newElems {
+				for i := 0; i < newElems; i++ {
+					commonContainer[startIdx+uint16(card+i)] = uint16(maxYCur + 1 + i)
+				}
+			} else {
+				prevArray := commonContainer
+				offset = ra.newContainer(maxContainerSize)
+				commonContainer := ra.getContainer(offset)
+				commonContainer[indexSize] = maxContainerSize
+				commonContainer[indexType] = typeBitmap
+				ra.setKey(maxXCurKey, offset)
 
+				for i := 0; i < card; i++ {
+					y := prevArray[startIdx+uint16(i)]
+					commonContainer[y/16] |= bitmapMask[y%16]
+				}
+				bitmap(commonContainer).setRange(maxYCur, maxY, nil)
+			}
 		default:
 			panic("unknown container type")
 		}
 
-		newCard := getCardinality(commonContainer) + maxY - maxYCur
-		setCardinality(commonContainer, newCard)
+		setCardinality(commonContainer, card+newElems)
 		return
 	}
 
