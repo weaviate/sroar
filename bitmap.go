@@ -108,14 +108,18 @@ func newBitmapWithSize(numKeys, initialContainerSize, additionalContainersSize i
 	}
 	keysLen := calculateInitialKeysLen(numKeys)
 	containersLen := initialContainerSize + additionalContainersSize
+	// fmt.Printf("  ==> keysLen [%d] containersLen [%d], init cont size [%d] add cont size [%d] buf size [%d]\n",
+	// 	keysLen, containersLen, initialContainerSize, additionalContainersSize, keysLen+containersLen)
 	buf := make([]uint16, keysLen+containersLen)
 	return newBitampWithBuf(keysLen, initialContainerSize, buf)
 }
 
 func newBitampWithBuf(keysLen, containerSize int, buf []uint16) *Bitmap {
 	ra := &Bitmap{data: buf[:keysLen]}
-	ra.keys = toUint64Slice(ra.data[:keysLen])
+	ra.keys = toUint64Slice(ra.data)
 	ra.keys.setNodeSize(keysLen)
+
+	// fmt.Printf("  ==> (newBitampWithBuf) len [%d] cap [%d]\n", ra.LenBytes(), ra.CapBytes())
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused
 	// about whether a zero key is a new key or not.
@@ -245,9 +249,14 @@ func (ra *Bitmap) scootLeft(offset uint64, size uint64) {
 }
 
 func (ra *Bitmap) newContainer(sz uint16) uint64 {
+	// fmt.Printf("  ==> newContainer sz [%d]\n", sz)
 	offset := ra.newContainerNoClr(sz)
+	// fmt.Printf("  ==> newContainer offset [%d]\n", offset)
 	ra.data[offset] = sz
+	// fmt.Printf("  ==> newContainer ra.data[offset] [%d]\n", ra.data[offset])
 	Memclr(ra.data[offset+1 : offset+uint64(sz)])
+	// fmt.Printf("  ==> newContainer ra.data[offset] [%d]\n", ra.data[offset])
+
 	return offset
 }
 
