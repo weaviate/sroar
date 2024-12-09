@@ -947,15 +947,23 @@ func TestPrefill(t *testing.T) {
 }
 
 func TestFillUp(t *testing.T) {
-	// assertPrefilled := func(t *testing.T, maxX int, prefilled *Bitmap) {
-	// 	require.Equal(t, maxX+1, prefilled.GetCardinality())
-	// 	arr := prefilled.ToArray()
-	// 	// fmt.Println(arr)
-	// 	require.Equal(t, maxX+1, len(arr))
-	// 	for i, x := range arr {
-	// 		require.Equal(t, uint64(i), x)
-	// 	}
-	// }
+	assertPrefilled := func(t *testing.T, maxX int, prefilled *Bitmap) {
+		require.Equal(t, maxX+1, prefilled.GetCardinality())
+		arr := prefilled.ToArray()
+		// fmt.Println(arr)
+		require.Equal(t, maxX+1, len(arr))
+		for i, x := range arr {
+			require.Equal(t, uint64(i), x)
+		}
+	}
+	assertFilledUp := func(t *testing.T, minX, maxX int, filled *Bitmap) {
+		require.Equal(t, maxX-minX+1, filled.GetCardinality())
+		arr := filled.ToArray()
+		require.Equal(t, maxX-minX+1, len(arr))
+		for i, x := range arr {
+			require.Equal(t, uint64(i+minX), x)
+		}
+	}
 
 	// t.Run("nil bitmap, noop", func(t *testing.T) {
 	// 	maxX := maxCardinality + 1
@@ -1022,51 +1030,75 @@ func TestFillUp(t *testing.T) {
 	// })
 
 	t.Run("max value in same container as given maxX", func(t *testing.T) {
-		// for _, prefillX := range []int{
-		// 	1023, 1024, 1025, 1039, 1040, 1041,
-		// } {
-		// 	for _, fillUpX := range []int{
-		// 		4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, maxCardinality - 1,
-		// 	} {
-		// 		t.Run(fmt.Sprintf("prefilled bitmap %d to %d", prefillX, fillUpX), func(t *testing.T) {
-		// 			prefilled := Prefill(uint64(prefillX))
-		// 			lenBytes := prefilled.LenBytes()
-		// 			capBytes := prefilled.CapBytes()
+		for _, prefillX := range []int{
+			1023, 1024, 1025, 1039, 1040, 1041,
+		} {
+			for _, fillUpX := range []int{
+				4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, maxCardinality - 1,
+			} {
+				t.Run(fmt.Sprintf("prefilled bitmap filled up 1x %d to %d, no resize", prefillX, fillUpX), func(t *testing.T) {
+					prefilled := Prefill(uint64(prefillX))
+					lenBytes := prefilled.LenBytes()
+					capBytes := prefilled.CapBytes()
 
-		// 			prefilled.FillUp(uint64(fillUpX))
-		// 			require.Equal(t, lenBytes, prefilled.LenBytes())
-		// 			require.Equal(t, capBytes, prefilled.CapBytes())
+					prefilled.FillUp(uint64(fillUpX))
+					require.Equal(t, lenBytes, prefilled.LenBytes())
+					require.Equal(t, capBytes, prefilled.CapBytes())
 
-		// 			assertPrefilled(t, fillUpX, prefilled)
-		// 		})
-		// 	}
-		// }
+					assertPrefilled(t, fillUpX, prefilled)
+				})
 
-		// for _, currentMaxX := range []int{
-		// 	1023, 1024, 1025, 1039, 1040, 1041,
-		// } {
-		// 	for _, fillUpX := range []int{
-		// 		1055, 1056, 1057, 1082,
-		// 	} {
-		// 		t.Run(fmt.Sprintf("single elem array %d to %d, no resize", currentMaxX, fillUpX), func(t *testing.T) {
-		// 			singleElem := NewBitmap()
-		// 			singleElem.Set(uint64(currentMaxX))
-		// 			lenBytes := singleElem.LenBytes()
-		// 			capBytes := singleElem.CapBytes()
+				t.Run(fmt.Sprintf("prefilled bitmap filled up 3x %d to %d, no resize", prefillX, fillUpX), func(t *testing.T) {
+					prefilled := Prefill(uint64(prefillX))
+					lenBytes := prefilled.LenBytes()
+					capBytes := prefilled.CapBytes()
 
-		// 			singleElem.FillUp(uint64(fillUpX))
-		// 			require.Equal(t, lenBytes, singleElem.LenBytes())
-		// 			require.Equal(t, capBytes, singleElem.CapBytes())
+					prefilled.FillUp(uint64(fillUpX) - 20)
+					prefilled.FillUp(uint64(fillUpX) - 10)
+					prefilled.FillUp(uint64(fillUpX))
+					require.Equal(t, lenBytes, prefilled.LenBytes())
+					require.Equal(t, capBytes, prefilled.CapBytes())
 
-		// 			require.Equal(t, fillUpX-currentMaxX+1, singleElem.GetCardinality())
-		// 			arr := singleElem.ToArray()
-		// 			require.Equal(t, fillUpX-currentMaxX+1, len(arr))
-		// 			for i, x := range arr {
-		// 				require.Equal(t, uint64(i+currentMaxX), x)
-		// 			}
-		// 		})
-		// 	}
-		// }
+					assertPrefilled(t, fillUpX, prefilled)
+				})
+			}
+		}
+
+		for _, currentMaxX := range []int{
+			1023, 1024, 1025, 1039, 1040, 1041,
+		} {
+			for _, fillUpX := range []int{
+				1055, 1056, 1057, 1082,
+			} {
+				t.Run(fmt.Sprintf("single elem array filled 1x %d to %d, no resize", currentMaxX, fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(currentMaxX))
+					lenBytes := singleElem.LenBytes()
+					capBytes := singleElem.CapBytes()
+
+					singleElem.FillUp(uint64(fillUpX))
+					require.Equal(t, lenBytes, singleElem.LenBytes())
+					require.Equal(t, capBytes, singleElem.CapBytes())
+
+					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
+				})
+
+				t.Run(fmt.Sprintf("single elem array filled 3x %d to %d, no resize", currentMaxX, fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(currentMaxX))
+					lenBytes := singleElem.LenBytes()
+					capBytes := singleElem.CapBytes()
+
+					singleElem.FillUp(uint64(fillUpX) - 10)
+					singleElem.FillUp(uint64(fillUpX) - 5)
+					singleElem.FillUp(uint64(fillUpX))
+					require.Equal(t, lenBytes, singleElem.LenBytes())
+					require.Equal(t, capBytes, singleElem.CapBytes())
+
+					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
+				})
+			}
+		}
 
 		for _, currentMaxX := range []int{
 			1023, 1024, 1025, 1039, 1040, 1041,
@@ -1074,7 +1106,7 @@ func TestFillUp(t *testing.T) {
 			for _, fillUpX := range []int{
 				4095, 4096, 4097, maxCardinality - 1,
 			} {
-				t.Run(fmt.Sprintf("single elem array %d to %d, convert to bitmap", currentMaxX, fillUpX), func(t *testing.T) {
+				t.Run(fmt.Sprintf("single elem array filled 1x %d to %d, convert to bitmap", currentMaxX, fillUpX), func(t *testing.T) {
 					singleElem := NewBitmap()
 					singleElem.Set(uint64(currentMaxX))
 					singleElem.expandNoLengthChange(maxContainerSize)
@@ -1085,13 +1117,23 @@ func TestFillUp(t *testing.T) {
 					require.Less(t, lenBytes, singleElem.LenBytes())
 					require.Equal(t, capBytes, singleElem.CapBytes())
 
-					require.Equal(t, fillUpX-currentMaxX+1, singleElem.GetCardinality())
-					arr := singleElem.ToArray()
-					// fmt.Println(arr)
-					require.Equal(t, fillUpX-currentMaxX+1, len(arr))
-					for i, x := range arr {
-						require.Equal(t, uint64(i+currentMaxX), x)
-					}
+					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
+				})
+
+				t.Run(fmt.Sprintf("single elem array filled 3x %d to %d, convert to bitmap", currentMaxX, fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(currentMaxX))
+					singleElem.expandNoLengthChange(maxContainerSize)
+					lenBytes := singleElem.LenBytes()
+					capBytes := singleElem.CapBytes()
+
+					singleElem.FillUp(uint64(fillUpX) - 3040)
+					singleElem.FillUp(uint64(fillUpX) - 1000)
+					singleElem.FillUp(uint64(fillUpX))
+					require.Less(t, lenBytes, singleElem.LenBytes())
+					require.Equal(t, capBytes, singleElem.CapBytes())
+
+					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
 				})
 			}
 		}
