@@ -905,7 +905,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 	// card := getCardinality(commonContainer)
 	// newElems := maxY - maxYCur
 
-	fmt.Printf("  ==> n [%d] rem [%d] nCur [%d] remCur [%d]\n", n, rem, nCur, remCur)
+	// fmt.Printf("  ==> n [%d] rem [%d] nCur [%d] remCur [%d]\n", n, rem, nCur, remCur)
 
 	mergeCommonBitmap := false
 	mergeCommonArray := false
@@ -956,19 +956,19 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		// return
 	}
 
-	fmt.Printf("  ==> req cont [%d] startN [%d]\n", requiredContainers, startN)
+	// fmt.Printf("  ==> req cont [%d] startN [%d]\n", requiredContainers, startN)
 
 	containersLen := requiredContainers * maxContainerSize
 	keysLen := requiredContainers * 2 * 4
-	fmt.Printf("  ==> (4) len [%d] cap [%d]\n", ra.LenBytes(), ra.CapBytes())
-	fmt.Printf("  ==> expanding [%d]\n", containersLen+keysLen)
+	// fmt.Printf("  ==> (4) len [%d] cap [%d]\n", ra.LenBytes(), ra.CapBytes())
+	// fmt.Printf("  ==> expanding [%d]\n", containersLen+keysLen)
 	ra.expandNoLengthChange(containersLen + keysLen)
 	ra.expandKeys(keysLen)
-	fmt.Printf("  ==> (5) len [%d] cap [%d]\n", ra.LenBytes(), ra.CapBytes())
+	// fmt.Printf("  ==> (5) len [%d] cap [%d]\n", ra.LenBytes(), ra.CapBytes())
 
 	var refContainer []uint16
 	if startN < n {
-		fmt.Printf("  ==> in startN < n\n")
+		// fmt.Printf("  ==> in startN < n\n")
 
 		key := (startN * uint64(maxCardinality)) & mask
 		offset := ra.newContainerNoClr(maxContainerSize)
@@ -985,7 +985,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		}
 
 		for i := startN + 1; i < n; i++ {
-			fmt.Printf("  ==> in loop [%d]\n", i)
+			// fmt.Printf("  ==> in loop [%d]\n", i)
 
 			key = (i * uint64(maxCardinality)) & mask
 			offset = ra.newContainerNoClr(maxContainerSize)
@@ -995,7 +995,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		}
 	}
 	if rem > 0 {
-		fmt.Printf("  ==> rem > 0\n")
+		// fmt.Printf("  ==> rem > 0\n")
 
 		key := (n * uint64(maxCardinality)) & mask
 		offset := ra.newContainer(maxContainerSize)
@@ -1010,10 +1010,10 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		setCardinality(container, int(rem))
 		bitmap(container).setRange(0, int(rem)-1, refContainer)
 
-		fmt.Printf("  ==> rem card [%d]\n", int(rem))
+		// fmt.Printf("  ==> rem card [%d]\n", int(rem))
 	}
 	if remCur > 0 {
-		fmt.Printf("  ==> remCur > 0\n")
+		// fmt.Printf("  ==> remCur > 0\n")
 		// idx2 := ra.keys.searchRev(maxXCurKey)
 		// commonOffset2 := ra.keys.val(idx2)
 		// fmt.Printf("  ==> commonOffset [%d][%d] new commonOffset [%d][%d]\n", idx, commonOffset, idx2, commonOffset2)
@@ -1043,11 +1043,11 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 				y := prevContainer[startIdx+uint16(i)]
 				commonContainer[startIdx+y/16] |= bitmapMask[y%16]
 			}
-			bitmap(commonContainer).setRange(maxYCur, maxCardinality, refContainer)
+			bitmap(commonContainer).setRange(maxYCur, maxCardinality-1, refContainer)
 		}
 
 		setCardinality(commonContainer, card+newElems)
-		fmt.Printf("  ==> remCur card [%d][%d][%d]\n", card+newElems, card, newElems)
+		// fmt.Printf("  ==> remCur card [%d][%d][%d]\n", card+newElems, card, newElems)
 	}
 
 	/*
