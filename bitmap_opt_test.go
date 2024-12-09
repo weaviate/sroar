@@ -973,24 +973,28 @@ func TestFillUp(t *testing.T) {
 		require.Nil(t, bmNil)
 	})
 
-	t.Run("empty small bitmap, data slice extended", func(t *testing.T) {
+	t.Run("empty small bitmap, resized", func(t *testing.T) {
 		maxX := maxCardinality + 1
 		bmSmall := NewBitmap()
+		lenBytes := bmSmall.LenBytes()
 		capBytes := bmSmall.CapBytes()
 
 		bmSmall.FillUp(uint64(maxX))
+		require.Less(t, lenBytes, bmSmall.LenBytes())
 		require.Less(t, capBytes, bmSmall.CapBytes())
 
 		assertPrefilled(t, maxX, bmSmall)
 	})
 
-	t.Run("empty big bitmap, data slice reused", func(t *testing.T) {
+	t.Run("empty big bitmap, reused", func(t *testing.T) {
 		maxX := maxCardinality + 1
 		bmBig := NewBitmap()
 		bmBig.expandNoLengthChange(3 * maxContainerSize)
+		lenBytes := bmBig.LenBytes()
 		capBytes := bmBig.CapBytes()
 
 		bmBig.FillUp(uint64(maxX))
+		require.Less(t, lenBytes, bmBig.LenBytes())
 		require.Equal(t, capBytes, bmBig.CapBytes())
 
 		assertPrefilled(t, maxX, bmBig)
