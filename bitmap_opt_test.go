@@ -983,19 +983,28 @@ func TestFillUp(t *testing.T) {
 		require.Less(t, lenBytes, bmSmall.LenBytes())
 		require.Less(t, capBytes, bmSmall.CapBytes())
 
+		// + 8 (key) + 2x 4100 container - 64 container
+		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
+		require.Equal(t, lenBytes+addLen, bmSmall.LenBytes())
+		require.Equal(t, capBytes+addLen, bmSmall.CapBytes())
+
 		assertPrefilled(t, maxX, bmSmall)
 	})
 
 	t.Run("empty big bitmap, reused", func(t *testing.T) {
 		maxX := maxCardinality + 1
 		bmBig := NewBitmap()
-		bmBig.expandNoLengthChange(3 * maxContainerSize)
+		bmBig.expandNoLengthChange(3 * maxContainerSize) // big enough to fit 2x fullsize container
 		lenBytes := bmBig.LenBytes()
 		capBytes := bmBig.CapBytes()
 
 		bmBig.FillUp(uint64(maxX))
 		require.Less(t, lenBytes, bmBig.LenBytes())
 		require.Equal(t, capBytes, bmBig.CapBytes())
+
+		// + 8 (key) + 2x 4100 container - 64 container
+		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
+		require.Equal(t, lenBytes+addLen, bmBig.LenBytes())
 
 		assertPrefilled(t, maxX, bmBig)
 	})
@@ -1121,6 +1130,10 @@ func TestFillUp(t *testing.T) {
 					require.Less(t, lenBytes, singleElem.LenBytes())
 					require.Equal(t, capBytes, singleElem.CapBytes())
 
+					// + 4100 container
+					addLen := 2 * maxContainerSize
+					require.Equal(t, lenBytes+addLen, singleElem.LenBytes())
+
 					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
 				})
 
@@ -1136,6 +1149,10 @@ func TestFillUp(t *testing.T) {
 					singleElem.FillUp(uint64(fillUpX))
 					require.Less(t, lenBytes, singleElem.LenBytes())
 					require.Equal(t, capBytes, singleElem.CapBytes())
+
+					// + 4100 container
+					addLen := 2 * maxContainerSize
+					require.Equal(t, lenBytes+addLen, singleElem.LenBytes())
 
 					assertFilledUp(t, currentMaxX, fillUpX, singleElem)
 				})
