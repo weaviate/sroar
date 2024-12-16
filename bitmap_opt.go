@@ -1,6 +1,7 @@
 package sroar
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -665,4 +666,44 @@ func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
 	} else {
 		return 0
 	}
+}
+
+func (ra *Bitmap) LenInBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return len(ra.data) * 2
+}
+
+func (ra *Bitmap) capInBytes() int {
+	if ra == nil {
+		return 0
+	}
+	return cap(ra.data) * 2
+}
+
+func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
+	c := cap(buf)
+	dstbuf := buf[:c]
+	if c%2 != 0 {
+		dstbuf = buf[:c-1]
+	}
+
+	src := ra
+	if ra == nil {
+		src = NewBitmap()
+	}
+
+	srclen := src.LenInBytes()
+	if srclen > len(dstbuf) {
+		panic(fmt.Sprintf("Buffer too small, given %d, required %d", cap(buf), srclen))
+	}
+
+	srcbuf := toByteSlice(src.data)
+	copy(dstbuf, srcbuf)
+
+	// adjust length to src length, keep capacity as entire buffer
+	bm := FromBuffer(dstbuf)
+	bm.data = bm.data[:srclen/2]
+	return bm
 }
