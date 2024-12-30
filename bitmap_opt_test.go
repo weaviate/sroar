@@ -682,6 +682,83 @@ func TestCompareMergeImplementations(t *testing.T) {
 	})
 }
 
+func TestCompareMergeImplementationsConcurrent(t *testing.T) {
+	randSeed := int64(1724861525311)
+	rnd := rand.New(rand.NewSource(randSeed))
+	maxX := 12345678
+
+	bm1 := NewBitmap()
+	bm2 := NewBitmap()
+	bm3 := NewBitmap()
+
+	bufs8 := make([][]uint16, 8)
+	for i := range bufs8 {
+		bufs8[i] = make([]uint16, maxContainerSize)
+	}
+	bufs4 := bufs8[:4]
+
+	for i := 0; i < 20000; i++ {
+		x := uint64(rnd.Int63n(int64(maxX)))
+		switch i % 5 {
+		case 0:
+			bm1.Set(x)
+			bm2.Set(x)
+		case 1:
+			bm2.Set(x)
+			bm3.Set(x)
+		case 2:
+			bm1.Set(x)
+			bm3.Set(x)
+		default:
+			bm1.Set(x)
+			bm2.Set(x)
+			bm3.Set(x)
+		}
+	}
+
+	t.Run("and", func(t *testing.T) {
+		bmAnd := bm1.Clone().And(bm2).And(bm3)
+		bmAndConc := bm1.Clone().AndConc(bm2, 4).AndConc(bm3, 8)
+		bmAndConcBuf := bm1.Clone().AndConcBuf(bm2, bufs4...).AndConcBuf(bm3, bufs8...)
+
+		card := bmAnd.GetCardinality()
+		arr := bmAnd.ToArray()
+
+		require.Equal(t, card, bmAndConc.GetCardinality())
+		require.Equal(t, card, bmAndConcBuf.GetCardinality())
+		require.ElementsMatch(t, arr, bmAndConc.ToArray())
+		require.ElementsMatch(t, arr, bmAndConcBuf.ToArray())
+	})
+
+	t.Run("and not", func(t *testing.T) {
+		bmAndNot := bm1.Clone().AndNot(bm2).AndNot(bm3)
+		bmAndNotConc := bm1.Clone().AndNotConc(bm2, 4).AndNotConc(bm3, 8)
+		bmAndNotConcBuf := bm1.Clone().AndNotConcBuf(bm2, bufs4...).AndNotConcBuf(bm3, bufs8...)
+
+		card := bmAndNot.GetCardinality()
+		arr := bmAndNot.ToArray()
+
+		require.Equal(t, card, bmAndNotConc.GetCardinality())
+		require.Equal(t, card, bmAndNotConcBuf.GetCardinality())
+		require.ElementsMatch(t, arr, bmAndNotConc.ToArray())
+		require.ElementsMatch(t, arr, bmAndNotConcBuf.ToArray())
+	})
+
+	t.Run("or", func(t *testing.T) {
+		bmOr := bm1.Clone().Or(bm2).Or(bm3)
+		bmOrConc := bm1.Clone().OrConc(bm2, 4).OrConc(bm3, 8)
+		bmOrConcBuf := bm1.Clone().OrConcBuf(bm2, bufs4...).OrConcBuf(bm3, bufs8...)
+
+		card := bmOr.GetCardinality()
+		arr := bmOr.ToArray()
+
+		require.Equal(t, card, bmOrConc.GetCardinality())
+		require.Equal(t, card, bmOrConcBuf.GetCardinality())
+		require.ElementsMatch(t, arr, bmOrConc.ToArray())
+		require.ElementsMatch(t, arr, bmOrConcBuf.ToArray())
+	})
+}
+
 // checks if all exclusive containers from src bitmap
 // are copied to dst bitmap
 func TestIssue_Or_NotMergeContainers(t *testing.T) {
