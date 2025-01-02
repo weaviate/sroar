@@ -2251,7 +2251,7 @@ func TestPrefillUtils(t *testing.T) {
 	})
 }
 
-func TestMergeToSuperset(t *testing.T) {
+func TestMergeConcurrentlyWithBuffers(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
 
@@ -2317,7 +2317,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("and", func(t *testing.T) {
 			control.And(and)
-			superset.AndToSuperset(and, bufs...)
+			superset.AndConcBuf(and, bufs...)
 
 			require.Equal(t, 11389, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2325,7 +2325,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("or", func(t *testing.T) {
 			control.Or(or)
-			superset.OrToSuperset(or, bufs...)
+			superset.OrConcBuf(or, bufs...)
 
 			require.Equal(t, 22750, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2333,7 +2333,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("and not", func(t *testing.T) {
 			control.AndNot(andNot)
-			superset.AndNotToSuperset(andNot, bufs...)
+			superset.AndNotConcBuf(andNot, bufs...)
 
 			require.Equal(t, 9911, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2341,7 +2341,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("2nd or", func(t *testing.T) {
 			control.Or(or)
-			superset.OrToSuperset(or, bufs...)
+			superset.OrConcBuf(or, bufs...)
 
 			require.Equal(t, 20730, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2349,7 +2349,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("2nd and", func(t *testing.T) {
 			control.And(and)
-			superset.AndToSuperset(and, bufs...)
+			superset.AndConcBuf(and, bufs...)
 
 			require.Equal(t, 10369, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2357,7 +2357,7 @@ func TestMergeToSuperset(t *testing.T) {
 
 		t.Run("2nd and not", func(t *testing.T) {
 			control.AndNot(andNot)
-			superset.AndNotToSuperset(andNot, bufs...)
+			superset.AndNotConcBuf(andNot, bufs...)
 
 			require.Equal(t, 5520, superset.GetCardinality())
 			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
@@ -2408,8 +2408,8 @@ func TestMergeToSuperset(t *testing.T) {
 	})
 }
 
-// go test -v -fuzz FuzzMergeToSuperset -fuzztime 600s -run ^$ github.com/weaviate/sroar
-func FuzzMergeToSuperset(f *testing.F) {
+// go test -v -fuzz FuzzMergeConcurrentlyWithBuffers -fuzztime 600s -run ^$ github.com/weaviate/sroar
+func FuzzMergeConcurrentlyWithBuffers(f *testing.F) {
 	type testCase struct {
 		name          string
 		countElements int
@@ -2474,20 +2474,20 @@ func FuzzMergeToSuperset(f *testing.F) {
 		f.Add(tc.countElements, tc.countSubsets, tc.countMerges, tc.countBuffers, tc.randSeed)
 	}
 
-	f.Fuzz(runMergeToSuperSetTest)
+	f.Fuzz(runMergeConcurrentlyWithBuffersTest)
 }
 
-func TestMergeToSuperset_VerifyFuzzCallback(t *testing.T) {
+func TestMergeConcurrentlyWithBuffers_VerifyFuzzCallback(t *testing.T) {
 	t.Run("single buffer", func(t *testing.T) {
-		runMergeToSuperSetTest(t, 23_456, 17, 9, 1, 1724861525311)
+		runMergeConcurrentlyWithBuffersTest(t, 23_456, 17, 9, 1, 1724861525311)
 	})
 
 	t.Run("multiple buffers (concurrent)", func(t *testing.T) {
-		runMergeToSuperSetTest(t, 23_456, 17, 9, 4, 1724861525311)
+		runMergeConcurrentlyWithBuffersTest(t, 23_456, 17, 9, 4, 1724861525311)
 	})
 }
 
-func runMergeToSuperSetTest(t *testing.T,
+func runMergeConcurrentlyWithBuffersTest(t *testing.T,
 	countElements, countSubsets, countMerges, countBuffers int, randSeed int64,
 ) {
 	if countElements < 100 || countElements > 50_000 {
@@ -2541,19 +2541,19 @@ func runMergeToSuperSetTest(t *testing.T,
 			switch mergeType := rnd.Intn(3); mergeType {
 			case 1:
 				t.Run(fmt.Sprintf("AND with %d", id), func(t *testing.T) {
-					superset.AndToSuperset(subset, buffers...)
+					superset.AndConcBuf(subset, buffers...)
 					control.And(subset)
 					assertMatches(t, superset, control)
 				})
 			case 2:
 				t.Run(fmt.Sprintf("AND NOT with %d", id), func(t *testing.T) {
-					superset.AndNotToSuperset(subset, buffers...)
+					superset.AndNotConcBuf(subset, buffers...)
 					control.AndNot(subset)
 					assertMatches(t, superset, control)
 				})
 			default:
 				t.Run(fmt.Sprintf("OR with %d", id), func(t *testing.T) {
-					superset.OrToSuperset(subset, buffers...)
+					superset.OrConcBuf(subset, buffers...)
 					control.Or(subset)
 					assertMatches(t, superset, control)
 				})
