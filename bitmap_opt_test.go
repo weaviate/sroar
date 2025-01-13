@@ -2,7 +2,6 @@ package sroar
 
 import (
 	"fmt"
-	"math"
 	"math/bits"
 	"math/rand"
 	"testing"
@@ -13,7 +12,11 @@ import (
 func TestCompareMergeImplementations(t *testing.T) {
 	randSeed := int64(1724861525311)
 	rnd := rand.New(rand.NewSource(randSeed))
-	buf := make([]uint16, maxContainerSize)
+	maxConcurrency := 4
+	bufs := make([][]uint16, maxConcurrency)
+	for i := range bufs {
+		bufs[i] = make([]uint16, maxContainerSize)
+	}
 
 	NA := 1024  // fits array container
 	NB := 16384 // fits bitmap container
@@ -155,30 +158,27 @@ func TestCompareMergeImplementations(t *testing.T) {
 	t.Run("and", func(t *testing.T) {
 		run := func(t *testing.T, dst, src *Bitmap, expCardinality int, match bool) {
 			and1 := dst.Clone()
-			and2 := dst.Clone()
-			and3 := dst.Clone()
 
 			and1.AndOld(src)
-			and2.And(src)
-			and3.AndBuf(src, buf)
-			and4 := AndOld(dst, src)
-			and5 := And(dst, src)
-			and6 := AndBuf(dst, src, buf)
+			and2 := dst.Clone().And(src)
+			and3 := dst.Clone().AndBuf(src, bufs[0])
+			and4 := dst.Clone().AndConc(src, maxConcurrency)
+			and5 := dst.Clone().AndConcBuf(src, bufs...)
+			and6 := AndOld(dst, src)
+			and7 := And(dst, src)
+			and8 := AndBuf(dst, src, bufs[0])
 
 			require.Equal(t, expCardinality, and1.GetCardinality())
-			require.Equal(t, expCardinality, and2.GetCardinality())
-			require.Equal(t, expCardinality, and3.GetCardinality())
-			require.Equal(t, expCardinality, and4.GetCardinality())
-			require.Equal(t, expCardinality, and5.GetCardinality())
-			require.Equal(t, expCardinality, and6.GetCardinality())
-
 			if match {
-				expElements := and1.ToArray()
-				require.ElementsMatch(t, expElements, and2.ToArray())
-				require.ElementsMatch(t, expElements, and3.ToArray())
-				require.ElementsMatch(t, expElements, and4.ToArray())
-				require.ElementsMatch(t, expElements, and5.ToArray())
-				require.ElementsMatch(t, expElements, and6.ToArray())
+				assertMatches(t, and1, and2, and3, and4, and5, and6, and7, and8)
+			} else {
+				require.Equal(t, expCardinality, and2.GetCardinality())
+				require.Equal(t, expCardinality, and3.GetCardinality())
+				require.Equal(t, expCardinality, and4.GetCardinality())
+				require.Equal(t, expCardinality, and5.GetCardinality())
+				require.Equal(t, expCardinality, and6.GetCardinality())
+				require.Equal(t, expCardinality, and7.GetCardinality())
+				require.Equal(t, expCardinality, and8.GetCardinality())
 			}
 		}
 		runMatch := func(t *testing.T, dst, src *Bitmap, expCardinality int) {
@@ -188,41 +188,41 @@ func TestCompareMergeImplementations(t *testing.T) {
 			run(t, dst, src, expCardinality, false)
 		}
 
-		runMatch(t, bmA, bmB, 3675)
-		runMatch(t, bmA, bmC, 3693)
-		runMatch(t, bmA, bmD, 3627)
+		runNoMatch(t, bmA, bmB, 3675)
+		runNoMatch(t, bmA, bmC, 3693)
+		runNoMatch(t, bmA, bmD, 3627)
 		runMatch(t, bmA, bmE, 3730)
-		runMatch(t, bmA, bmF, 932)
+		runNoMatch(t, bmA, bmF, 932)
 
-		runMatch(t, bmB, bmA, 3675)
+		runNoMatch(t, bmB, bmA, 3675)
 		runMatch(t, bmB, bmC, 3689)
-		runMatch(t, bmB, bmD, 3676)
-		runMatch(t, bmB, bmE, 882)
-		runMatch(t, bmB, bmF, 3601)
+		runNoMatch(t, bmB, bmD, 3676)
+		runNoMatch(t, bmB, bmE, 882)
+		runNoMatch(t, bmB, bmF, 3601)
 
-		runMatch(t, bmC, bmA, 3693)
-		runMatch(t, bmC, bmB, 3689)
-		runMatch(t, bmC, bmD, 928)
+		runNoMatch(t, bmC, bmA, 3693)
+		runNoMatch(t, bmC, bmB, 3689)
+		runNoMatch(t, bmC, bmD, 928)
 		runMatch(t, bmC, bmE, 3701)
-		runMatch(t, bmC, bmF, 3610)
+		runNoMatch(t, bmC, bmF, 3610)
 
-		runMatch(t, bmD, bmA, 3627)
+		runNoMatch(t, bmD, bmA, 3627)
 		runMatch(t, bmD, bmB, 3676)
-		runMatch(t, bmD, bmC, 928)
-		runMatch(t, bmD, bmE, 3666)
-		runMatch(t, bmD, bmF, 3654)
+		runNoMatch(t, bmD, bmC, 928)
+		runNoMatch(t, bmD, bmE, 3666)
+		runNoMatch(t, bmD, bmF, 3654)
 
-		runMatch(t, bmE, bmA, 3730)
-		runMatch(t, bmE, bmB, 882)
-		runMatch(t, bmE, bmC, 3701)
-		runMatch(t, bmE, bmD, 3666)
+		runNoMatch(t, bmE, bmA, 3730)
+		runNoMatch(t, bmE, bmB, 882)
+		runNoMatch(t, bmE, bmC, 3701)
+		runNoMatch(t, bmE, bmD, 3666)
 		runMatch(t, bmE, bmF, 3674)
 
-		runMatch(t, bmF, bmA, 932)
-		runMatch(t, bmF, bmB, 3601)
-		runMatch(t, bmF, bmC, 3610)
+		runNoMatch(t, bmF, bmA, 932)
+		runNoMatch(t, bmF, bmB, 3601)
+		runNoMatch(t, bmF, bmC, 3610)
 		runMatch(t, bmF, bmD, 3654)
-		runMatch(t, bmF, bmE, 3674)
+		runNoMatch(t, bmF, bmE, 3674)
 
 		runNoMatch(t, superset, bmA, 31006)
 		runNoMatch(t, superset, bmB, 30995)
@@ -238,19 +238,19 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, bmE, superset, 30967)
 		runNoMatch(t, bmF, superset, 31085)
 
-		runMatch(t, bigA, bmA, 3407)
-		runMatch(t, bigA, bmB, 3349)
-		runMatch(t, bigA, bmC, 3307)
-		runMatch(t, bigA, bmD, 3360)
-		runMatch(t, bigA, bmE, 3413)
-		runMatch(t, bigA, bmF, 3331)
+		runNoMatch(t, bigA, bmA, 3407)
+		runNoMatch(t, bigA, bmB, 3349)
+		runNoMatch(t, bigA, bmC, 3307)
+		runNoMatch(t, bigA, bmD, 3360)
+		runNoMatch(t, bigA, bmE, 3413)
+		runNoMatch(t, bigA, bmF, 3331)
 
-		runMatch(t, bmA, bigA, 3407)
-		runMatch(t, bmB, bigA, 3349)
-		runMatch(t, bmC, bigA, 3307)
-		runMatch(t, bmD, bigA, 3360)
-		runMatch(t, bmE, bigA, 3413)
-		runMatch(t, bmF, bigA, 3331)
+		runNoMatch(t, bmA, bigA, 3407)
+		runNoMatch(t, bmB, bigA, 3349)
+		runNoMatch(t, bmC, bigA, 3307)
+		runNoMatch(t, bmD, bigA, 3360)
+		runNoMatch(t, bmE, bigA, 3413)
+		runNoMatch(t, bmF, bigA, 3331)
 
 		runNoMatch(t, bigB, bmA, 30061)
 		runNoMatch(t, bigB, bmB, 30006)
@@ -270,27 +270,25 @@ func TestCompareMergeImplementations(t *testing.T) {
 	t.Run("andNot", func(t *testing.T) {
 		run := func(t *testing.T, dst, src *Bitmap, expCardinality int, match bool) {
 			andNot1 := dst.Clone()
-			andNot2 := dst.Clone()
-			andNot3 := dst.Clone()
 
 			andNot1.AndNotOld(src)
-			andNot2.AndNot(src)
-			andNot3.AndNotBuf(src, buf)
-			andNot4 := AndNot(dst, src)
-			andNot5 := AndNotBuf(dst, src, buf)
+			andNot2 := dst.Clone().AndNot(src)
+			andNot3 := dst.Clone().AndNotBuf(src, bufs[0])
+			andNot4 := dst.Clone().AndNotConc(src, maxConcurrency)
+			andNot5 := dst.Clone().AndNotConcBuf(src, bufs...)
+			andNot6 := AndNot(dst, src)
+			andNot7 := AndNotBuf(dst, src, bufs[0])
 
 			require.Equal(t, expCardinality, andNot1.GetCardinality())
-			require.Equal(t, expCardinality, andNot2.GetCardinality())
-			require.Equal(t, expCardinality, andNot3.GetCardinality())
-			require.Equal(t, expCardinality, andNot4.GetCardinality())
-			require.Equal(t, expCardinality, andNot5.GetCardinality())
-
 			if match {
-				expElements := andNot1.ToArray()
-				require.ElementsMatch(t, expElements, andNot2.ToArray())
-				require.ElementsMatch(t, expElements, andNot3.ToArray())
-				require.ElementsMatch(t, expElements, andNot4.ToArray())
-				require.ElementsMatch(t, expElements, andNot5.ToArray())
+				assertMatches(t, andNot1, andNot2, andNot3, andNot4, andNot5, andNot6, andNot7)
+			} else {
+				require.Equal(t, expCardinality, andNot2.GetCardinality())
+				require.Equal(t, expCardinality, andNot3.GetCardinality())
+				require.Equal(t, expCardinality, andNot4.GetCardinality())
+				require.Equal(t, expCardinality, andNot5.GetCardinality())
+				require.Equal(t, expCardinality, andNot6.GetCardinality())
+				require.Equal(t, expCardinality, andNot7.GetCardinality())
 			}
 		}
 		runMatch := func(t *testing.T, dst, src *Bitmap, expCardinality int) {
@@ -304,33 +302,33 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, bmA, bmC, 27313)
 		runNoMatch(t, bmA, bmD, 27379)
 		runNoMatch(t, bmA, bmE, 27276)
-		runNoMatch(t, bmA, bmF, 30074)
+		runMatch(t, bmA, bmF, 30074)
 
 		runNoMatch(t, bmB, bmA, 27320)
 		runNoMatch(t, bmB, bmC, 27306)
 		runNoMatch(t, bmB, bmD, 27319)
-		runNoMatch(t, bmB, bmE, 30113)
+		runMatch(t, bmB, bmE, 30113)
 		runNoMatch(t, bmB, bmF, 27394)
 
 		runNoMatch(t, bmC, bmA, 27322)
 		runNoMatch(t, bmC, bmB, 27326)
-		runNoMatch(t, bmC, bmD, 30087)
+		runMatch(t, bmC, bmD, 30087)
 		runNoMatch(t, bmC, bmE, 27314)
 		runNoMatch(t, bmC, bmF, 27405)
 
 		runNoMatch(t, bmD, bmA, 27464)
 		runNoMatch(t, bmD, bmB, 27415)
-		runNoMatch(t, bmD, bmC, 30163)
+		runMatch(t, bmD, bmC, 30163)
 		runNoMatch(t, bmD, bmE, 27425)
 		runNoMatch(t, bmD, bmF, 27437)
 
 		runNoMatch(t, bmE, bmA, 27237)
-		runNoMatch(t, bmE, bmB, 30085)
+		runMatch(t, bmE, bmB, 30085)
 		runNoMatch(t, bmE, bmC, 27266)
 		runNoMatch(t, bmE, bmD, 27301)
 		runNoMatch(t, bmE, bmF, 27293)
 
-		runNoMatch(t, bmF, bmA, 30153)
+		runMatch(t, bmF, bmA, 30153)
 		runNoMatch(t, bmF, bmB, 27484)
 		runNoMatch(t, bmF, bmC, 27475)
 		runNoMatch(t, bmF, bmD, 27431)
@@ -343,12 +341,12 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, superset, bmE, 113025)
 		runNoMatch(t, superset, bmF, 112907)
 
-		runMatch(t, bmA, superset, 0)
-		runMatch(t, bmB, superset, 0)
-		runMatch(t, bmC, superset, 0)
-		runMatch(t, bmD, superset, 0)
-		runMatch(t, bmE, superset, 0)
-		runMatch(t, bmF, superset, 0)
+		runNoMatch(t, bmA, superset, 0)
+		runNoMatch(t, bmB, superset, 0)
+		runNoMatch(t, bmC, superset, 0)
+		runNoMatch(t, bmD, superset, 0)
+		runNoMatch(t, bmE, superset, 0)
+		runNoMatch(t, bmF, superset, 0)
 
 		runNoMatch(t, bigA, bmA, 8613)
 		runNoMatch(t, bigA, bmB, 8671)
@@ -371,42 +369,42 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, bigB, bmE, 108326)
 		runNoMatch(t, bigB, bmF, 108225)
 
-		runMatch(t, bmA, bigB, 945)
-		runMatch(t, bmB, bigB, 989)
-		runMatch(t, bmC, bigB, 923)
-		runMatch(t, bmD, bigB, 937)
-		runMatch(t, bmE, bigB, 971)
-		runMatch(t, bmF, bigB, 988)
+		runNoMatch(t, bmA, bigB, 945)
+		runNoMatch(t, bmB, bigB, 989)
+		runNoMatch(t, bmC, bigB, 923)
+		runNoMatch(t, bmD, bigB, 937)
+		runNoMatch(t, bmE, bigB, 971)
+		runNoMatch(t, bmF, bigB, 988)
 	})
 
 	t.Run("or", func(t *testing.T) {
 		run := func(t *testing.T, dst, src *Bitmap, expCardinality int, match bool) {
 			or1 := dst.Clone()
-			or2 := dst.Clone()
-			or3 := dst.Clone()
 
 			or1.OrOld(src)
-			or2.Or(src)
-			or3.OrBuf(src, buf)
-			or4 := OrOld(dst, src)
-			or5 := Or(dst, src)
-			or6 := OrBuf(dst, src, buf)
+			or2 := dst.Clone().Or(src)
+			or3 := dst.Clone().OrBuf(src, bufs[0])
+			or4 := dst.Clone().OrConc(src, maxConcurrency)
+			or5 := dst.Clone().OrConcBuf(src, bufs...)
+			or6 := OrOld(dst, src)
+			or7 := Or(dst, src)
+			or8 := OrBuf(dst, src, bufs[0])
 
 			require.Equal(t, expCardinality, or1.GetCardinality())
-			require.Equal(t, expCardinality, or2.GetCardinality())
-			require.Equal(t, expCardinality, or3.GetCardinality())
-			require.Equal(t, expCardinality, or4.GetCardinality())
-			require.Equal(t, expCardinality, or5.GetCardinality())
-			require.Equal(t, expCardinality, or6.GetCardinality())
-
 			if match {
-				expElements := or1.ToArray()
-				require.ElementsMatch(t, expElements, or2.ToArray())
-				require.ElementsMatch(t, expElements, or3.ToArray())
-				require.ElementsMatch(t, expElements, or4.ToArray())
-				require.ElementsMatch(t, expElements, or5.ToArray())
-				require.ElementsMatch(t, expElements, or6.ToArray())
+				assertMatches(t, or1, or2, or3, or4, or5, or6, or7, or8)
+			} else {
+				require.Equal(t, expCardinality, or2.GetCardinality())
+				require.Equal(t, expCardinality, or3.GetCardinality())
+				require.Equal(t, expCardinality, or4.GetCardinality())
+				require.Equal(t, expCardinality, or5.GetCardinality())
+				require.Equal(t, expCardinality, or6.GetCardinality())
+				require.Equal(t, expCardinality, or7.GetCardinality())
+				require.Equal(t, expCardinality, or8.GetCardinality())
 			}
+		}
+		runMatch := func(t *testing.T, dst, src *Bitmap, expCardinality int) {
+			run(t, dst, src, expCardinality, true)
 		}
 		runNoMatch := func(t *testing.T, dst, src *Bitmap, expCardinality int) {
 			run(t, dst, src, expCardinality, false)
@@ -416,21 +414,21 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, bmA, bmC, 58328)
 		runNoMatch(t, bmA, bmD, 58470)
 		runNoMatch(t, bmA, bmE, 58243)
-		runNoMatch(t, bmA, bmF, 61159)
+		runMatch(t, bmA, bmF, 61159)
 
 		runNoMatch(t, bmB, bmA, 58326)
 		runNoMatch(t, bmB, bmC, 58321)
 		runNoMatch(t, bmB, bmD, 58410)
-		runNoMatch(t, bmB, bmE, 61080)
+		runMatch(t, bmB, bmE, 61080)
 		runNoMatch(t, bmB, bmF, 58479)
 
 		runNoMatch(t, bmC, bmA, 58328)
 		runNoMatch(t, bmC, bmB, 58321)
-		runNoMatch(t, bmC, bmD, 61178)
+		runMatch(t, bmC, bmD, 61178)
 		runNoMatch(t, bmC, bmE, 58281)
 		runNoMatch(t, bmC, bmF, 58490)
 
-		runNoMatch(t, bmD, bmA, 58470)
+		runMatch(t, bmD, bmA, 58470)
 		runNoMatch(t, bmD, bmB, 58410)
 		runNoMatch(t, bmD, bmC, 61178)
 		runNoMatch(t, bmD, bmE, 58392)
@@ -439,13 +437,13 @@ func TestCompareMergeImplementations(t *testing.T) {
 		runNoMatch(t, bmE, bmA, 58243)
 		runNoMatch(t, bmE, bmB, 61080)
 		runNoMatch(t, bmE, bmC, 58281)
-		runNoMatch(t, bmE, bmD, 58392)
+		runMatch(t, bmE, bmD, 58392)
 		runNoMatch(t, bmE, bmF, 58378)
 
 		runNoMatch(t, bmF, bmA, 61159)
 		runNoMatch(t, bmF, bmB, 58479)
 		runNoMatch(t, bmF, bmC, 58490)
-		runNoMatch(t, bmF, bmD, 58522)
+		runMatch(t, bmF, bmD, 58522)
 		runNoMatch(t, bmF, bmE, 58378)
 
 		runNoMatch(t, superset, bmA, 143992)
@@ -494,9 +492,7 @@ func TestCompareMergeImplementations(t *testing.T) {
 	t.Run("sequence", func(t *testing.T) {
 		run := func(t *testing.T, dst, a, b, c, d, e, f *Bitmap, expCardinality int, match bool) {
 			seq1 := dst.Clone()
-			seq2 := dst.Clone()
-			seq3 := dst.Clone()
-			var seq4, seq5, seq6 *Bitmap
+			var seq6, seq7, seq8 *Bitmap
 
 			seq1.OrOld(a)
 			seq1.AndOld(b)
@@ -505,45 +501,49 @@ func TestCompareMergeImplementations(t *testing.T) {
 			seq1.AndOld(e)
 			seq1.AndNotOld(f)
 
-			seq2.Or(a).And(b).AndNot(c).Or(d).And(e).AndNot(f)
+			seq2 := dst.Clone().Or(a).And(b).AndNot(c).Or(d).And(e).AndNot(f)
 
-			seq3.OrBuf(a, buf).AndBuf(b, buf).AndNotBuf(c, buf).OrBuf(d, buf).AndBuf(e, buf).AndNotBuf(f, buf)
+			seq3 := dst.Clone().OrBuf(a, bufs[0]).AndBuf(b, bufs[0]).AndNotBuf(c, bufs[0]).
+				OrBuf(d, bufs[0]).AndBuf(e, bufs[0]).AndNotBuf(f, bufs[0])
 
-			seq4 = OrOld(dst, a)
-			seq4 = AndOld(seq4, b)
-			seq4.AndNotOld(c)
-			seq4 = OrOld(seq4, d)
-			seq4 = AndOld(seq4, e)
-			seq4.AndNotOld(f)
+			seq4 := dst.Clone().OrConc(a, maxConcurrency).AndConc(b, maxConcurrency).AndNotConc(c, maxConcurrency).
+				OrConc(d, maxConcurrency).AndConc(e, maxConcurrency).AndNotConc(f, maxConcurrency)
 
-			seq5 = Or(dst, a)
-			seq5 = And(seq5, b)
-			seq5 = AndNot(seq5, c)
-			seq5 = Or(seq5, d)
-			seq5 = And(seq5, e)
-			seq5 = AndNot(seq5, f)
+			seq5 := dst.Clone().OrConcBuf(a, bufs...).AndConcBuf(b, bufs...).AndNotConcBuf(c, bufs...).
+				OrConcBuf(d, bufs...).AndConcBuf(e, bufs...).AndNotConcBuf(f, bufs...)
 
-			seq6 = OrBuf(dst, a, buf)
-			seq6 = AndBuf(seq6, b, buf)
-			seq6 = AndNotBuf(seq6, c, buf)
-			seq6 = OrBuf(seq6, d, buf)
-			seq6 = AndBuf(seq6, e, buf)
-			seq6 = AndNotBuf(seq6, f, buf)
+			seq6 = OrOld(dst, a)
+			seq6 = AndOld(seq6, b)
+			seq6.AndNotOld(c)
+			seq6 = OrOld(seq6, d)
+			seq6 = AndOld(seq6, e)
+			seq6.AndNotOld(f)
+
+			seq7 = Or(dst, a)
+			seq7 = And(seq7, b)
+			seq7 = AndNot(seq7, c)
+			seq7 = Or(seq7, d)
+			seq7 = And(seq7, e)
+			seq7 = AndNot(seq7, f)
+
+			seq8 = OrBuf(dst, a, bufs[0])
+			seq8 = AndBuf(seq8, b, bufs[0])
+			seq8 = AndNotBuf(seq8, c, bufs[0])
+			seq8 = OrBuf(seq8, d, bufs[0])
+			seq8 = AndBuf(seq8, e, bufs[0])
+			seq8 = AndNotBuf(seq8, f, bufs[0])
 
 			require.Equal(t, expCardinality, seq1.GetCardinality())
-			require.Equal(t, expCardinality, seq2.GetCardinality())
-			require.Equal(t, expCardinality, seq3.GetCardinality())
-			require.Equal(t, expCardinality, seq4.GetCardinality())
-			require.Equal(t, expCardinality, seq5.GetCardinality())
-			require.Equal(t, expCardinality, seq6.GetCardinality())
-
 			if match {
-				expElements := seq1.ToArray()
-				require.ElementsMatch(t, expElements, seq2.ToArray())
-				require.ElementsMatch(t, expElements, seq3.ToArray())
-				require.ElementsMatch(t, expElements, seq4.ToArray())
-				require.ElementsMatch(t, expElements, seq5.ToArray())
-				require.ElementsMatch(t, expElements, seq6.ToArray())
+				assertMatches(t, seq1, seq2, seq3, seq4, seq5, seq6, seq7, seq8)
+			} else {
+				require.Equal(t, expCardinality, seq2.GetCardinality())
+				require.Equal(t, expCardinality, seq3.GetCardinality())
+				require.Equal(t, expCardinality, seq4.GetCardinality())
+				require.Equal(t, expCardinality, seq5.GetCardinality())
+				require.Equal(t, expCardinality, seq6.GetCardinality())
+				require.Equal(t, expCardinality, seq7.GetCardinality())
+				require.Equal(t, expCardinality, seq8.GetCardinality())
 			}
 		}
 
@@ -582,19 +582,25 @@ func TestCompareMergeImplementations(t *testing.T) {
 			return aa.GetCardinality()
 		}
 		and2Card := func(aa, bb *Bitmap) int {
-			return AndOld(aa, bb).GetCardinality()
-		}
-		and3Card := func(aa, bb *Bitmap) int {
 			return aa.Clone().And(bb).GetCardinality()
 		}
+		and3Card := func(aa, bb *Bitmap) int {
+			return aa.Clone().AndBuf(bb, bufs[0]).GetCardinality()
+		}
 		and4Card := func(aa, bb *Bitmap) int {
-			return And(aa, bb).GetCardinality()
+			return aa.Clone().AndConc(bb, maxConcurrency).GetCardinality()
 		}
 		and5Card := func(aa, bb *Bitmap) int {
-			return aa.Clone().AndBuf(bb, buf).GetCardinality()
+			return aa.Clone().AndConcBuf(bb, bufs...).GetCardinality()
 		}
 		and6Card := func(aa, bb *Bitmap) int {
-			return AndBuf(aa, bb, buf).GetCardinality()
+			return AndOld(aa, bb).GetCardinality()
+		}
+		and7Card := func(aa, bb *Bitmap) int {
+			return And(aa, bb).GetCardinality()
+		}
+		and8Card := func(aa, bb *Bitmap) int {
+			return AndBuf(aa, bb, bufs[0]).GetCardinality()
 		}
 
 		andNot1Card := func(aa, bb *Bitmap) int {
@@ -606,13 +612,19 @@ func TestCompareMergeImplementations(t *testing.T) {
 			return aa.Clone().AndNot(bb).GetCardinality()
 		}
 		andNot3Card := func(aa, bb *Bitmap) int {
-			return AndNot(aa, bb).GetCardinality()
+			return aa.Clone().AndNotBuf(bb, bufs[0]).GetCardinality()
 		}
 		andNot4Card := func(aa, bb *Bitmap) int {
-			return aa.Clone().AndNotBuf(bb, buf).GetCardinality()
+			return aa.Clone().AndNotConc(bb, maxConcurrency).GetCardinality()
 		}
 		andNot5Card := func(aa, bb *Bitmap) int {
-			return AndNotBuf(aa, bb, buf).GetCardinality()
+			return aa.Clone().AndNotConcBuf(bb, bufs...).GetCardinality()
+		}
+		andNot6Card := func(aa, bb *Bitmap) int {
+			return AndNot(aa, bb).GetCardinality()
+		}
+		andNot7Card := func(aa, bb *Bitmap) int {
+			return AndNotBuf(aa, bb, bufs[0]).GetCardinality()
 		}
 
 		or1Card := func(aa, bb *Bitmap) int {
@@ -621,19 +633,25 @@ func TestCompareMergeImplementations(t *testing.T) {
 			return aa.GetCardinality()
 		}
 		or2Card := func(aa, bb *Bitmap) int {
-			return OrOld(aa, bb).GetCardinality()
-		}
-		or3Card := func(aa, bb *Bitmap) int {
 			return aa.Clone().Or(bb).GetCardinality()
 		}
+		or3Card := func(aa, bb *Bitmap) int {
+			return aa.Clone().OrBuf(bb, bufs[0]).GetCardinality()
+		}
 		or4Card := func(aa, bb *Bitmap) int {
-			return Or(aa, bb).GetCardinality()
+			return aa.Clone().OrConc(bb, maxConcurrency).GetCardinality()
 		}
 		or5Card := func(aa, bb *Bitmap) int {
-			return aa.Clone().OrBuf(bb, buf).GetCardinality()
+			return aa.Clone().OrConcBuf(bb, bufs...).GetCardinality()
 		}
 		or6Card := func(aa, bb *Bitmap) int {
-			return OrBuf(aa, bb, buf).GetCardinality()
+			return OrOld(aa, bb).GetCardinality()
+		}
+		or7Card := func(aa, bb *Bitmap) int {
+			return Or(aa, bb).GetCardinality()
+		}
+		or8Card := func(aa, bb *Bitmap) int {
+			return OrBuf(aa, bb, bufs[0]).GetCardinality()
 		}
 
 		run := func(t *testing.T, a, b *Bitmap) {
@@ -653,6 +671,8 @@ func TestCompareMergeImplementations(t *testing.T) {
 				require.Equal(t, andCard, and4Card(a, b))
 				require.Equal(t, andCard, and5Card(a, b))
 				require.Equal(t, andCard, and6Card(a, b))
+				require.Equal(t, andCard, and7Card(a, b))
+				require.Equal(t, andCard, and8Card(a, b))
 			})
 
 			t.Run("andNot card", func(t *testing.T) {
@@ -661,6 +681,8 @@ func TestCompareMergeImplementations(t *testing.T) {
 				require.Equal(t, andNotACard, andNot3Card(a, b))
 				require.Equal(t, andNotACard, andNot4Card(a, b))
 				require.Equal(t, andNotACard, andNot5Card(a, b))
+				require.Equal(t, andNotACard, andNot6Card(a, b))
+				require.Equal(t, andNotACard, andNot7Card(a, b))
 			})
 
 			t.Run("or card", func(t *testing.T) {
@@ -670,6 +692,8 @@ func TestCompareMergeImplementations(t *testing.T) {
 				require.Equal(t, orCard, or4Card(a, b))
 				require.Equal(t, orCard, or5Card(a, b))
 				require.Equal(t, orCard, or6Card(a, b))
+				require.Equal(t, orCard, or7Card(a, b))
+				require.Equal(t, orCard, or8Card(a, b))
 			})
 		}
 
@@ -696,8 +720,9 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 		bufs8[i] = make([]uint16, maxContainerSize)
 	}
 	bufs4 := bufs8[:4]
+	bufs6 := bufs8[:6]
 
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 200_000; i++ {
 		x := uint64(rnd.Int63n(int64(maxX)))
 		switch i % 5 {
 		case 0:
@@ -721,13 +746,7 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 		bmAndConc := bm1.Clone().AndConc(bm2, 4).AndConc(bm3, 8)
 		bmAndConcBuf := bm1.Clone().AndConcBuf(bm2, bufs4...).AndConcBuf(bm3, bufs8...)
 
-		card := bmAnd.GetCardinality()
-		arr := bmAnd.ToArray()
-
-		require.Equal(t, card, bmAndConc.GetCardinality())
-		require.Equal(t, card, bmAndConcBuf.GetCardinality())
-		require.ElementsMatch(t, arr, bmAndConc.ToArray())
-		require.ElementsMatch(t, arr, bmAndConcBuf.ToArray())
+		assertMatches(t, bmAnd, bmAndConc, bmAndConcBuf)
 	})
 
 	t.Run("and not", func(t *testing.T) {
@@ -735,13 +754,7 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 		bmAndNotConc := bm1.Clone().AndNotConc(bm2, 4).AndNotConc(bm3, 8)
 		bmAndNotConcBuf := bm1.Clone().AndNotConcBuf(bm2, bufs4...).AndNotConcBuf(bm3, bufs8...)
 
-		card := bmAndNot.GetCardinality()
-		arr := bmAndNot.ToArray()
-
-		require.Equal(t, card, bmAndNotConc.GetCardinality())
-		require.Equal(t, card, bmAndNotConcBuf.GetCardinality())
-		require.ElementsMatch(t, arr, bmAndNotConc.ToArray())
-		require.ElementsMatch(t, arr, bmAndNotConcBuf.ToArray())
+		assertMatches(t, bmAndNot, bmAndNotConc, bmAndNotConcBuf)
 	})
 
 	t.Run("or", func(t *testing.T) {
@@ -749,13 +762,15 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 		bmOrConc := bm1.Clone().OrConc(bm2, 4).OrConc(bm3, 8)
 		bmOrConcBuf := bm1.Clone().OrConcBuf(bm2, bufs4...).OrConcBuf(bm3, bufs8...)
 
-		card := bmOr.GetCardinality()
-		arr := bmOr.ToArray()
+		assertMatches(t, bmOr, bmOrConc, bmOrConcBuf)
+	})
 
-		require.Equal(t, card, bmOrConc.GetCardinality())
-		require.Equal(t, card, bmOrConcBuf.GetCardinality())
-		require.ElementsMatch(t, arr, bmOrConc.ToArray())
-		require.ElementsMatch(t, arr, bmOrConcBuf.ToArray())
+	t.Run("mixed", func(t *testing.T) {
+		bmMix := bm1.Clone().Or(bm2).And(bm3).AndNot(bm1)
+		bmMixConc := bm1.Clone().OrConc(bm2, 4).AndConc(bm3, 8).AndNotConc(bm1, 6)
+		bmMixConcBuf := bm1.Clone().OrConcBuf(bm2, bufs4...).AndConcBuf(bm3, bufs8...).AndNotConcBuf(bm1, bufs6...)
+
+		assertMatches(t, bmMix, bmMixConc, bmMixConcBuf)
 	})
 }
 
@@ -2251,227 +2266,46 @@ func TestPrefillUtils(t *testing.T) {
 	})
 }
 
-func TestMergeConcurrentlyWithBuffers(t *testing.T) {
-	run := func(t *testing.T, bufs [][]uint16) {
-		containerThreshold := uint64(math.MaxUint16 + 1)
-
-		// containers of type array + bitmap + bitmap
-		superset := NewBitmap()
-		// containers of type array + array + bitmap
-		and := NewBitmap()
-		or := NewBitmap()
-		andNot := NewBitmap()
-
-		t.Run("init bitmaps", func(t *testing.T) {
-			N1 := uint64(4000)  // fits to array container
-			N2 := uint64(16000) // fits to bitmap container
-
-			// containers of type array for all BMs
-			for i := uint64(0); i < N1; i++ {
-				val1 := i * 2
-
-				superset.Set(val1)
-				if i%3 != 0 {
-					and.Set(i)
-				}
-				if i < N1*3/4 {
-					or.Set(i)
-				}
-				if i%2 == 0 {
-					andNot.Set(i)
-				}
-			}
-
-			// containers of type 2xbitmap for superset
-			// containers of type array+bitmap for subsets
-			for i := uint64(0); i < N2; i++ {
-				val2 := i*3 + containerThreshold
-				val3 := i*4 + 2*containerThreshold
-
-				superset.Set(val2)
-				superset.Set(val3)
-
-				if i%5 == 1 {
-					and.Set(val2)
-				}
-				if a := i % 11; a == 3 || a == 7 {
-					or.Set(val2)
-				}
-				if a := i % 23; a < 5 {
-					andNot.Set(val2)
-				}
-
-				if a := i % 7; a > 3 {
-					and.Set(val3)
-				}
-				if a := i % 13; a < 10 {
-					or.Set(val3)
-				}
-				if a := i % 17; a > 2 && a < 15 {
-					andNot.Set(val3)
-				}
-			}
-		})
-
-		control := superset.Clone()
-
-		t.Run("and", func(t *testing.T) {
-			control.And(and)
-			superset.AndConcBuf(and, bufs...)
-
-			require.Equal(t, 11389, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("or", func(t *testing.T) {
-			control.Or(or)
-			superset.OrConcBuf(or, bufs...)
-
-			require.Equal(t, 22750, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("and not", func(t *testing.T) {
-			control.AndNot(andNot)
-			superset.AndNotConcBuf(andNot, bufs...)
-
-			require.Equal(t, 9911, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("2nd or", func(t *testing.T) {
-			control.Or(or)
-			superset.OrConcBuf(or, bufs...)
-
-			require.Equal(t, 20730, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("2nd and", func(t *testing.T) {
-			control.And(and)
-			superset.AndConcBuf(and, bufs...)
-
-			require.Equal(t, 10369, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("2nd and not", func(t *testing.T) {
-			control.AndNot(andNot)
-			superset.AndNotConcBuf(andNot, bufs...)
-
-			require.Equal(t, 5520, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-		})
-
-		t.Run("merge into", func(t *testing.T) {
-			dst := NewBitmap()
-			for _, val1 := range []uint64{0123, 1234, 2345, 3456, 4567, 5678, 6789, 7890, 8901, 9012} {
-				val2 := val1 + containerThreshold
-				val3 := val1 + 2*containerThreshold
-
-				superset.Set(val1)
-				superset.Set(val2)
-				superset.Set(val3)
-				control.Set(val1)
-				control.Set(val2)
-				control.Set(val3)
-
-				dst.Set(val1)
-				dst.Set(val2)
-				dst.Set(val3)
-			}
-			controlDst := dst.Clone()
-
-			require.Equal(t, 5548, superset.GetCardinality())
-			require.ElementsMatch(t, control.ToArray(), superset.ToArray())
-
-			dst.And(superset)
-			controlDst.And(control)
-
-			require.Equal(t, 30, dst.GetCardinality())
-			require.ElementsMatch(t, controlDst.ToArray(), dst.ToArray())
-
-			dst.Or(superset)
-			controlDst.Or(control)
-
-			require.Equal(t, 5548, dst.GetCardinality())
-			require.ElementsMatch(t, controlDst.ToArray(), dst.ToArray())
-		})
-	}
-
-	t.Run("single buffer", func(t *testing.T) {
-		run(t, makeContainerBuffers(1))
-	})
-
-	t.Run("multiple buffers (concurrent)", func(t *testing.T) {
-		run(t, makeContainerBuffers(4))
-	})
-}
-
 // go test -v -fuzz FuzzMergeConcurrentlyWithBuffers -fuzztime 600s -run ^$ github.com/weaviate/sroar
 func FuzzMergeConcurrentlyWithBuffers(f *testing.F) {
 	type testCase struct {
-		name          string
-		countElements int
-		countSubsets  int
-		countMerges   int
-		countBuffers  int
-		randSeed      int64
+		name           string
+		numElements    int
+		numSubsets     int
+		numMerges      int
+		maxConcurrency int
+		randSeed       int64
 	}
 
 	testCases := []testCase{
 		{
-			name:          "few elements, few subsets",
-			countElements: 1_000,
-			countSubsets:  3,
-			countMerges:   15,
-			countBuffers:  1,
-			randSeed:      1724861525311406000,
+			name:           "few elements, few subsets",
+			numElements:    15_000,
+			numSubsets:     3,
+			numMerges:      15,
+			maxConcurrency: 1,
+			randSeed:       1724861525311406000,
 		},
 		{
-			name:          "few elements, many subsets",
-			countElements: 2_000,
-			countSubsets:  15,
-			countMerges:   14,
-			countBuffers:  2,
-			randSeed:      172486152531140600,
+			name:           "more elements, more subsets",
+			numElements:    70_000,
+			numSubsets:     8,
+			numMerges:      12,
+			maxConcurrency: 6,
+			randSeed:       1724861525311406,
 		},
 		{
-			name:          "more elements, few subsets",
-			countElements: 5_000,
-			countSubsets:  4,
-			countMerges:   13,
-			countBuffers:  3,
-			randSeed:      17248615253114060,
-		},
-		{
-			name:          "more elements, many subsets",
-			countElements: 7_000,
-			countSubsets:  16,
-			countMerges:   12,
-			countBuffers:  4,
-			randSeed:      1724861525311406,
-		},
-		{
-			name:          "many elements, few subsets",
-			countElements: 19_000,
-			countSubsets:  5,
-			countMerges:   11,
-			countBuffers:  5,
-			randSeed:      172486152531140,
-		},
-		{
-			name:          "many elements, many subsets",
-			countElements: 25_000,
-			countSubsets:  18,
-			countMerges:   10,
-			countBuffers:  6,
-			randSeed:      17248615253114,
+			name:           "many elements, many subsets",
+			numElements:    250_000,
+			numSubsets:     15,
+			numMerges:      10,
+			maxConcurrency: 10,
+			randSeed:       17248615253114,
 		},
 	}
 
 	for _, tc := range testCases {
-		f.Add(tc.countElements, tc.countSubsets, tc.countMerges, tc.countBuffers, tc.randSeed)
+		f.Add(tc.numElements, tc.numSubsets, tc.numMerges, tc.maxConcurrency, tc.randSeed)
 	}
 
 	f.Fuzz(runMergeConcurrentlyWithBuffersTest)
@@ -2488,52 +2322,56 @@ func TestMergeConcurrentlyWithBuffers_VerifyFuzzCallback(t *testing.T) {
 }
 
 func runMergeConcurrentlyWithBuffersTest(t *testing.T,
-	countElements, countSubsets, countMerges, countBuffers int, randSeed int64,
+	numElements, numSubsets, numMerges, maxConcurrency int, randSeed int64,
 ) {
-	if countElements < 100 || countElements > 50_000 {
+	if numElements < 100 || numElements > 500_000 {
 		return
 	}
-	if countSubsets < 1 || countSubsets > 25 {
+	if numSubsets < 1 || numSubsets > 25 {
 		return
 	}
-	if countMerges < 1 || countMerges > 50 {
+	if numMerges < 1 || numMerges > 50 {
 		return
 	}
-	if countBuffers < 1 || countBuffers > 32 {
+	if maxConcurrency < 1 || maxConcurrency > 32 {
 		return
 	}
 
-	// max element is 3x bigger than capacity of single bm's container
-	maxX := (int(math.MaxUint16) + 1) * 3
-	buffers := makeContainerBuffers(countBuffers)
+	maxX := maxCardinality * 10 * minContainersPerRoutine
+	buffers := makeContainerBuffers(maxConcurrency)
 	rnd := rand.New(rand.NewSource(randSeed))
 
-	superset := NewBitmap()
-	subsets := make([]*Bitmap, countSubsets)
-	var control *Bitmap
+	supersetConcBuf := NewBitmap()
+	somesetConcBuf := NewBitmap()
+	subsets := make([]*Bitmap, numSubsets)
+	var supersetConc, supersetControl, somesetConc, somesetControl *Bitmap
 
 	t.Run("populate bitmaps", func(t *testing.T) {
-		for i := 0; i < countElements; i++ {
+		for i := 0; i < numElements; i++ {
 			x := uint64(rnd.Intn(maxX))
-			superset.Set(x)
+			supersetConcBuf.Set(x)
+			somesetConcBuf.Set(x)
 		}
 
 		for i := range subsets {
 			subsets[i] = NewBitmap()
 			// each next subset bitmap contains fewer elements
 			// 1/2 of countElements, 1/3, 1/4, ...
-			for j, c := 0, countElements/(i+2); j < c; j++ {
+			for j, c := 0, numElements/(i+2); j < c; j++ {
 				x := uint64(rnd.Intn(maxX))
 				subsets[i].Set(x)
 				// ensure superset contains element of subset
-				superset.Set(x)
+				supersetConcBuf.Set(x)
 			}
 		}
 
-		control = superset.Clone()
+		supersetConc = supersetConcBuf.Clone()
+		supersetControl = supersetConcBuf.Clone()
+		somesetConc = somesetConcBuf.Clone()
+		somesetControl = somesetConcBuf.Clone()
 	})
 
-	for i := 0; i < countMerges; i++ {
+	for i := 0; i < numMerges; i++ {
 		t.Run("merge bitmaps", func(t *testing.T) {
 			id := rnd.Intn(len(subsets))
 			subset := subsets[id]
@@ -2541,41 +2379,73 @@ func runMergeConcurrentlyWithBuffersTest(t *testing.T,
 			switch mergeType := rnd.Intn(3); mergeType {
 			case 1:
 				t.Run(fmt.Sprintf("AND with %d", id), func(t *testing.T) {
-					superset.AndConcBuf(subset, buffers...)
-					control.And(subset)
-					assertMatches(t, superset, control)
+					supersetControl.And(subset)
+					supersetConc.AndConc(subset, maxConcurrency)
+					supersetConcBuf.AndConcBuf(subset, buffers...)
+					assertMatches(t, supersetControl, supersetConc, supersetConcBuf)
+
+					somesetControl.And(subset)
+					somesetConc.AndConc(subset, maxConcurrency)
+					somesetConcBuf.AndConcBuf(subset, buffers...)
+					assertMatches(t, somesetControl, somesetConc, somesetConcBuf)
 				})
 			case 2:
 				t.Run(fmt.Sprintf("AND NOT with %d", id), func(t *testing.T) {
-					superset.AndNotConcBuf(subset, buffers...)
-					control.AndNot(subset)
-					assertMatches(t, superset, control)
+					supersetControl.AndNot(subset)
+					supersetConc.AndNotConc(subset, maxConcurrency)
+					supersetConcBuf.AndNotConcBuf(subset, buffers...)
+					assertMatches(t, supersetControl, supersetConc, supersetConcBuf)
+
+					somesetControl.AndNot(subset)
+					somesetConc.AndNotConc(subset, maxConcurrency)
+					somesetConcBuf.AndNotConcBuf(subset, buffers...)
+					assertMatches(t, somesetControl, somesetConc, somesetConcBuf)
 				})
 			default:
 				t.Run(fmt.Sprintf("OR with %d", id), func(t *testing.T) {
-					superset.OrConcBuf(subset, buffers...)
-					control.Or(subset)
-					assertMatches(t, superset, control)
+					supersetControl.Or(subset)
+					supersetConc.OrConc(subset, maxConcurrency)
+					supersetConcBuf.OrConcBuf(subset, buffers...)
+					assertMatches(t, supersetControl, supersetConc, supersetConcBuf)
+
+					somesetControl.Or(subset)
+					somesetConc.OrConc(subset, maxConcurrency)
+					somesetConcBuf.OrConcBuf(subset, buffers...)
+					assertMatches(t, somesetControl, somesetConc, somesetConcBuf)
 				})
 			}
 		})
 	}
 }
 
-func assertMatches(t *testing.T, bm1, bm2 *Bitmap) {
-	require.Equal(t, bm1.GetCardinality(), bm2.GetCardinality())
+func assertMatches(t *testing.T, expected *Bitmap, others ...*Bitmap) {
+	if len(others) == 0 {
+		return
+	}
+
+	expCard := expected.GetCardinality()
+	for i := range others {
+		require.Equalf(t, expCard, others[i].GetCardinality(), "different cardinality for bitmap %d", i)
+	}
 
 	// check elements match using iterator as
 	// require.ElementsMatch(t, bm1.ToArray(), bm2.ToArray())
 	// causes fuzz test to fail frequently
-	cit := bm1.NewIterator()
-	sit := bm2.NewIterator()
-	for {
-		cx := cit.Next()
-		sx := sit.Next()
-		require.Equal(t, cx, sx)
+	iterator := expected.NewIterator()
+	iterators := make([]*Iterator, len(others))
+	for i := range others {
+		iterators[i] = others[i].NewIterator()
+	}
 
-		if cx == 0 || sx == 0 {
+	for j := 0; ; j++ {
+		x := iterator.Next()
+		for i := range iterators {
+			xi := iterators[i].Next()
+
+			require.Equalf(t, x, xi, "different elements at position %d for bitmap %d", j, i)
+		}
+
+		if j > 0 && x == 0 {
 			break
 		}
 	}
