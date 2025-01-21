@@ -123,7 +123,8 @@ func AndNot(a, b *Bitmap) *Bitmap {
 		return a.Clone()
 	}
 
-	andNotContainers(a, b, res, nil)
+	buf := make([]uint16, maxContainerSize)
+	andNotContainers(a, b, res, buf)
 	return res
 }
 
@@ -146,6 +147,10 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	ai, an := 0, a.keys.numKeys()
 	bi, bn := 0, b.keys.numKeys()
 
+	akToAc := map[uint64][]uint16{}
+	sizeContainers := uint64(0)
+	sizeKeys := uint64(0)
+
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
@@ -166,10 +171,9 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			off := a.keys.val(ai)
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := res.newContainerNoClr(uint16(len(ac)))
-				copy(res.data[offset:], ac)
-				res.setKey(ak, offset)
+				akToAc[ak] = ac
+				sizeContainers += uint64(len(ac))
+				sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
 			}
 			ai++
 		} else {
@@ -181,8 +185,21 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 		ac := a.getContainer(offset)
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
+			akToAc[ak] = ac
+			sizeContainers += uint64(len(ac))
+			sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
+		}
+	}
+
+	if sizeContainers > 0 {
+		// ensure enough space for new containers and keys,
+		// allocate required memory just once to avoid copying underlying data slice multiple times
+		res.expandNoLengthChange(sizeContainers + sizeKeys)
+		res.expandKeys(sizeKeys)
+
+		for ak, ac := range akToAc {
 			// create a new container and update the key offset to this container.
-			offset = res.newContainerNoClr(uint16(len(ac)))
+			offset := res.newContainerNoClr(uint16(len(ac)))
 			copy(res.data[offset:], ac)
 			res.setKey(ak, offset)
 		}
