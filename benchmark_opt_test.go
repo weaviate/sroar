@@ -200,40 +200,6 @@ func Benchmark_And_AltFn(b *testing.B) {
 	}
 }
 
-// go test -v -bench Benchmark_And_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_Buf(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.AndBuf(subsets[j], buf)
-			s2.AndBuf(subsets[l-j-1], buf)
-			b1.AndBuf(subsets[j], buf)
-			b2.AndBuf(subsets[l-j-1], buf)
-		}
-	}
-}
-
-// go test -v -bench Benchmark_And_BufFn -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_And_BufFn(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1 = AndBuf(s1, subsets[j], buf)
-			s2 = AndBuf(s2, subsets[l-j-1], buf)
-			b1 = AndBuf(b1, subsets[j], buf)
-			b2 = AndBuf(b2, subsets[l-j-1], buf)
-		}
-	}
-}
-
 func Benchmark_And_Alt_Conc_0(b *testing.B) {
 	benchmark_And_Conc(b, 0)
 }
@@ -293,61 +259,6 @@ func benchmark_And_Conc(b *testing.B, concurrency int) {
 	}
 }
 
-func Benchmark_And_Alt_ConcBuf_1(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:1])
-}
-
-func Benchmark_And_Alt_ConcBuf_2(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:2])
-}
-
-func Benchmark_And_Alt_ConcBuf_3(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:3])
-}
-
-func Benchmark_And_Alt_ConcBuf_4(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:4])
-}
-
-func Benchmark_And_Alt_ConcBuf_5(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:5])
-}
-
-func Benchmark_And_Alt_ConcBuf_6(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:6])
-}
-
-func Benchmark_And_Alt_ConcBuf_7(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:7])
-}
-
-func Benchmark_And_Alt_ConcBuf_8(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:8])
-}
-
-func Benchmark_And_Alt_ConcBuf_9(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10[:9])
-}
-
-func Benchmark_And_Alt_ConcBuf_10(b *testing.B) {
-	benchmark_And_ConcBuf(b, bufs10)
-}
-
-func benchmark_And_ConcBuf(b *testing.B, bufs [][]uint16) {
-	for i := 0; i < b.N; i++ {
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.AndConcBuf(subsets[j], bufs...)
-			s2.AndConcBuf(subsets[l-j-1], bufs...)
-			b1.AndConcBuf(subsets[j], bufs...)
-			b2.AndConcBuf(subsets[l-j-1], bufs...)
-		}
-	}
-}
-
 // go test -v -bench Benchmark_AndNot_Old -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
 func Benchmark_AndNot_Old(b *testing.B) {
 	for i := 0; i < b.N; i++ {
@@ -392,40 +303,6 @@ func Benchmark_AndNot_AltFn(b *testing.B) {
 			s2 = AndNot(s2, subsets[l-j-1])
 			b1 = AndNot(b1, subsets[j])
 			b2 = AndNot(b2, subsets[l-j-1])
-		}
-	}
-}
-
-// go test -v -bench Benchmark_AndNot_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_AndNot_Buf(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.AndNotBuf(subsets[j], buf)
-			s2.AndNotBuf(subsets[l-j-1], buf)
-			b1.AndNotBuf(subsets[j], buf)
-			b2.AndNotBuf(subsets[l-j-1], buf)
-		}
-	}
-}
-
-// go test -v -bench Benchmark_AndNot_BufFn -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_AndNot_BufFn(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1 = AndNotBuf(s1, subsets[j], buf)
-			s2 = AndNotBuf(s2, subsets[l-j-1], buf)
-			b1 = AndNotBuf(b1, subsets[j], buf)
-			b2 = AndNotBuf(b2, subsets[l-j-1], buf)
 		}
 	}
 }
@@ -485,61 +362,6 @@ func benchmark_AndNot_Conc(b *testing.B, concurrency int) {
 			s2.AndNotConc(subsets[l-j-1], concurrency)
 			b1.AndNotConc(subsets[j], concurrency)
 			b2.AndNotConc(subsets[l-j-1], concurrency)
-		}
-	}
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_1(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:1])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_2(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:2])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_3(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:3])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_4(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:4])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_5(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:5])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_6(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:6])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_7(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:7])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_8(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:8])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_9(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10[:9])
-}
-
-func Benchmark_AndNot_Alt_ConcBuf_10(b *testing.B) {
-	benchmark_AndNot_ConcBuf(b, bufs10)
-}
-
-func benchmark_AndNot_ConcBuf(b *testing.B, bufs [][]uint16) {
-	for i := 0; i < b.N; i++ {
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.AndNotConcBuf(subsets[j], bufs...)
-			s2.AndNotConcBuf(subsets[l-j-1], bufs...)
-			b1.AndNotConcBuf(subsets[j], bufs...)
-			b2.AndNotConcBuf(subsets[l-j-1], bufs...)
 		}
 	}
 }
@@ -608,40 +430,6 @@ func Benchmark_Or_AltFn(b *testing.B) {
 	}
 }
 
-// go test -v -bench Benchmark_Or_Buf -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_Or_Buf(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.OrBuf(subsets[j], buf)
-			s2.OrBuf(subsets[l-j-1], buf)
-			b1.OrBuf(subsets[j], buf)
-			b2.OrBuf(subsets[l-j-1], buf)
-		}
-	}
-}
-
-// go test -v -bench Benchmark_Or_BufFn -benchmem -run ^$ github.com/weaviate/sroar -cpuprofile cpu.prof
-func Benchmark_Or_BufFn(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		buf := make([]uint16, maxContainerSize)
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1 = OrBuf(s1, subsets[j], buf)
-			s2 = OrBuf(s2, subsets[l-j-1], buf)
-			b1 = OrBuf(b1, subsets[j], buf)
-			b2 = OrBuf(b2, subsets[l-j-1], buf)
-		}
-	}
-}
-
 func Benchmark_Or_Alt_Conc_0(b *testing.B) {
 	benchmark_Or_Conc(b, 0)
 }
@@ -697,61 +485,6 @@ func benchmark_Or_Conc(b *testing.B, concurrency int) {
 			s2.OrConc(subsets[l-j-1], concurrency)
 			b1.OrConc(subsets[j], concurrency)
 			b2.OrConc(subsets[l-j-1], concurrency)
-		}
-	}
-}
-
-func Benchmark_Or_Alt_ConcBuf_1(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:1])
-}
-
-func Benchmark_Or_Alt_ConcBuf_2(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:2])
-}
-
-func Benchmark_Or_Alt_ConcBuf_3(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:3])
-}
-
-func Benchmark_Or_Alt_ConcBuf_4(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:4])
-}
-
-func Benchmark_Or_Alt_ConcBuf_5(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:5])
-}
-
-func Benchmark_Or_Alt_ConcBuf_6(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:6])
-}
-
-func Benchmark_Or_Alt_ConcBuf_7(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:7])
-}
-
-func Benchmark_Or_Alt_ConcBuf_8(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:8])
-}
-
-func Benchmark_Or_Alt_ConcBuf_9(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10[:9])
-}
-
-func Benchmark_Or_Alt_ConcBuf_10(b *testing.B) {
-	benchmark_Or_ConcBuf(b, bufs10)
-}
-
-func benchmark_Or_ConcBuf(b *testing.B, bufs [][]uint16) {
-	for i := 0; i < b.N; i++ {
-		s1 := superset.Clone()
-		s2 := superset.Clone()
-		b1 := bigset.Clone()
-		b2 := bigset.Clone()
-		for j, l := 0, len(subsets); j < l; j++ {
-			s1.OrConcBuf(subsets[j], bufs...)
-			s2.OrConcBuf(subsets[l-j-1], bufs...)
-			b1.OrConcBuf(subsets[j], bufs...)
-			b2.OrConcBuf(subsets[l-j-1], bufs...)
 		}
 	}
 }

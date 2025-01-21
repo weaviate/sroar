@@ -16,18 +16,6 @@ func And(a, b *Bitmap) *Bitmap {
 	return res
 }
 
-func AndBuf(a, b *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	res := NewBitmap()
-	if a.IsEmpty() || b.IsEmpty() {
-		return res
-	}
-
-	andContainers(a, b, res, buf)
-	return res
-}
-
 func andContainers(a, b, res *Bitmap, optBuf []uint16) {
 	ai, an := 0, a.keys.numKeys()
 	bi, bn := 0, b.keys.numKeys()
@@ -66,18 +54,6 @@ func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 	return ra
 }
 
-func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	if bm.IsEmpty() {
-		ra.Reset()
-		return ra
-	}
-
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), buf)
-	return ra
-}
-
 // AndConc performs And merge concurrently.
 // Concurrency is calculated based on number of internal containers
 // in destination bitmap, so that each goroutine handles at least
@@ -89,30 +65,6 @@ func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
 // - maxConcurrency = 2, there will be 2 goroutines executed
 // - maxConcurrency = 6, there will be 4 goroutines executed
 func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
-	return ra.andConc(bm, maxConcurrency, nil)
-}
-
-// AndConcBuf performs And merge concurrently using provided container buffers.
-// Concurrency is calculated based on number of internal containers
-// in destination bitmap, so that each goroutine handles at least
-// [minContainersPerRoutine] containers.
-// Number of buffers limits concurrency calculated internally.
-// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
-//
-// E.g.: dst bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
-// - 2 buffers, there will be 2 goroutines executed
-// - 6 buffers, there will be 4 goroutines executed
-func (ra *Bitmap) AndConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
-	numBufs := len(bufs)
-	assert(numBufs > 0)
-	for i := range bufs {
-		assert(len(bufs[i]) == maxContainerSize)
-	}
-
-	return ra.andConc(bm, numBufs, bufs)
-}
-
-func (ra *Bitmap) andConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
 	if bm.IsEmpty() {
 		ra.Reset()
 		return ra
@@ -120,7 +72,7 @@ func (ra *Bitmap) andConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *B
 
 	numContainers := ra.keys.numKeys()
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(ai, aj, i int) { andContainersInRange(ra, bm, ai, aj, bufs.getOrNil(i)) }
+	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil) }
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	return ra
 }
@@ -169,21 +121,6 @@ func AndNot(a, b *Bitmap) *Bitmap {
 	}
 
 	buf := make([]uint16, maxContainerSize)
-	andNotContainers(a, b, res, buf)
-	return res
-}
-
-func AndNotBuf(a, b *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	res := NewBitmap()
-	if a.IsEmpty() {
-		return res
-	}
-	if b.IsEmpty() {
-		return a.Clone()
-	}
-
 	andNotContainers(a, b, res, buf)
 	return res
 }
@@ -260,17 +197,6 @@ func (ra *Bitmap) AndNot(bm *Bitmap) *Bitmap {
 	return ra
 }
 
-func (ra *Bitmap) AndNotBuf(bm *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	if bm.IsEmpty() || ra.IsEmpty() {
-		return ra
-	}
-
-	andNotContainersInRange(ra, bm, 0, bm.keys.numKeys(), buf)
-	return ra
-}
-
 // AndNotConc performs AndNot merge concurrently.
 // Concurrency is calculated based on number of internal containers
 // in source bitmap, so that each goroutine handles at least
@@ -282,37 +208,13 @@ func (ra *Bitmap) AndNotBuf(bm *Bitmap, buf []uint16) *Bitmap {
 // - maxConcurrency = 2, there will be 2 goroutines executed
 // - maxConcurrency = 6, there will be 4 goroutines executed
 func (ra *Bitmap) AndNotConc(bm *Bitmap, maxConcurrency int) *Bitmap {
-	return ra.andNotConc(bm, maxConcurrency, nil)
-}
-
-// AndNotConcBuf performs AndNot merge concurrently using provided container buffers.
-// Concurrency is calculated based on number of internal containers
-// in source bitmap, so that each goroutine handles at least
-// [minContainersPerRoutine] containers.
-// Number of buffers limits concurrency calculated internally.
-// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
-//
-// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
-// - 2 buffers, there will be 2 goroutines executed
-// - 6 buffers, there will be 4 goroutines executed
-func (ra *Bitmap) AndNotConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
-	numBufs := len(bufs)
-	assert(numBufs > 0)
-	for i := range bufs {
-		assert(len(bufs[i]) == maxContainerSize)
-	}
-
-	return ra.andNotConc(bm, numBufs, bufs)
-}
-
-func (ra *Bitmap) andNotConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
 	if bm.IsEmpty() || ra.IsEmpty() {
 		return ra
 	}
 
 	numContainers := bm.keys.numKeys()
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(bi, bj, i int) { andNotContainersInRange(ra, bm, bi, bj, bufs.getOrNil(i)) }
+	callback := func(bi, bj, _ int) { andNotContainersInRange(ra, bm, bi, bj, nil) }
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	return ra
 }
@@ -354,22 +256,6 @@ func Or(a, b *Bitmap) *Bitmap {
 	}
 
 	buf := make([]uint16, maxContainerSize)
-	orContainers(a, b, res, buf)
-	return res
-}
-
-func OrBuf(a, b *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	res := NewBitmap()
-	if ae, be := a.IsEmpty(), b.IsEmpty(); ae && be {
-		return res
-	} else if ae {
-		return b.Clone()
-	} else if be {
-		return a.Clone()
-	}
-
 	orContainers(a, b, res, buf)
 	return res
 }
@@ -475,17 +361,6 @@ func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 	return ra
 }
 
-func (ra *Bitmap) OrBuf(bm *Bitmap, buf []uint16) *Bitmap {
-	assert(len(buf) == maxContainerSize)
-
-	if bm.IsEmpty() {
-		return ra
-	}
-
-	orContainersInRange(ra, bm, 0, bm.keys.numKeys(), buf)
-	return ra
-}
-
 func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
@@ -577,30 +452,6 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 // - maxConcurrency = 2, there will be 2 goroutines executed
 // - maxConcurrency = 6, there will be 4 goroutines executed
 func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
-	return ra.orConc(bm, maxConcurrency, nil)
-}
-
-// OrConcBuf performs Or merge concurrently using provided container buffers.
-// Concurrency is calculated based on number of internal containers
-// in source bitmap, so that each goroutine handles at least
-// [minContainersPerRoutine] containers.
-// Number of buffers limits concurrency calculated internally.
-// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
-//
-// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
-// - 2 buffers, there will be 2 goroutines executed
-// - 6 buffers, there will be 4 goroutines executed
-func (ra *Bitmap) OrConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
-	numBufs := len(bufs)
-	assert(numBufs > 0)
-	for i := range bufs {
-		assert(len(bufs[i]) == maxContainerSize)
-	}
-
-	return ra.orConc(bm, numBufs, bufs)
-}
-
-func (ra *Bitmap) orConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
 	if bm.IsEmpty() {
 		return ra
 	}
@@ -609,7 +460,8 @@ func (ra *Bitmap) orConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bi
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
 
 	if concurrency <= 1 {
-		orContainersInRange(ra, bm, 0, numContainers, bufs.getOrCreate(0))
+		buf := make([]uint16, maxContainerSize)
+		orContainersInRange(ra, bm, 0, numContainers, buf)
 		return ra
 	}
 
@@ -618,8 +470,9 @@ func (ra *Bitmap) orConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bi
 	var allContainers [][]uint16
 	lock := new(sync.Mutex)
 	inlineVsMutateLock := new(sync.RWMutex)
-	callback := func(bi, bj, i int) {
-		sizeContainers, sizeKeys, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, bufs.getOrCreate(i), inlineVsMutateLock)
+	callback := func(bi, bj, _ int) {
+		buf := make([]uint16, maxContainerSize)
+		sizeContainers, sizeKeys, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, buf, inlineVsMutateLock)
 
 		lock.Lock()
 		totalSizeContainers += sizeContainers
@@ -767,22 +620,6 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 		}()
 	}
 	wg.Wait()
-}
-
-type containerBufs [][]uint16
-
-func (b containerBufs) getOrCreate(i int) []uint16 {
-	if b == nil {
-		return make([]uint16, maxContainerSize)
-	}
-	return b[i]
-}
-
-func (b containerBufs) getOrNil(i int) []uint16 {
-	if b == nil {
-		return nil
-	}
-	return b[i]
 }
 
 func (ra *Bitmap) ConvertToBitmapContainers() {
