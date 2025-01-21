@@ -78,23 +78,68 @@ func (ra *Bitmap) AndBuf(bm *Bitmap, buf []uint16) *Bitmap {
 	return ra
 }
 
-func andContainersInRange(a, b *Bitmap, ai, an int, optBuf []uint16) {
+// AndConc performs And merge concurrently.
+// Concurrency is calculated based on number of internal containers
+// in destination bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// maxConcurrency limits concurrency calculated internally.
+// If maxConcurrency <= 0, then calculated concurrency is not limited.
+//
+// E.g.: dst bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - maxConcurrency = 2, there will be 2 goroutines executed
+// - maxConcurrency = 6, there will be 4 goroutines executed
+func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
+	return ra.andConc(bm, maxConcurrency, nil)
+}
+
+// AndConcBuf performs And merge concurrently using provided container buffers.
+// Concurrency is calculated based on number of internal containers
+// in destination bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// Number of buffers limits concurrency calculated internally.
+// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
+//
+// E.g.: dst bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - 2 buffers, there will be 2 goroutines executed
+// - 6 buffers, there will be 4 goroutines executed
+func (ra *Bitmap) AndConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
+	numBufs := len(bufs)
+	assert(numBufs > 0)
+	for i := range bufs {
+		assert(len(bufs[i]) == maxContainerSize)
+	}
+
+	return ra.andConc(bm, numBufs, bufs)
+}
+
+func (ra *Bitmap) andConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
+	if bm.IsEmpty() {
+		ra.Reset()
+		return ra
+	}
+
+	numContainers := ra.keys.numKeys()
+	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
+	callback := func(ai, aj, i int) { andContainersInRange(ra, bm, ai, aj, bufs.getOrNil(i)) }
+	concurrentlyInRanges(numContainers, concurrency, callback)
+	return ra
+}
+
+func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
 
-	for ai < an && bi < bn {
+	for ai < aj && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
-			aoff := a.keys.val(ai)
-			ac := a.getContainer(aoff)
-			boff := b.keys.val(bi)
-			bc := b.getContainer(boff)
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
 			if c := containerAndAlt(ac, bc, optBuf, runInline); len(c) > 0 {
-				// make room for container, replacing smaller one and update key offset to new container.
-				a.insertAt(aoff, c)
-				a.setKey(ak, aoff)
+				panic("new container not expected in And inline mode")
 			}
 			ai++
 			bi++
@@ -107,7 +152,7 @@ func andContainersInRange(a, b *Bitmap, ai, an int, optBuf []uint16) {
 			bi++
 		}
 	}
-	for ; ai < an; ai++ {
+	for ; ai < aj; ai++ {
 		off := a.keys.val(ai)
 		ac := a.getContainer(off)
 		zeroOutContainer(ac)
@@ -226,23 +271,67 @@ func (ra *Bitmap) AndNotBuf(bm *Bitmap, buf []uint16) *Bitmap {
 	return ra
 }
 
-func andNotContainersInRange(a, b *Bitmap, bi, bn int, optBuf []uint16) {
+// AndNotConc performs AndNot merge concurrently.
+// Concurrency is calculated based on number of internal containers
+// in source bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// maxConcurrency limits concurrency calculated internally.
+// If maxConcurrency <= 0, then calculated concurrency is not limited.
+//
+// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - maxConcurrency = 2, there will be 2 goroutines executed
+// - maxConcurrency = 6, there will be 4 goroutines executed
+func (ra *Bitmap) AndNotConc(bm *Bitmap, maxConcurrency int) *Bitmap {
+	return ra.andNotConc(bm, maxConcurrency, nil)
+}
+
+// AndNotConcBuf performs AndNot merge concurrently using provided container buffers.
+// Concurrency is calculated based on number of internal containers
+// in source bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// Number of buffers limits concurrency calculated internally.
+// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
+//
+// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - 2 buffers, there will be 2 goroutines executed
+// - 6 buffers, there will be 4 goroutines executed
+func (ra *Bitmap) AndNotConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
+	numBufs := len(bufs)
+	assert(numBufs > 0)
+	for i := range bufs {
+		assert(len(bufs[i]) == maxContainerSize)
+	}
+
+	return ra.andNotConc(bm, numBufs, bufs)
+}
+
+func (ra *Bitmap) andNotConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
+	if bm.IsEmpty() || ra.IsEmpty() {
+		return ra
+	}
+
+	numContainers := bm.keys.numKeys()
+	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
+	callback := func(bi, bj, i int) { andNotContainersInRange(ra, bm, bi, bj, bufs.getOrNil(i)) }
+	concurrentlyInRanges(numContainers, concurrency, callback)
+	return ra
+}
+
+func andNotContainersInRange(a, b *Bitmap, bi, bj int, optBuf []uint16) {
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
 
-	for ai < an && bi < bn {
+	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
-			aoff := a.keys.val(ai)
-			ac := a.getContainer(aoff)
-			boff := b.keys.val(bi)
-			bc := b.getContainer(boff)
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
 			if c := containerAndNotAlt(ac, bc, optBuf, runInline); len(c) > 0 {
-				// make room for container, replacing smaller one and update key offset to new container.
-				a.insertAt(aoff, c)
-				a.setKey(ak, aoff)
+				panic("new container not expected in AndNot inline mode")
 			}
 			ai++
 			bi++
@@ -477,77 +566,223 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	}
 }
 
-const minContainersForConcurrency = 16
-
-// AndToSuperset calculates intersection of current and incoming bitmap
-// It reuses containers present in current bitmap
-// and utilize container buffers provided.
-// Number of passed buffers indicates concurrency level
-// (e.g. 4 buffers = merge will be performed by 4 goroutines).
+// OrConc performs Or merge concurrently.
+// Concurrency is calculated based on number of internal containers
+// in source bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// maxConcurrency limits concurrency calculated internally.
+// If maxConcurrency <= 0, then calculated concurrency is not limited.
 //
-// CAUTION: should be used only when current bitmap contained before
-// all elements present in incoming bitmap
-func (dst *Bitmap) AndToSuperset(src *Bitmap, containerBufs ...[]uint16) {
-	conc := len(containerBufs)
-	assert(conc > 0)
-
-	dstNumKeys := dst.keys.numKeys()
-	if src == nil {
-		concurrentlyOnRange(conc, dstNumKeys, func(_, from, to int) {
-			zeroOutSelectedContainers(dst, from, to)
-		})
-		return
-	}
-
-	srcNumKeys := src.keys.numKeys()
-	concurrentlyOnRange(conc, dstNumKeys, func(i, from, to int) {
-		andSelectedContainers(dst, src, from, to, 0, srcNumKeys, containerBufs[i])
-	})
+// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - maxConcurrency = 2, there will be 2 goroutines executed
+// - maxConcurrency = 6, there will be 4 goroutines executed
+func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
+	return ra.orConc(bm, maxConcurrency, nil)
 }
 
-// OrToSuperset calculates union of current and incoming bitmap
-// It reuses containers present in current bitmap
-// and utilize containers buffers provided.
-// Number of passed buffers indicates concurrency level
-// (e.g. 4 buffers = merge will be performed by 4 goroutines).
+// OrConcBuf performs Or merge concurrently using provided container buffers.
+// Concurrency is calculated based on number of internal containers
+// in source bitmap, so that each goroutine handles at least
+// [minContainersPerRoutine] containers.
+// Number of buffers limits concurrency calculated internally.
+// At least one buffer has to be provided. Buffers needs to be [maxContainerSize] long.
 //
-// CAUTION: should be used only when current bitmap contained before
-// all elements present in incoming bitmap
-func (dst *Bitmap) OrToSuperset(src *Bitmap, containerBufs ...[]uint16) {
-	conc := len(containerBufs)
-	assert(conc > 0)
-
-	if src == nil {
-		return
+// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// - 2 buffers, there will be 2 goroutines executed
+// - 6 buffers, there will be 4 goroutines executed
+func (ra *Bitmap) OrConcBuf(bm *Bitmap, bufs ...[]uint16) *Bitmap {
+	numBufs := len(bufs)
+	assert(numBufs > 0)
+	for i := range bufs {
+		assert(len(bufs[i]) == maxContainerSize)
 	}
 
-	srcNumKeys := src.keys.numKeys()
-	concurrentlyOnRange(conc, srcNumKeys, func(i, from, to int) {
-		orSelectedContainers(dst, src, from, to, containerBufs[i])
-	})
+	return ra.orConc(bm, numBufs, bufs)
 }
 
-// AndNotToSuperset calculates difference between current and incoming bitmap
-// It reuses containers present in current bitmap
-// and utilize containers buffers provided.
-// Number of passed buffers indicates concurrency level
-// (e.g. 4 buffers = merge will be performed by 4 goroutines).
-//
-// CAUTION: should be used only when current bitmap contained before
-// all elements present in incoming bitmap
-func (dst *Bitmap) AndNotToSuperset(src *Bitmap, containerBufs ...[]uint16) {
-	conc := len(containerBufs)
-	assert(conc > 0)
+func (ra *Bitmap) orConc(bm *Bitmap, maxConcurrency int, bufs containerBufs) *Bitmap {
+	if bm.IsEmpty() {
+		return ra
+	}
 
-	if src == nil {
+	numContainers := bm.keys.numKeys()
+	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
+
+	if concurrency <= 1 {
+		orContainersInRange(ra, bm, 0, numContainers, bufs.getOrCreate(0))
+		return ra
+	}
+
+	var totalSizeContainers, totalSizeKeys uint64
+	var allKeys []uint64
+	var allContainers [][]uint16
+	lock := new(sync.Mutex)
+	inlineVsMutateLock := new(sync.RWMutex)
+	callback := func(bi, bj, i int) {
+		sizeContainers, sizeKeys, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, bufs.getOrCreate(i), inlineVsMutateLock)
+
+		lock.Lock()
+		totalSizeContainers += sizeContainers
+		totalSizeKeys += sizeKeys
+		allKeys = append(allKeys, keys...)
+		allContainers = append(allContainers, containers...)
+		lock.Unlock()
+	}
+	concurrentlyInRanges(numContainers, concurrency, callback)
+
+	if totalSizeContainers > 0 {
+		// ensure enough space for new containers and keys,
+		// allocate required memory just once to avoid copying underlying data slice multiple times
+		ra.expandNoLengthChange(totalSizeContainers + totalSizeKeys)
+		ra.expandKeys(totalSizeKeys)
+
+		for i, container := range allContainers {
+			// create a new container and update the key offset to this container.
+			offset := ra.newContainerNoClr(uint16(len(container)))
+			copy(ra.data[offset:], container)
+			ra.setKey(allKeys[i], offset)
+		}
+	}
+
+	return ra
+}
+
+func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMutateLock *sync.RWMutex,
+) (sizeContainers, sizeKeys uint64, bKeys []uint64, bContainers [][]uint16) {
+	bk := b.keys.key(bi)
+	ai := a.keys.search(bk)
+	an := a.keys.numKeys()
+
+	// copy containers from b to a all at once
+	// expanding underlying data slice and keys subslice once
+	sizeContainers = 0
+	sizeKeys = 0
+	bKeys = []uint64{}
+	bContainers = [][]uint16{}
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+		if ak == bk {
+			inlineVsMutateLock.RLock()
+			off := a.keys.val(ai)
+			ac := a.getContainer(off)
+			off = b.keys.val(bi)
+			bc := b.getContainer(off)
+			c := containerOrAlt(ac, bc, buf, runInline)
+			inlineVsMutateLock.RUnlock()
+
+			if len(c) > 0 {
+				inlineVsMutateLock.Lock()
+				// Since buffer is used in containers merge, result container has to be copied
+				// to the bitmap immediately to let buffer be reused in next merge,
+				// contrary to unique containers from bitmap b copied at the end of method execution
+
+				// Replacing previous container with merged one, that requires moving data
+				// to the right to make enough space for merged container is slower
+				// than appending bitmap with entirely new container and "forgetting" old one
+				// for large bitmaps, so it is performed only on small ones
+				if an > 10 {
+					// create a new container and update the key off to this container.
+					off = a.newContainerNoClr(uint16(len(c)))
+					copy(a.data[off:], c)
+				} else {
+					// make room for container, replacing smaller one and update key offset to new container.
+					off = a.keys.val(ai)
+					a.insertAt(off, c)
+				}
+				a.setKey(ak, off)
+				inlineVsMutateLock.Unlock()
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			off := b.keys.val(bi)
+			bc := b.getContainer(off)
+			if getCardinality(bc) > 0 {
+				bKeys = append(bKeys, bk)
+				bContainers = append(bContainers, bc)
+				sizeContainers += uint64(len(bc))
+				sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
+			}
+			bi++
+		}
+	}
+	for ; bi < bn; bi++ {
+		off := b.keys.val(bi)
+		bc := b.getContainer(off)
+		if getCardinality(bc) > 0 {
+			bk := b.keys.key(bi)
+			bKeys = append(bKeys, bk)
+			bContainers = append(bContainers, bc)
+			sizeContainers += uint64(len(bc))
+			sizeKeys += 8 // 2x uint64 = 8x uint16; for key and offset
+		}
+	}
+
+	return
+}
+
+const minContainersPerRoutine = 24
+
+func calcConcurrency(numContainers, minContainers, maxConcurrency int) int {
+	concurrency := numContainers / minContainers
+	if concurrency < 1 || maxConcurrency == 1 {
+		concurrency = 1
+	} else if maxConcurrency > 1 && maxConcurrency < concurrency {
+		concurrency = maxConcurrency
+	}
+	return concurrency
+}
+
+func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to, i int)) {
+	if concurrency <= 1 {
+		callback(0, numContainers, 0)
 		return
 	}
 
-	dstNumKeys := dst.keys.numKeys()
-	srcNumKeys := src.keys.numKeys()
-	concurrentlyOnRange(conc, dstNumKeys, func(i, from, to int) {
-		andNotSelectedContainers(dst, src, from, to, 0, srcNumKeys, containerBufs[i])
-	})
+	div := numContainers / concurrency
+	mod := numContainers % concurrency
+
+	wg := new(sync.WaitGroup)
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		i := i
+		var from, to int
+
+		if i < mod {
+			from = i * (div + 1)
+			to = (i + 1) * (div + 1)
+		} else {
+			from = mod*(div+1) + (i-mod)*div
+			to = mod*(div+1) + (i-mod+1)*div
+		}
+
+		go func() {
+			callback(from, to, i)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+}
+
+type containerBufs [][]uint16
+
+func (b containerBufs) getOrCreate(i int) []uint16 {
+	if b == nil {
+		return make([]uint16, maxContainerSize)
+	}
+	return b[i]
+}
+
+func (b containerBufs) getOrNil(i int) []uint16 {
+	if b == nil {
+		return nil
+	}
+	return b[i]
 }
 
 func (ra *Bitmap) ConvertToBitmapContainers() {
@@ -561,108 +796,6 @@ func (ra *Bitmap) ConvertToBitmapContainers() {
 			offset := ra.newContainer(uint16(len(c)))
 			copy(ra.data[offset:], c)
 			ra.setKey(ak, offset)
-		}
-	}
-}
-
-func concurrentlyOnRange(conc, max int, callback func(i, from, to int)) {
-	if conc == 1 || max < conc*minContainersForConcurrency {
-		callback(0, 0, max)
-		return
-	}
-
-	delta := max / conc
-
-	wg := new(sync.WaitGroup)
-	wg.Add(conc - 1)
-	for i := 0; i < conc-1; i++ {
-		go func(i int) {
-			callback(i, delta*i, delta*(i+1))
-			wg.Done()
-		}(i)
-	}
-	callback(conc-1, delta*(conc-1), max)
-	wg.Wait()
-}
-
-func zeroOutSelectedContainers(a *Bitmap, ai, an int) {
-	for ; ai < an; ai++ {
-		off := a.keys.val(ai)
-		zeroOutContainer(a.getContainer(off))
-	}
-}
-
-func andSelectedContainers(a, b *Bitmap, ai, an, bi, bn int, containerBuf []uint16) {
-	for ai < an && bi < bn {
-		ak := a.keys.key(ai)
-		bk := b.keys.key(bi)
-		if ak == bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			off = b.keys.val(bi)
-			bc := b.getContainer(off)
-
-			if getCardinality(bc) == 0 {
-				zeroOutContainer(ac)
-			} else {
-				containerAndToSuperset(ac, bc, containerBuf)
-			}
-			ai++
-			bi++
-		} else if ak < bk {
-			off := a.keys.val(ai)
-			zeroOutContainer(a.getContainer(off))
-			ai++
-		} else {
-			bi++
-		}
-	}
-	for ; ai < an; ai++ {
-		off := a.keys.val(ai)
-		zeroOutContainer(a.getContainer(off))
-	}
-}
-
-func orSelectedContainers(a, b *Bitmap, bi, bn int, containerBuf []uint16) {
-	for ; bi < bn; bi++ {
-		off := b.keys.val(bi)
-		bc := b.getContainer(off)
-		if getCardinality(bc) == 0 {
-			continue
-		}
-
-		bk := b.keys.key(bi)
-		ai := a.keys.search(bk)
-		if ai >= a.keys.numKeys() || a.keys.key(ai) != bk {
-			// Container does not exist in dst.
-			panic("Current bitmap should have all containers of incoming bitmap")
-		} else {
-			// Container exists in dst as well. Do an inline containerOr.
-			off = a.keys.val(ai)
-			ac := a.getContainer(off)
-			containerOrToSuperset(ac, bc, containerBuf)
-		}
-	}
-}
-
-func andNotSelectedContainers(a, b *Bitmap, ai, an, bi, bn int, containerBuf []uint16) {
-	for ai < an && bi < bn {
-		ak := a.keys.key(ai)
-		bk := b.keys.key(bi)
-		if ak == bk {
-			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) != 0 {
-				off = a.keys.val(ai)
-				ac := a.getContainer(off)
-				containerAndNotToSuperset(ac, bc, containerBuf)
-			}
-			ai++
-			bi++
-		} else if ak < bk {
-			ai++
-		} else {
-			bi++
 		}
 	}
 }
