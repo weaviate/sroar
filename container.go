@@ -636,32 +636,41 @@ func (b bitmap) isFull() bool {
 }
 
 func (b bitmap) minimum() uint16 {
-	N := getCardinality(b)
-	if N == 0 {
+	if N := getCardinality(b); N == 0 {
 		return 0
 	}
-	for i, x := range b[startIdx:] {
-		lz := bits.LeadingZeros16(x)
-		if lz == 16 {
-			continue
+
+	b64 := uint16To64SliceUnsafe(b[startIdx:])
+	for i := 0; i < len(b64); i++ {
+		if b64[i] != 0 {
+			for j := 0; j < 4; j++ {
+				idx := i*4 + j
+				if lz := bits.LeadingZeros16(b[idx+int(startIdx)]); lz != 16 {
+					return uint16(16*idx + lz)
+				}
+			}
+			break
 		}
-		return uint16(16*i + lz)
 	}
 	panic("We shouldn't reach here")
 }
 
 func (b bitmap) maximum() uint16 {
-	N := getCardinality(b)
-	if N == 0 {
+	if N := getCardinality(b); N == 0 {
 		return 0
 	}
-	for i := len(b) - 1; i >= int(startIdx); i-- {
-		x := b[i]
-		tz := bits.TrailingZeros16(x)
-		if tz == 16 {
-			continue
+
+	b64 := uint16To64SliceUnsafe(b[startIdx:])
+	for i := len(b64) - 1; i >= 0; i-- {
+		if b64[i] != 0 {
+			for j := 3; j >= 0; j-- {
+				idx := i*4 + j
+				if tz := bits.TrailingZeros16(b[idx+int(startIdx)]); tz != 16 {
+					return uint16(16*idx + 15 - tz)
+				}
+			}
+			break
 		}
-		return uint16(16*(i-int(startIdx)) + 15 - tz)
 	}
 	panic("We shouldn't reach here")
 }
