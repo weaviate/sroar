@@ -871,6 +871,59 @@ func TestIssue_Or_NotMergeContainers(t *testing.T) {
 	})
 }
 
+func TestCompareNumKeys(t *testing.T) {
+	var bmNil *Bitmap
+
+	bm1Key := NewBitmap()
+	bm1Key.Set(1)
+
+	bm2Keys := NewBitmap()
+	bm2Keys.Set(1)
+	bm2Keys.Set(1 + uint64(maxCardinality))
+
+	bm3Keys := NewBitmap()
+	bm3Keys.Set(1)
+	bm3Keys.Set(1 + uint64(maxCardinality))
+	bm3Keys.Set(1 + uint64(maxCardinality)*2)
+
+	t.Run("greater", func(t *testing.T) {
+		for _, bms := range [][2]*Bitmap{
+			{bm1Key, bmNil},
+			{bm2Keys, bmNil},
+			{bm2Keys, bm1Key},
+			{bm3Keys, bmNil},
+			{bm3Keys, bm1Key},
+			{bm3Keys, bm2Keys},
+		} {
+			require.Equal(t, 1, bms[0].CompareNumKeys(bms[1]))
+		}
+	})
+
+	t.Run("equal", func(t *testing.T) {
+		for _, bms := range [][2]*Bitmap{
+			{bmNil, bmNil},
+			{bm1Key, bm1Key},
+			{bm2Keys, bm2Keys},
+			{bm3Keys, bm3Keys},
+		} {
+			require.Equal(t, 0, bms[0].CompareNumKeys(bms[1]))
+		}
+	})
+
+	t.Run("less", func(t *testing.T) {
+		for _, bms := range [][2]*Bitmap{
+			{bmNil, bm1Key},
+			{bmNil, bm2Keys},
+			{bmNil, bm3Keys},
+			{bm1Key, bm2Keys},
+			{bm1Key, bm3Keys},
+			{bm2Keys, bm3Keys},
+		} {
+			require.Equal(t, -1, bms[0].CompareNumKeys(bms[1]))
+		}
+	})
+}
+
 func TestMergeToSuperset(t *testing.T) {
 	run := func(t *testing.T, bufs [][]uint16) {
 		containerThreshold := uint64(math.MaxUint16 + 1)
