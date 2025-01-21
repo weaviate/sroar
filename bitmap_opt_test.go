@@ -3,6 +3,7 @@ package sroar
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand"
 	"testing"
 
@@ -1104,6 +1105,1072 @@ func TestCloneToBuf(t *testing.T) {
 
 		require.Equal(t, bmLen, cloned.LenInBytes())
 		require.Equal(t, bmLen+2, cloned.capInBytes())
+	})
+}
+
+func TestPrefill(t *testing.T) {
+	for _, maxX := range []int{
+		0, 1, 123_456,
+		maxCardinality / 2,
+		maxCardinality - 1, maxCardinality, maxCardinality + 1,
+		maxCardinality*3 - 1, maxCardinality * 3, maxCardinality*3 + 1,
+	} {
+		t.Run(fmt.Sprintf("value %d", maxX), func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+
+			assertPrefilled(t, bm, maxX)
+		})
+	}
+}
+
+func TestFillUp(t *testing.T) {
+	t.Run("nil bitmap, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		var bmNil *Bitmap
+		bmNil.FillUp(uint64(maxX))
+
+		require.Nil(t, bmNil)
+	})
+
+	t.Run("empty small bitmap, resized", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmSmall := NewBitmap()
+		lenBytes := bmSmall.LenInBytes()
+		capBytes := bmSmall.capInBytes()
+
+		bmSmall.FillUp(uint64(maxX))
+		require.Less(t, lenBytes, bmSmall.LenInBytes())
+		require.Less(t, capBytes, bmSmall.capInBytes())
+
+		// + 8 (key) + 2x 4100 container - 64 container
+		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
+		require.Equal(t, lenBytes+addLen, bmSmall.LenInBytes())
+		require.Equal(t, capBytes+addLen, bmSmall.capInBytes())
+
+		assertPrefilled(t, bmSmall, maxX)
+	})
+
+	t.Run("empty big bitmap, reused", func(t *testing.T) {
+		maxX := maxCardinality + 1
+		bmBig := NewBitmap()
+		bmBig.expandNoLengthChange(3 * maxContainerSize) // big enough to fit 2x fullsize container
+		lenBytes := bmBig.LenInBytes()
+		capBytes := bmBig.capInBytes()
+
+		bmBig.FillUp(uint64(maxX))
+		require.Less(t, lenBytes, bmBig.LenInBytes())
+		require.Equal(t, capBytes, bmBig.capInBytes())
+
+		// + 8 (key) + 2x 4100 container - 64 container
+		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
+		require.Equal(t, lenBytes+addLen, bmBig.LenInBytes())
+
+		assertPrefilled(t, bmBig, maxX)
+	})
+
+	t.Run("max value already >= than given maxX, noop", func(t *testing.T) {
+		maxX := maxCardinality + 1
+
+		t.Run("prefilled", func(t *testing.T) {
+			bm := Prefill(uint64(maxX))
+			lenBytes := bm.LenInBytes()
+			capBytes := bm.capInBytes()
+
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenInBytes())
+			require.Equal(t, capBytes, bm.capInBytes())
+
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenInBytes())
+			require.Equal(t, capBytes, bm.capInBytes())
+		})
+
+		t.Run("single element", func(t *testing.T) {
+			bm := NewBitmap()
+			bm.Set(uint64(maxX))
+			lenBytes := bm.LenInBytes()
+			capBytes := bm.capInBytes()
+
+			bm.FillUp(uint64(maxX - 10))
+			require.Equal(t, lenBytes, bm.LenInBytes())
+			require.Equal(t, capBytes, bm.capInBytes())
+
+			bm.FillUp(uint64(maxX))
+			require.Equal(t, lenBytes, bm.LenInBytes())
+			require.Equal(t, capBytes, bm.capInBytes())
+		})
+	})
+
+	t.Run("current max value in same container as given maxX", func(t *testing.T) {
+		t.Run("prefilled bitmap, no resize", func(t *testing.T) {
+			for _, prefillX := range []int{
+				1023, 1024, 1025, 1039, 1040, 1041,
+			} {
+				for _, fillUpX := range []int{
+					4095, 4096, 4097, 4111, 4112, 4113, maxCardinality - 2, maxCardinality - 1,
+				} {
+					t.Run(fmt.Sprintf("filled up 1x %d to %d", prefillX, fillUpX), func(t *testing.T) {
+						prefilled := Prefill(uint64(prefillX))
+						lenBytes := prefilled.LenInBytes()
+						capBytes := prefilled.capInBytes()
+
+						prefilled.FillUp(uint64(fillUpX))
+						require.Equal(t, lenBytes, prefilled.LenInBytes())
+						require.Equal(t, capBytes, prefilled.capInBytes())
+
+						assertPrefilled(t, prefilled, fillUpX)
+					})
+
+					t.Run(fmt.Sprintf("filled up 3x %d to %d", prefillX, fillUpX), func(t *testing.T) {
+						prefilled := Prefill(uint64(prefillX))
+						lenBytes := prefilled.LenInBytes()
+						capBytes := prefilled.capInBytes()
+
+						prefilled.FillUp(uint64(fillUpX) - 20)
+						prefilled.FillUp(uint64(fillUpX) - 10)
+						prefilled.FillUp(uint64(fillUpX))
+						require.Equal(t, lenBytes, prefilled.LenInBytes())
+						require.Equal(t, capBytes, prefilled.capInBytes())
+
+						assertPrefilled(t, prefilled, fillUpX)
+					})
+				}
+			}
+		})
+
+		t.Run("single elem array, no resize", func(t *testing.T) {
+			for _, currentMaxX := range []int{
+				1023, 1024, 1025, 1039, 1040, 1041,
+			} {
+				for _, fillUpX := range []int{
+					1055, 1056, 1057, 1082,
+				} {
+					t.Run(fmt.Sprintf("filled 1x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
+						singleElem := NewBitmap()
+						singleElem.Set(uint64(currentMaxX))
+						lenBytes := singleElem.LenInBytes()
+						capBytes := singleElem.capInBytes()
+
+						singleElem.FillUp(uint64(fillUpX))
+						require.Equal(t, lenBytes, singleElem.LenInBytes())
+						require.Equal(t, capBytes, singleElem.capInBytes())
+
+						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
+					})
+
+					t.Run(fmt.Sprintf("filled 3x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
+						singleElem := NewBitmap()
+						singleElem.Set(uint64(currentMaxX))
+						lenBytes := singleElem.LenInBytes()
+						capBytes := singleElem.capInBytes()
+
+						singleElem.FillUp(uint64(fillUpX) - 10)
+						singleElem.FillUp(uint64(fillUpX) - 5)
+						singleElem.FillUp(uint64(fillUpX))
+						require.Equal(t, lenBytes, singleElem.LenInBytes())
+						require.Equal(t, capBytes, singleElem.capInBytes())
+
+						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
+					})
+				}
+			}
+		})
+
+		t.Run("single elem array, convert to bitmap", func(t *testing.T) {
+			for _, currentMaxX := range []int{
+				1023, 1024, 1025, 1039, 1040, 1041,
+			} {
+				for _, fillUpX := range []int{
+					4095, 4096, 4097, maxCardinality - 1,
+				} {
+					t.Run(fmt.Sprintf("filled 1x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
+						singleElem := NewBitmap()
+						singleElem.Set(uint64(currentMaxX))
+						singleElem.expandNoLengthChange(maxContainerSize)
+						lenBytes := singleElem.LenInBytes()
+						capBytes := singleElem.capInBytes()
+
+						singleElem.FillUp(uint64(fillUpX))
+						require.Less(t, lenBytes, singleElem.LenInBytes())
+						require.Equal(t, capBytes, singleElem.capInBytes())
+
+						// + 4100 container
+						addLen := 2 * maxContainerSize
+						require.Equal(t, lenBytes+addLen, singleElem.LenInBytes())
+
+						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
+					})
+
+					t.Run(fmt.Sprintf("filled 3x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
+						singleElem := NewBitmap()
+						singleElem.Set(uint64(currentMaxX))
+						singleElem.expandNoLengthChange(maxContainerSize)
+						lenBytes := singleElem.LenInBytes()
+						capBytes := singleElem.capInBytes()
+
+						singleElem.FillUp(uint64(fillUpX) - 3040)
+						singleElem.FillUp(uint64(fillUpX) - 1000)
+						singleElem.FillUp(uint64(fillUpX))
+						require.Less(t, lenBytes, singleElem.LenInBytes())
+						require.Equal(t, capBytes, singleElem.capInBytes())
+
+						// + 4100 container
+						addLen := 2 * maxContainerSize
+						require.Equal(t, lenBytes+addLen, singleElem.LenInBytes())
+
+						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
+					})
+				}
+			}
+		})
+	})
+
+	t.Run("current max value in different container than given maxX", func(t *testing.T) {
+		addDouble := func(prevVal int) int { return 2 * prevVal }
+		addContainers := func(containersCount int) func(int) int {
+			return func(prevVal int) int {
+				// Xx (8 key + 4100 container)
+				return prevVal + 2*containersCount*(8+maxContainerSize)
+			}
+		}
+
+		t.Run("prefilled bitmap", func(t *testing.T) {
+			for _, tc := range []struct {
+				prefillX      int
+				fillUpX       int
+				fnExpAddLen   func(prevLen int) (newLen int)
+				fnExpAddCap   func(prevCap int) (newCap int)
+				fnExp3xAddLen func(prevLen int) (newLen int)
+				fnExp3xAddCap func(prevCap int) (newCap int)
+			}{
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       5*maxCardinality - 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: addContainers(4),
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+				{
+					prefillX:      maxCardinality - 100,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       5*maxCardinality - 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: addContainers(4),
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+				{
+					prefillX:      maxCardinality - 50,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addDouble,
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addDouble,
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       5*maxCardinality - 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: addContainers(4),
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+				{
+					prefillX:      maxCardinality - 1,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   addContainers(5),
+					fnExpAddCap:   addContainers(5),
+					fnExp3xAddLen: addContainers(5),
+					fnExp3xAddCap: func(prevCap int) int {
+						// first 4 containers were added, then cap was doubled
+						return addDouble(addContainers(4)(prevCap))
+					},
+				},
+			} {
+				t.Run(fmt.Sprintf("filled up 1x %d to %d", tc.prefillX, tc.fillUpX), func(t *testing.T) {
+					prefilled := Prefill(uint64(tc.prefillX))
+					lenBytes := prefilled.LenInBytes()
+					capBytes := prefilled.capInBytes()
+
+					prefilled.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExpAddLen(lenBytes), prefilled.LenInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), prefilled.capInBytes())
+
+					assertPrefilled(t, prefilled, tc.fillUpX)
+				})
+
+				t.Run(fmt.Sprintf("filled up 3x %d to %d", tc.prefillX, tc.fillUpX), func(t *testing.T) {
+					prefilled := Prefill(uint64(tc.prefillX))
+					lenBytes := prefilled.LenInBytes()
+					capBytes := prefilled.capInBytes()
+
+					prefilled.FillUp(uint64(tc.fillUpX) - 20)
+					prefilled.FillUp(uint64(tc.fillUpX) - 10)
+					prefilled.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExp3xAddLen(lenBytes), prefilled.LenInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), prefilled.capInBytes())
+
+					assertPrefilled(t, prefilled, tc.fillUpX)
+				})
+			}
+		})
+
+		t.Run("single elem array, keep common array", func(t *testing.T) {
+			for _, tc := range []struct {
+				currentMaxX   int
+				fillUpX       int
+				fnExpAddLen   func(prevLen int) (newLen int)
+				fnExpAddCap   func(prevCap int) (newCap int)
+				fnExp3xAddLen func(prevLen int) (newLen int)
+				fnExp3xAddCap func(prevCap int) (newCap int)
+			}{
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(1),
+					fnExpAddCap:   addContainers(1),
+					fnExp3xAddLen: addContainers(1),
+					fnExp3xAddCap: addContainers(1),
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(2)(prevCap))
+					},
+				},
+			} {
+				t.Run(fmt.Sprintf("filled up 1x %d to %d", tc.currentMaxX, tc.fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(tc.currentMaxX))
+					lenBytes := singleElem.LenInBytes()
+					capBytes := singleElem.capInBytes()
+
+					singleElem.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExpAddLen(lenBytes), singleElem.LenInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.capInBytes())
+
+					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
+				})
+
+				t.Run(fmt.Sprintf("filled up 3x %d to %d", tc.currentMaxX, tc.fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(tc.currentMaxX))
+					lenBytes := singleElem.LenInBytes()
+					capBytes := singleElem.capInBytes()
+
+					singleElem.FillUp(uint64(tc.fillUpX) - 20)
+					singleElem.FillUp(uint64(tc.fillUpX) - 10)
+					singleElem.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExp3xAddLen(lenBytes), singleElem.LenInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.capInBytes())
+
+					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
+				})
+			}
+		})
+
+		t.Run("single elem array, convert common to bitmap", func(t *testing.T) {
+			for _, tc := range []struct {
+				currentMaxX   int
+				fillUpX       int
+				fnExpAddLen   func(prevLen int) (newLen int)
+				fnExpAddCap   func(prevCap int) (newCap int)
+				fnExp3xAddLen func(prevLen int) (newLen int)
+				fnExp3xAddCap func(prevCap int) (newCap int)
+			}{
+				{
+					currentMaxX: maxCardinality - 200,
+					fillUpX:     maxCardinality,
+					fnExpAddLen: addContainers(2),
+					fnExpAddCap: addContainers(2),
+					fnExp3xAddLen: func(prevLen int) int {
+						return addContainers(2)(prevLen) - 2*8
+					},
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(1)(prevCap) - 2*8)
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: addContainers(3),
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+
+				{
+					currentMaxX: maxCardinality - 150,
+					fillUpX:     maxCardinality,
+					fnExpAddLen: addContainers(2),
+					fnExpAddCap: addContainers(2),
+					fnExp3xAddLen: func(prevLen int) int {
+						return addContainers(2)(prevLen) - 2*8
+					},
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(1)(prevCap) - 2*8)
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: addContainers(3),
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+
+				{
+					currentMaxX: maxCardinality - 100,
+					fillUpX:     maxCardinality,
+					fnExpAddLen: addContainers(2),
+					fnExpAddCap: addContainers(2),
+					fnExp3xAddLen: func(prevLen int) int {
+						return addContainers(2)(prevLen) - 2*8
+					},
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(1)(prevCap) - 2*8)
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       maxCardinality + 1022,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       maxCardinality + 1023,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       maxCardinality + 1024,
+					fnExpAddLen:   addContainers(2),
+					fnExpAddCap:   addContainers(2),
+					fnExp3xAddLen: addContainers(2),
+					fnExp3xAddCap: addContainers(2),
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       3*maxCardinality - 1,
+					fnExpAddLen:   addContainers(3),
+					fnExpAddCap:   addContainers(3),
+					fnExp3xAddLen: addContainers(3),
+					fnExp3xAddCap: addContainers(3),
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+				{
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   addContainers(4),
+					fnExpAddCap:   addContainers(4),
+					fnExp3xAddLen: addContainers(4),
+					fnExp3xAddCap: func(prevCap int) int {
+						return addDouble(addContainers(3)(prevCap))
+					},
+				},
+			} {
+				t.Run(fmt.Sprintf("filled up 1x %d to %d", tc.currentMaxX, tc.fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(tc.currentMaxX))
+					lenBytes := singleElem.LenInBytes()
+					capBytes := singleElem.capInBytes()
+
+					singleElem.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExpAddLen(lenBytes), singleElem.LenInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.capInBytes())
+
+					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
+				})
+
+				t.Run(fmt.Sprintf("filled up 3x %d to %d", tc.currentMaxX, tc.fillUpX), func(t *testing.T) {
+					singleElem := NewBitmap()
+					singleElem.Set(uint64(tc.currentMaxX))
+					lenBytes := singleElem.LenInBytes()
+					capBytes := singleElem.capInBytes()
+
+					singleElem.FillUp(uint64(tc.fillUpX) - 20)
+					singleElem.FillUp(uint64(tc.fillUpX) - 10)
+					singleElem.FillUp(uint64(tc.fillUpX))
+					require.Equal(t, tc.fnExp3xAddLen(lenBytes), singleElem.LenInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.capInBytes())
+
+					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
+				})
+			}
+		})
+	})
+}
+
+func assertPrefilled(t *testing.T, bm *Bitmap, maxX int) {
+	require.Equal(t, maxX+1, bm.GetCardinality())
+
+	arr := bm.ToArray()
+	require.Len(t, arr, maxX+1)
+
+	for i, x := range arr {
+		require.Equal(t, uint64(i), x)
+	}
+}
+
+func assertFilledUp(t *testing.T, bm *Bitmap, minX, maxX int) {
+	require.Equal(t, maxX-minX+1, bm.GetCardinality())
+
+	arr := bm.ToArray()
+	require.Equal(t, maxX-minX+1, len(arr))
+
+	for i, x := range arr {
+		require.Equal(t, uint64(i+minX), x)
+	}
+}
+
+func TestPrefillUtils(t *testing.T) {
+	t.Run("calcNoFullContainerAndRemainingXs", func(t *testing.T) {
+		maxCard64 := uint64(maxCardinality)
+
+		for _, tc := range []struct {
+			maxX            uint64
+			expNoContainers int
+			expNoRemaining  int
+		}{
+			{
+				maxX:            1,
+				expNoContainers: 0,
+				expNoRemaining:  2,
+			},
+			{
+				maxX:            maxCard64 - 2,
+				expNoContainers: 0,
+				expNoRemaining:  maxCardinality - 1,
+			},
+			{
+				maxX:            maxCard64 - 1,
+				expNoContainers: 1,
+				expNoRemaining:  0,
+			},
+			{
+				maxX:            maxCard64,
+				expNoContainers: 1,
+				expNoRemaining:  1,
+			},
+			{
+				maxX:            maxCard64 + 1,
+				expNoContainers: 1,
+				expNoRemaining:  2,
+			},
+			{
+				maxX:            4*maxCard64 - 2,
+				expNoContainers: 3,
+				expNoRemaining:  maxCardinality - 1,
+			},
+			{
+				maxX:            4*maxCard64 - 1,
+				expNoContainers: 4,
+				expNoRemaining:  0,
+			},
+			{
+				maxX:            4 * maxCard64,
+				expNoContainers: 4,
+				expNoRemaining:  1,
+			},
+			{
+				maxX:            4*maxCard64 + 1,
+				expNoContainers: 4,
+				expNoRemaining:  2,
+			},
+		} {
+			t.Run(fmt.Sprintf("maxX %d", tc.maxX), func(t *testing.T) {
+				containers, remaining := calcFullContainersAndRemainingCounts(tc.maxX)
+				require.Equal(t, tc.expNoContainers, containers)
+				require.Equal(t, tc.expNoRemaining, remaining)
+			})
+		}
+	})
+
+	t.Run("setRange", func(t *testing.T) {
+		newContainerBitmap := func() bitmap {
+			return bitmap(make([]uint16, maxContainerSize))
+		}
+
+		onesBitmap := newContainerBitmap()
+		onesBitmap.fillWithOnes()
+
+		assertOnes := func(t *testing.T, b bitmap, minY, maxY int) {
+			count := 0
+			for _, v := range uint16To64SliceUnsafe(b[startIdx:]) {
+				count += bits.OnesCount64(v)
+			}
+			require.Equal(t, maxY-minY+1, count)
+
+			for i := uint16(minY); i <= uint16(maxY); i++ {
+				require.True(t, b.has(i))
+			}
+		}
+
+		type testCase struct {
+			minY, maxY int
+		}
+		testCases := []testCase{
+			{minY: 0, maxY: 0},
+			{minY: 1, maxY: 11},
+			{minY: 2345, maxY: 4567},
+			{minY: 4086, maxY: 4096},
+		}
+		for _, pair := range [][2]int{
+			{16, 48},
+			{128, 320},
+			{112, 384},
+			{192, 336},
+		} {
+			for i := -2; i <= 2; i++ {
+				for j := -2; j <= 2; j++ {
+					testCases = append(testCases, testCase{
+						minY: pair[0] + i,
+						maxY: pair[1] + j,
+					})
+				}
+			}
+		}
+
+		for _, tc := range testCases {
+			t.Run(fmt.Sprintf("minY %d - maxY %d, without ones bitmap", tc.minY, tc.maxY), func(t *testing.T) {
+				b := newContainerBitmap()
+				b.setRange(tc.minY, tc.maxY, nil)
+
+				assertOnes(t, b, tc.minY, tc.maxY)
+			})
+			t.Run(fmt.Sprintf("minY %d - maxY %d, with ones bitmap", tc.minY, tc.maxY), func(t *testing.T) {
+				b := newContainerBitmap()
+				b.setRange(tc.minY, tc.maxY, onesBitmap)
+
+				assertOnes(t, b, tc.minY, tc.maxY)
+			})
+		}
+	})
+
+	t.Run("fillWithOnes", func(t *testing.T) {
+		b := bitmap(make([]uint16, maxContainerSize))
+		b.fillWithOnes()
+
+		for _, v := range uint16To64SliceUnsafe(b[startIdx:]) {
+			require.Equal(t, 64, bits.OnesCount64(v))
+		}
 	})
 }
 

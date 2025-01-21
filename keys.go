@@ -89,6 +89,21 @@ func (n node) search(k uint64) int {
 	// return int(simd.Search(n[keyOffset(0):keyOffset(N)], k))
 }
 
+// Search returns the index of a smallest key >= k in a node.
+// Runs from highest to smallest key.
+func (n node) searchReverse(k uint64) int {
+	N := n.numKeys()
+	idx := N
+
+	for i := N - 1; i >= 0; i-- {
+		if n.key(i) < k {
+			break
+		}
+		idx = i
+	}
+	return idx
+}
+
 func zeroOut(data []uint64) {
 	for i := 0; i < len(data); i++ {
 		data[i] = 0
