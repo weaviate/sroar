@@ -59,10 +59,13 @@ func (c array) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 {
 	}
 
 	// merge
-	out := optBuf
-	if out == nil {
-		min := min(cnum, onum)
-		out = make([]uint16, roundSize(startIdx+uint16(min)))
+	out := c
+	if runMode&runInline == 0 {
+		out = optBuf
+		if out == nil {
+			min := min(cnum, onum)
+			out = make([]uint16, roundSize(startIdx+uint16(min)))
+		}
 	}
 	setc := c.all()
 	seto := other.all()
@@ -73,7 +76,6 @@ func (c array) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 {
 		return bufAsArray(out, lastIdx)
 	}
 	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
 }
 
@@ -308,9 +310,12 @@ func (c array) andNotArrayAlt(other array, optBuf []uint16, runMode int) []uint1
 	}
 
 	// merge
-	out := optBuf
-	if out == nil {
-		out = make([]uint16, roundSize(startIdx+uint16(cnum)))
+	out := c
+	if runMode&runInline == 0 {
+		out = optBuf
+		if out == nil {
+			out = make([]uint16, roundSize(startIdx+uint16(cnum)))
+		}
 	}
 	setc := c.all()
 	seto := other.all()
@@ -321,7 +326,6 @@ func (c array) andNotArrayAlt(other array, optBuf []uint16, runMode int) []uint1
 		return bufAsArray(out, lastIdx)
 	}
 	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
 }
 
