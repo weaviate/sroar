@@ -49,7 +49,7 @@ func FromBuffer(data []byte) *Bitmap {
 	if len(data) < 8 {
 		return NewBitmap()
 	}
-	du := toUint16Slice(data)
+	du := byteTo16SliceUnsafe(data)
 	x := toUint64Slice(du[:4])[indexNodeSize]
 	return &Bitmap{
 		data: du,
@@ -65,7 +65,7 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	if len(src) < 8 {
 		return NewBitmap()
 	}
-	src16 := toUint16Slice(src)
+	src16 := byteTo16SliceUnsafe(src)
 	dst16 := make([]uint16, len(src16))
 	copy(dst16, src16)
 	x := toUint64Slice(dst16[:4])[indexNodeSize]

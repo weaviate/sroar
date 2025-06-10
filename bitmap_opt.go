@@ -696,6 +696,30 @@ func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
 	return bm
 }
 
+// FromBufferUnlimited returns a pointer to bitmap corresponding to the given buffer.
+// Entire buffer capacity is utlized for future bitmap modifications and expansions.
+func FromBufferUnlimited(buf []byte) *Bitmap {
+	ln := len(buf)
+	assert(ln%2 == 0)
+	if len(buf) < 8 {
+		return NewBitmap()
+	}
+
+	cp := cap(buf)
+	data := buf[:cp]
+	if cp%2 != 0 {
+		data = buf[:cp-1]
+	}
+
+	du := byteTo16SliceUnsafe(data)
+	x := uint16To64SliceUnsafe(du[:4])[indexNodeSize]
+	return &Bitmap{
+		data: du[:ln/2],
+		_ptr: buf, // Keep a hold of data, otherwise GC would do its thing.
+		keys: uint16To64SliceUnsafe(du[:x]),
+	}
+}
+
 // Prefill creates bitmap prefilled with elements [0-maxX]
 func Prefill(maxX uint64) *Bitmap {
 	containersCount, remainingCount := calcFullContainersAndRemainingCounts(maxX)
