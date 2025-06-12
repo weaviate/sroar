@@ -26,8 +26,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-var empty = make([]uint16, 16<<20)
-
 const mask = uint64(0xFFFFFFFFFFFF0000)
 
 type Bitmap struct {
@@ -51,7 +49,7 @@ func FromBuffer(data []byte) *Bitmap {
 	if len(data) < 8 {
 		return NewBitmap()
 	}
-	du := toUint16Slice(data)
+	du := byteTo16SliceUnsafe(data)
 	x := toUint64Slice(du[:4])[indexNodeSize]
 	return &Bitmap{
 		data: du,
@@ -67,7 +65,7 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	if len(src) < 8 {
 		return NewBitmap()
 	}
-	src16 := toUint16Slice(src)
+	src16 := byteTo16SliceUnsafe(src)
 	dst16 := make([]uint16, len(src16))
 	copy(dst16, src16)
 	x := toUint64Slice(dst16[:4])[indexNodeSize]
@@ -180,7 +178,7 @@ func (ra *Bitmap) expandKeys(bySize uint64) uint64 {
 	ra.scootRight(curSize, bySize)
 	ra.keys = uint16To64SliceUnsafe(ra.data[:curSize+bySize])
 	ra.keys.setNodeSize(int(curSize + bySize))
-
+	
 	// All containers have moved to the right by bySize bytes.
 	// Update their offsets.
 	n := ra.keys
@@ -202,7 +200,6 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 	// This following statement also works. But, given how much fastExpand gets
 	// called (a lot), probably better to control allocation.
 	// ra.data = append(ra.data, empty[:bySize]...)
-
 	toSize = len(ra.data) + int(bySize)
 	if toSize <= cap(ra.data) {
 		return

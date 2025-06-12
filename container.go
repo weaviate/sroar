@@ -349,7 +349,7 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 		buf = make([]uint16, maxContainerSize)
 	} else {
 		assert(len(buf) == maxContainerSize)
-		assert(len(buf) == copy(buf, empty))
+		assert(len(buf) == copy(buf, zeroContainer))
 	}
 
 	b := bitmap(buf)
