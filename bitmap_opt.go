@@ -130,7 +130,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	bi, bn := 0, b.keys.numKeys()
 
 	akToAc := map[uint64][]uint16{}
-	sizeContainers := uint64(0)
+	sizeContainers := 0
 	newKeys := 0
 
 	for ai < an && bi < bn {
@@ -154,7 +154,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
 				akToAc[ak] = ac
-				sizeContainers += uint64(len(ac))
+				sizeContainers += len(ac)
 				newKeys++
 			}
 			ai++
@@ -168,18 +168,13 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
 			akToAc[ak] = ac
-			sizeContainers += uint64(len(ac))
+			sizeContainers += len(ac)
 			newKeys++
 		}
 	}
 
 	if sizeContainers > 0 {
-		// 2x uint64 = 8x uint16; for key and offset; twice as much as actually needed
-		sizeKeys := 8 * uint64(newKeys) * 2
-		// ensure enough space for new containers and keys,
-		// allocate required memory just once to avoid copying underlying data slice multiple times
-		res.expandNoLengthChange(sizeContainers + sizeKeys)
-		res.expandKeys(sizeKeys)
+		res.expandConditionally(newKeys, sizeContainers)
 
 		for ak, ac := range akToAc {
 			// create a new container and update the key offset to this container.
@@ -268,7 +263,7 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 
 	akToAc := map[uint64][]uint16{}
 	bkToBc := map[uint64][]uint16{}
-	sizeContainers := uint64(0)
+	sizeContainers := 0
 	newKeys := 0
 
 	for ai < an && bi < bn {
@@ -296,7 +291,7 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 			ac := a.getContainer(off)
 			if getCardinality(ac) > 0 {
 				akToAc[ak] = ac
-				sizeContainers += uint64(len(ac))
+				sizeContainers += len(ac)
 				newKeys++
 			}
 			ai++
@@ -305,7 +300,7 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 			bc := b.getContainer(off)
 			if getCardinality(bc) > 0 {
 				bkToBc[bk] = bc
-				sizeContainers += uint64(len(bc))
+				sizeContainers += len(bc)
 				newKeys++
 			}
 			bi++
@@ -317,7 +312,7 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 		if getCardinality(ac) > 0 {
 			ak := a.keys.key(ai)
 			akToAc[ak] = ac
-			sizeContainers += uint64(len(ac))
+			sizeContainers += len(ac)
 			newKeys++
 		}
 	}
@@ -327,18 +322,13 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 		if getCardinality(bc) > 0 {
 			bk := b.keys.key(bi)
 			bkToBc[bk] = bc
-			sizeContainers += uint64(len(bc))
+			sizeContainers += len(bc)
 			newKeys++
 		}
 	}
 
 	if sizeContainers > 0 {
-		// 2x uint64 = 8x uint16; for key and offset; twice as much as actually needed
-		sizeKeys := 8 * uint64(newKeys) * 2
-		// ensure enough space for new containers and keys,
-		// allocate required memory just once avoid copying underlying data slice multiple times
-		res.expandNoLengthChange(sizeContainers + sizeKeys)
-		res.expandKeys(sizeKeys)
+		res.expandConditionally(newKeys, sizeContainers)
 
 		for ak, ac := range akToAc {
 			// create a new container and update the key offset to this container.
@@ -373,7 +363,7 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	// copy containers from b to a all at once
 	// expanding underlying data slice and keys subslice once
 	bkToBc := map[uint64][]uint16{}
-	sizeContainers := uint64(0)
+	sizeContainers := 0
 	newKeys := 0
 
 	for ai < an && bi < bn {
@@ -413,7 +403,7 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 			bc := b.getContainer(off)
 			if getCardinality(bc) > 0 {
 				bkToBc[bk] = bc
-				sizeContainers += uint64(len(bc))
+				sizeContainers += len(bc)
 				newKeys++
 			}
 			bi++
@@ -425,23 +415,13 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 		if getCardinality(bc) > 0 {
 			bk := b.keys.key(bi)
 			bkToBc[bk] = bc
-			sizeContainers += uint64(len(bc))
+			sizeContainers += len(bc)
 			newKeys++
 		}
 	}
 
 	if sizeContainers > 0 {
-		if a.keysExpansionRequired(newKeys) {
-			// 2x uint64 = 8x uint16; for key and offset; twice as much as actually needed
-			sizeKeys := 8 * uint64(newKeys) * 2
-
-			// ensure enough space for new containers and keys,
-			// allocate required memory just once to avoid copying underlying data slice multiple times
-			a.expandNoLengthChange(sizeContainers + sizeKeys)
-			a.expandKeys(sizeKeys)
-		} else {
-			a.expandNoLengthChange(sizeContainers)
-		}
+		a.expandConditionally(newKeys, sizeContainers)
 
 		for bk, bc := range bkToBc {
 			// create a new container and update the key offset to this container.
@@ -476,36 +456,26 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		return ra
 	}
 
-	var totalSizeContainers uint64
 	var totalNewKeys int
+	var totalSizeContainers int
 	var allKeys []uint64
 	var allContainers [][]uint16
 	lock := new(sync.Mutex)
 	inlineVsMutateLock := new(sync.RWMutex)
 	callback := func(bi, bj, _ int) {
 		buf := make([]uint16, maxContainerSize)
-		sizeContainers, newKeys, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, buf, inlineVsMutateLock)
+		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, buf, inlineVsMutateLock)
 
 		lock.Lock()
-		totalSizeContainers += sizeContainers
 		totalNewKeys += newKeys
+		totalSizeContainers += sizeContainers
 		allKeys = append(allKeys, keys...)
 		allContainers = append(allContainers, containers...)
 		lock.Unlock()
 	}
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	if totalSizeContainers > 0 {
-		if ra.keysExpansionRequired(totalNewKeys) {
-			// 2x uint64 = 8x uint16; for key and offset; twice as much as actually needed
-			totalSizeKeys := 8 * uint64(totalNewKeys) * 2
-
-			// ensure enough space for new containers and keys,
-			// allocate required memory just once to avoid copying underlying data slice multiple times
-			ra.expandNoLengthChange(totalSizeContainers + totalSizeKeys)
-			ra.expandKeys(totalSizeKeys)
-		} else {
-			ra.expandNoLengthChange(totalSizeContainers)
-		}
+		ra.expandConditionally(totalNewKeys, totalSizeContainers)
 
 		for i, container := range allContainers {
 			// create a new container and update the key offset to this container.
@@ -519,7 +489,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 }
 
 func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMutateLock *sync.RWMutex,
-) (sizeContainers uint64, newKeys int, bKeys []uint64, bContainers [][]uint16) {
+) (newKeys, sizeContainers int, bKeys []uint64, bContainers [][]uint16) {
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
@@ -575,7 +545,7 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMut
 			if getCardinality(bc) > 0 {
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
-				sizeContainers += uint64(len(bc))
+				sizeContainers += len(bc)
 				newKeys++
 			}
 			bi++
@@ -588,7 +558,7 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMut
 			bk := b.keys.key(bi)
 			bKeys = append(bKeys, bk)
 			bContainers = append(bContainers, bc)
-			sizeContainers += uint64(len(bc))
+			sizeContainers += len(bc)
 			newKeys++
 		}
 	}
@@ -888,15 +858,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 	}
 
 	// calculate required memory to allocate and expand underlying slice
-	containersLen := uint64(requiredContainersCount * maxContainerSize)
-	if ra.keysExpansionRequired(requiredContainersCount) {
-		// 2x uint64 = 8x uint16; for key and offset; twice as much as actually needed
-		keysLen := uint64(requiredContainersCount*2*4) * 2
-		ra.expandNoLengthChange(containersLen + keysLen)
-		ra.expandKeys(keysLen)
-	} else {
-		ra.expandNoLengthChange(containersLen)
-	}
+	ra.expandConditionally(requiredContainersCount, requiredContainersCount*maxContainerSize)
 
 	var onesBitmap bitmap
 	if containerIdx < maxContainersCount {
@@ -1043,6 +1005,65 @@ func (b bitmap) fillWithOnes() {
 	}
 }
 
-func (ra *Bitmap) keysExpansionRequired(newKeys int) bool {
-	return ra.keys.numKeys()+newKeys >= ra.keys.maxKeys()
+func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
+	cp := cap(ra.data)
+	ln := len(ra.data)
+
+	sizeKeys := 8 * newKeys // 2x uint64 (key+offset) = 8x uint16
+	if ra.keys.numKeys()+newKeys < ra.keys.maxKeys() {
+		if ln+sizeContainers <= cp {
+			// keys and containers fit. nothing to do
+			return
+		}
+		// keys fit, containers do not. expand slice to make room for containers and only new keys
+	} else {
+		if ln+sizeKeys+sizeContainers <= cp {
+			curNumKeys := ra.keys.numKeys()
+
+			// keys do not fit, containers do. just move containers to make room for keys
+			if curNumKeys > newKeys {
+				// make room for up to curNumKeys additional keys
+				sizeKeys = 8 * curNumKeys // 2x uint64 (key+offset) = 8x uint16
+				if left := cp - ln - sizeContainers; left < sizeKeys {
+					sizeKeys = left / 8 * 8
+				}
+			}
+
+			// new containers will fit. just move containers to make room for keys
+			curSizeKeys := ra.keys.size()
+			newSizeKeys := curSizeKeys + sizeKeys
+
+			ra.data = ra.data[:ln+sizeKeys]
+			n := copy(ra.data[newSizeKeys:], ra.data[curSizeKeys:])
+			ra.memMoved += n
+			Memclr(ra.data[curSizeKeys:newSizeKeys]) // Zero out the space in the middle.
+
+			ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
+			ra.keys.setNodeSize(newSizeKeys)
+			for i := 0; i < curNumKeys; i++ {
+				ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
+			}
+			return
+		}
+		// neither keys nor containers fit. expand slice to make room for containers and more keys
+		sizeKeys = 8 * max(newKeys, ra.keys.numKeys()) // 2x uint64 (key+offset) = 8x uint16
+	}
+
+	// expand 2x (or up to sizeKeys+sizeNewContainers if 2x is too little)
+	growBy := max(cp, sizeKeys+sizeContainers)
+	out := make([]uint16, ln+sizeKeys, cp+growBy)
+
+	curSizeKeys := ra.keys.size()
+	newSizeKeys := curSizeKeys + sizeKeys
+	copy(out, ra.data[:curSizeKeys])
+	copy(out[newSizeKeys:], ra.data[curSizeKeys:])
+	ra.data = out
+	ra._ptr = nil // Allow Go to GC whatever this was pointing to.
+	// Re-reference ra.keys correctly because underlying array has changed.
+
+	ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
+	ra.keys.setNodeSize(newSizeKeys)
+	for i := 0; i < ra.keys.numKeys(); i++ {
+		ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
+	}
 }
