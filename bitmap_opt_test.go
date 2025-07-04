@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/bits"
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -1430,16 +1431,10 @@ func TestFillUp(t *testing.T) {
 	t.Run("current max value in different container than given maxX", func(t *testing.T) {
 		unchanged := func(prevVal int) int { return prevVal }
 		doubled := func(prevVal int) int { return 2 * prevVal }
-		plusContainers := func(containersCount int) func(int) int {
+		plusKeysAndContainers := func(numKeys, numContainers int) func(int) int {
 			return func(prevVal int) int {
-				// X * (4100 container)
-				return prevVal + 2*containersCount*maxContainerSize
-			}
-		}
-		plusContainersAndKeys := func(containersCount int) func(int) int {
-			return func(prevVal int) int {
-				// X * (2*(8 key) + 4100 container)
-				return prevVal + 2*containersCount*(2*8+maxContainerSize)
+				// 8 key + 4100 container
+				return prevVal + 2*numKeys*8 + 2*numContainers*maxContainerSize
 			}
 		}
 
@@ -1455,215 +1450,189 @@ func TestFillUp(t *testing.T) {
 				{
 					prefillX:      maxCardinality - 100,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 100,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 100,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 100,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 100,
 					fillUpX:       5*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(4),
-					fnExpAddCap:   plusContainersAndKeys(4),
-					fnExp3xAddLen: plusContainersAndKeys(4),
-					fnExp3xAddCap: plusContainersAndKeys(4),
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(4, 4),
+					fnExp3xAddCap: plusKeysAndContainers(4, 4),
 				},
 				{
-					prefillX:    maxCardinality - 100,
-					fillUpX:     5 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						// first 4 containers with keys are added
-						ln := plusContainersAndKeys(4)(prevLen)
-						// then 1 container without key is added
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 100,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+5, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// first 4 containers are added, then cap is doubled
-						return doubled(plusContainersAndKeys(4)(prevCap))
+						return doubled(plusKeysAndContainers(4, 4)(prevCap))
 					},
 				},
 				{
-					prefillX:    maxCardinality - 100,
-					fillUpX:     5*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						// first 4 containers with keys are added
-						ln := plusContainersAndKeys(4)(prevLen)
-						// then 1 container without key is added
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 100,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+5, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// first 4 containers were added, then cap was doubled
-						return doubled(plusContainersAndKeys(4)(prevCap))
+						return doubled(plusKeysAndContainers(4, 4)(prevCap))
 					},
 				},
 
 				{
 					prefillX:      maxCardinality - 50,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 50,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 50,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 50,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   doubled,
-					fnExp3xAddLen: plusContainersAndKeys(1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
 					fnExp3xAddCap: doubled,
 				},
 				{
 					prefillX:      maxCardinality - 50,
 					fillUpX:       5*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(4),
-					fnExpAddCap:   plusContainersAndKeys(4),
-					fnExp3xAddLen: plusContainersAndKeys(4),
-					fnExp3xAddCap: plusContainersAndKeys(4),
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(4, 4),
+					fnExp3xAddCap: plusKeysAndContainers(4, 4),
 				},
 				{
-					prefillX:    maxCardinality - 50,
-					fillUpX:     5 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						// first 4 containers with keys are added
-						ln := plusContainersAndKeys(4)(prevLen)
-						// then 1 container without key is added
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 50,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+5, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// first 4 containers were added, then cap was doubled
-						return doubled(plusContainersAndKeys(4)(prevCap))
+						return doubled(plusKeysAndContainers(4, 4)(prevCap))
 					},
 				},
 				{
-					prefillX:    maxCardinality - 50,
-					fillUpX:     5*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						// first 4 containers with keys are added
-						ln := plusContainersAndKeys(4)(prevLen)
-						// then 1 container without key is added
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 50,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+5, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// first 4 containers were added, then cap was doubled
-						return doubled(plusContainersAndKeys(4)(prevCap))
+						return doubled(plusKeysAndContainers(4, 4)(prevCap))
 					},
 				},
 
 				{
 					prefillX:      maxCardinality - 1,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainers(1),
+					fnExpAddLen:   plusKeysAndContainers(0, 1),
 					fnExpAddCap:   unchanged,
-					fnExp3xAddLen: plusContainers(1),
+					fnExp3xAddLen: plusKeysAndContainers(0, 1),
 					fnExp3xAddCap: unchanged,
 				},
 				{
 					prefillX:      maxCardinality - 1,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainers(1),
+					fnExpAddLen:   plusKeysAndContainers(0, 1),
 					fnExpAddCap:   unchanged,
-					fnExp3xAddLen: plusContainers(1),
+					fnExp3xAddLen: plusKeysAndContainers(0, 1),
 					fnExp3xAddCap: unchanged,
 				},
 				{
 					prefillX:      maxCardinality - 1,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainers(1),
+					fnExpAddLen:   plusKeysAndContainers(0, 1),
 					fnExpAddCap:   unchanged,
-					fnExp3xAddLen: plusContainers(1),
+					fnExp3xAddLen: plusKeysAndContainers(0, 1),
 					fnExp3xAddCap: unchanged,
 				},
 				{
 					prefillX:      maxCardinality - 1,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainers(1),
+					fnExpAddLen:   plusKeysAndContainers(0, 1),
 					fnExpAddCap:   unchanged,
-					fnExp3xAddLen: plusContainers(1),
+					fnExp3xAddLen: plusKeysAndContainers(0, 1),
 					fnExp3xAddCap: unchanged,
 				},
 				{
 					prefillX:      maxCardinality - 1,
 					fillUpX:       5*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(4),
-					fnExpAddCap:   plusContainersAndKeys(4),
-					fnExp3xAddLen: plusContainersAndKeys(4),
-					fnExp3xAddCap: plusContainersAndKeys(4),
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(4, 4),
+					fnExp3xAddCap: plusKeysAndContainers(4, 4),
 				},
 				{
-					prefillX:    maxCardinality - 1,
-					fillUpX:     5 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(4)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 1,
+					fillUpX:       5 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+0, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// 4 containers were added
-						return plusContainersAndKeys(4)(prevCap)
+						return plusKeysAndContainers(4, 4)(prevCap)
 					},
 				},
 				{
-					prefillX:    maxCardinality - 1,
-					fillUpX:     5*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(5),
-					fnExpAddCap: plusContainersAndKeys(5),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(4)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					prefillX:      maxCardinality - 1,
+					fillUpX:       5*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(5, 5),
+					fnExpAddCap:   plusKeysAndContainers(5, 5),
+					fnExp3xAddLen: plusKeysAndContainers(4+0, 4+1),
 					fnExp3xAddCap: func(prevCap int) int {
 						// 4 containers were added
-						return plusContainersAndKeys(4)(prevCap)
+						return plusKeysAndContainers(4, 4)(prevCap)
 					},
 				},
 			} {
@@ -1707,201 +1676,183 @@ func TestFillUp(t *testing.T) {
 				{
 					currentMaxX:   maxCardinality - 20,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 20,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 20,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 20,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 20,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX: maxCardinality - 20,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 20,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 20,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 
 				{
 					currentMaxX:   maxCardinality - 10,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 10,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 10,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 10,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 10,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX: maxCardinality - 10,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 10,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 10,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 
 				{
 					currentMaxX:   maxCardinality - 1,
 					fillUpX:       maxCardinality,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 1,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 1,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 1,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(1),
-					fnExpAddCap:   plusContainersAndKeys(1),
-					fnExp3xAddLen: plusContainersAndKeys(1),
-					fnExp3xAddCap: plusContainersAndKeys(1),
+					fnExpAddLen:   plusKeysAndContainers(1, 1),
+					fnExpAddCap:   plusKeysAndContainers(1, 1),
+					fnExp3xAddLen: plusKeysAndContainers(1, 1),
+					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
 					currentMaxX:   maxCardinality - 1,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX: maxCardinality - 1,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 1,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(3),
-					fnExpAddCap: plusContainersAndKeys(3),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(2)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 1,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(2+3, 2+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(2)(prevCap))
+						return doubled(plusKeysAndContainers(2, 2)(prevCap))
 					},
 				},
 			} {
@@ -1945,218 +1896,191 @@ func TestFillUp(t *testing.T) {
 				fnExp3xAddCap func(prevCap int) (newCap int)
 			}{
 				{
-					currentMaxX: maxCardinality - 200,
-					fillUpX:     maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(2),
-					fnExpAddCap: plusContainersAndKeys(2),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainers(1)(prevLen)
-						return plusContainersAndKeys(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(0+1, 1+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainers(1)(prevCap))
+						return doubled(plusKeysAndContainers(0, 1)(prevCap))
 					},
 				},
 				{
 					currentMaxX:   maxCardinality - 200,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 200,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 200,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 200,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(3),
-					fnExpAddCap:   plusContainersAndKeys(3),
-					fnExp3xAddLen: plusContainersAndKeys(3),
-					fnExp3xAddCap: plusContainersAndKeys(3),
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(3, 3),
+					fnExp3xAddCap: plusKeysAndContainers(3, 3),
 				},
 				{
-					currentMaxX: maxCardinality - 200,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 200,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 200,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 
 				{
-					currentMaxX: maxCardinality - 150,
-					fillUpX:     maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(2),
-					fnExpAddCap: plusContainersAndKeys(2),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainers(1)(prevLen)
-						return plusContainersAndKeys(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(0+1, 1+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainers(1)(prevCap))
+						return doubled(plusKeysAndContainers(0, 1)(prevCap))
 					},
 				},
 				{
 					currentMaxX:   maxCardinality - 150,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 150,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 150,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 150,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(3),
-					fnExpAddCap:   plusContainersAndKeys(3),
-					fnExp3xAddLen: plusContainersAndKeys(3),
-					fnExp3xAddCap: plusContainersAndKeys(3),
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(3, 3),
+					fnExp3xAddCap: plusKeysAndContainers(3, 3),
 				},
 				{
-					currentMaxX: maxCardinality - 150,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 150,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 150,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 
 				{
-					currentMaxX: maxCardinality - 100,
-					fillUpX:     maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(2),
-					fnExpAddCap: plusContainersAndKeys(2),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainers(1)(prevLen)
-						return plusContainersAndKeys(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(0+1, 1+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainers(1)(prevCap))
+						return doubled(plusKeysAndContainers(0, 1)(prevCap))
 					},
 				},
 				{
 					currentMaxX:   maxCardinality - 100,
 					fillUpX:       maxCardinality + 1022,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 100,
 					fillUpX:       maxCardinality + 1023,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 100,
 					fillUpX:       maxCardinality + 1024,
-					fnExpAddLen:   plusContainersAndKeys(2),
-					fnExpAddCap:   plusContainersAndKeys(2),
-					fnExp3xAddLen: plusContainersAndKeys(2),
-					fnExp3xAddCap: plusContainersAndKeys(2),
+					fnExpAddLen:   plusKeysAndContainers(2, 2),
+					fnExpAddCap:   plusKeysAndContainers(2, 2),
+					fnExp3xAddLen: plusKeysAndContainers(2, 2),
+					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
 					currentMaxX:   maxCardinality - 100,
 					fillUpX:       3*maxCardinality - 1,
-					fnExpAddLen:   plusContainersAndKeys(3),
-					fnExpAddCap:   plusContainersAndKeys(3),
-					fnExp3xAddLen: plusContainersAndKeys(3),
-					fnExp3xAddCap: plusContainersAndKeys(3),
+					fnExpAddLen:   plusKeysAndContainers(3, 3),
+					fnExpAddCap:   plusKeysAndContainers(3, 3),
+					fnExp3xAddLen: plusKeysAndContainers(3, 3),
+					fnExp3xAddCap: plusKeysAndContainers(3, 3),
 				},
 				{
-					currentMaxX: maxCardinality - 100,
-					fillUpX:     3 * maxCardinality,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       3 * maxCardinality,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 				{
-					currentMaxX: maxCardinality - 100,
-					fillUpX:     3*maxCardinality + 1,
-					fnExpAddLen: plusContainersAndKeys(4),
-					fnExpAddCap: plusContainersAndKeys(4),
-					fnExp3xAddLen: func(prevLen int) int {
-						ln := plusContainersAndKeys(3)(prevLen)
-						return plusContainers(1)(ln)
-					},
+					currentMaxX:   maxCardinality - 100,
+					fillUpX:       3*maxCardinality + 1,
+					fnExpAddLen:   plusKeysAndContainers(4, 4),
+					fnExpAddCap:   plusKeysAndContainers(4, 4),
+					fnExp3xAddLen: plusKeysAndContainers(3+1, 3+1),
 					fnExp3xAddCap: func(prevCap int) int {
-						return doubled(plusContainersAndKeys(3)(prevCap))
+						return doubled(plusKeysAndContainers(3, 3)(prevCap))
 					},
 				},
 			} {
@@ -2522,4 +2446,224 @@ func assertMatches(t *testing.T, expected *Bitmap, others ...*Bitmap) {
 			break
 		}
 	}
+}
+
+func TestExpandConditionally(t *testing.T) {
+	createBitmapWithKeysAndSpace := func(initialKeys []uint64, numAdditionalKeys, sizeAdditionalContainers int) *Bitmap {
+		zeroKey := 1
+		if slices.Contains(initialKeys, 0) {
+			zeroKey = 0
+		}
+
+		numInitialKeys := len(initialKeys)
+		bm := newBitmapWith(
+			1+zeroKey+numInitialKeys+numAdditionalKeys,
+			minContainerSize,
+			(-1+zeroKey+numInitialKeys)*minContainerSize+sizeAdditionalContainers)
+
+		for _, k := range initialKeys {
+			bm.Set(k + k*uint64(maxCardinality))
+		}
+
+		return bm
+	}
+
+	bmk := func(initialKeys ...uint64) *Bitmap {
+		bm := NewBitmap()
+		for _, k := range initialKeys {
+			bm.Set(k + k*uint64(maxCardinality))
+		}
+
+		return bm
+	}
+
+	keysToBms := map[int][]*Bitmap{
+		1: {bmk(1), bmk(3), bmk(5), bmk(6)},
+		2: {bmk(1, 3), bmk(1, 5), bmk(1, 6), bmk(3, 5), bmk(3, 6), bmk(5, 6)},
+		3: {bmk(1, 3, 5), bmk(1, 3, 6), bmk(1, 5, 6), bmk(3, 5, 6)},
+		4: {bmk(1, 3, 5, 6)},
+	}
+
+	t.Run("keys and containers fit. bm is not changed", func(t *testing.T) {
+		additionalKeys := 4
+		bm024 := createBitmapWithKeysAndSpace([]uint64{0, 2, 4},
+			additionalKeys, additionalKeys*minContainerSize)
+
+		expIds := bm024.ToArray()
+		expCapBytes := bm024.capInBytes()
+		expKeysSize := bm024.keys.size()
+
+		t.Run("direct expand conditionally", func(t *testing.T) {
+			for k := 0; k <= additionalKeys; k++ {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					res := bm024.CloneToBuf(make([]byte, expCapBytes))
+
+					res.expandConditionally(k, k*minContainerSize)
+
+					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expKeysSize, res.keys.size())
+					require.ElementsMatch(t, expIds, res.ToArray())
+				})
+			}
+		})
+
+		t.Run("integration expand conditionally", func(t *testing.T) {
+			for k, bms := range keysToBms {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					for _, bm := range bms {
+						res := bm024.CloneToBuf(make([]byte, expCapBytes))
+						resIds := append(expIds, bm.ToArray()...)
+
+						res.Or(bm)
+
+						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expKeysSize, res.keys.size())
+						require.ElementsMatch(t, resIds, res.ToArray())
+					}
+				})
+			}
+		})
+	})
+
+	t.Run("keys do not fit, containers do. containers are moved", func(t *testing.T) {
+		additionalKeys := 4
+		// key takes 8 uint16s. keys node can not fit all additionalKeys,
+		// but slice have required capacity for keys node expansion and containers movement
+		bm024 := createBitmapWithKeysAndSpace([]uint64{0, 2, 4},
+			0, additionalKeys*minContainerSize+additionalKeys*8)
+
+		expIds := bm024.ToArray()
+		expCapBytes := bm024.capInBytes()
+
+		t.Run("direct expand conditionally", func(t *testing.T) {
+			for k := 1; k <= additionalKeys; k++ {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					res := bm024.CloneToBuf(make([]byte, expCapBytes))
+					// keys are extended to fit up to max of [current num of keys] or [num new keys]
+					expKeysSize := bm024.keys.size() + max(k, bm024.keys.numKeys())*8
+
+					res.expandConditionally(k, k*minContainerSize)
+
+					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expKeysSize, res.keys.size())
+					require.ElementsMatch(t, expIds, res.ToArray())
+				})
+			}
+		})
+
+		t.Run("integration expand conditionally", func(t *testing.T) {
+			for k, bms := range keysToBms {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					// keys are extended to fit up to max of [current num of keys] or [num new keys]
+					expKeysSize := bm024.keys.size() + max(k, bm024.keys.numKeys())*8
+
+					for _, bm := range bms {
+						res := bm024.CloneToBuf(make([]byte, expCapBytes))
+						resIds := append(expIds, bm.ToArray()...)
+
+						res.Or(bm)
+
+						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expKeysSize, res.keys.size())
+						require.ElementsMatch(t, resIds, res.ToArray())
+					}
+				})
+			}
+		})
+	})
+
+	t.Run("keys fit, containers do not. bm is extended", func(t *testing.T) {
+		additionalKeys := 4
+		bm024 := createBitmapWithKeysAndSpace([]uint64{0, 2, 4},
+			additionalKeys, 0)
+
+		expIds := bm024.ToArray()
+		keysSize := bm024.keys.size()
+		capBytes := bm024.capInBytes()
+
+		t.Run("direct expand conditionally", func(t *testing.T) {
+			for k := 1; k <= additionalKeys; k++ {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					res := bm024.CloneToBuf(make([]byte, capBytes))
+					expKeysSize := keysSize + k*8
+					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+k*8)*2)
+
+					res.expandConditionally(k, k*minContainerSize)
+
+					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expKeysSize, res.keys.size())
+					require.ElementsMatch(t, expIds, res.ToArray())
+				})
+			}
+		})
+
+		t.Run("integration expand conditionally", func(t *testing.T) {
+			for k, bms := range keysToBms {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					// keys are extended to fit up to max of [current num of keys] or [num new keys]
+					expKeysSize := keysSize + k*8
+					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+k*8)*2)
+
+					for _, bm := range bms {
+						res := bm024.CloneToBuf(make([]byte, capBytes))
+						resIds := append(expIds, bm.ToArray()...)
+
+						res.Or(bm)
+
+						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expKeysSize, res.keys.size())
+						require.ElementsMatch(t, resIds, res.ToArray())
+					}
+				})
+			}
+		})
+	})
+
+	t.Run("keys and containers do not. bm is extended", func(t *testing.T) {
+		additionalKeys := 4
+		bm024 := createBitmapWithKeysAndSpace([]uint64{0, 2, 4}, 0, 0)
+
+		expIds := bm024.ToArray()
+		keysSize := bm024.keys.size()
+		capBytes := bm024.capInBytes()
+
+		t.Run("direct expand conditionally", func(t *testing.T) {
+			for k := 1; k <= additionalKeys; k++ {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					res := bm024.CloneToBuf(make([]byte, capBytes))
+					numNewKeys := max(bm024.keys.numKeys(), k)
+					expKeysSize := keysSize + numNewKeys*8
+					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+numNewKeys*8)*2)
+
+					res.expandConditionally(k, k*minContainerSize)
+
+					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expKeysSize, res.keys.size())
+					require.ElementsMatch(t, expIds, res.ToArray())
+				})
+			}
+		})
+
+		t.Run("integration expand conditionally", func(t *testing.T) {
+			for k, bms := range keysToBms {
+				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
+					// keys are extended to fit up to max of [current num of keys] or [num new keys]
+					numNewKeys := max(bm024.keys.numKeys(), k)
+					expKeysSize := keysSize + numNewKeys*8
+					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+numNewKeys*8)*2)
+
+					for _, bm := range bms {
+						res := bm024.CloneToBuf(make([]byte, capBytes))
+						resIds := append(expIds, bm.ToArray()...)
+
+						res.Or(bm)
+
+						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expKeysSize, res.keys.size())
+						require.ElementsMatch(t, resIds, res.ToArray())
+					}
+				})
+			}
+		})
+	})
 }
