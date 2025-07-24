@@ -195,7 +195,12 @@ func (ra *Bitmap) AndNot(bm *Bitmap) *Bitmap {
 		return ra
 	}
 
-	andNotContainersInRange(ra, bm, 0, bm.keys.numKeys(), nil)
+	if numContainersA, numContainersB := ra.keys.numKeys(), bm.keys.numKeys(); numContainersB < numContainersA {
+		andNotContainersInRangeB(ra, bm, 0, numContainersB, nil)
+	} else {
+		andNotContainersInRangeA(ra, bm, 0, numContainersA, nil)
+	}
+
 	return ra
 }
 
@@ -206,7 +211,7 @@ func (ra *Bitmap) AndNot(bm *Bitmap) *Bitmap {
 // maxConcurrency limits concurrency calculated internally.
 // If maxConcurrency <= 0, then calculated concurrency is not limited.
 //
-// E.g.: src bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
+// E.g.: smaller bitmap has 100 containers. Internal concurrency = 100/24 = 4. For:
 // - maxConcurrency = 2, there will be 2 goroutines executed
 // - maxConcurrency = 6, there will be 4 goroutines executed
 func (ra *Bitmap) AndNotConc(bm *Bitmap, maxConcurrency int) *Bitmap {
@@ -214,19 +219,36 @@ func (ra *Bitmap) AndNotConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		return ra
 	}
 
-	numContainers := bm.keys.numKeys()
+	numContainers := ra.keys.numKeys()
+	andNotCallback := andNotContainersInRangeA
+	if numContainersB := bm.keys.numKeys(); numContainersB < numContainers {
+		numContainers = numContainersB
+		andNotCallback = andNotContainersInRangeB
+	}
+
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(bi, bj, _ int) { andNotContainersInRange(ra, bm, bi, bj, nil) }
+	callback := func(i, j, _ int) { andNotCallback(ra, bm, i, j, nil) }
 	concurrentlyInRanges(numContainers, concurrency, callback)
+
 	return ra
 }
 
-func andNotContainersInRange(a, b *Bitmap, bi, bj int, optBuf []uint16) {
+func andNotContainersInRangeA(a, b *Bitmap, ai, aj int, optBuf []uint16) {
+	ak := a.keys.key(ai)
+	bi := b.keys.search(ak)
+	bn := b.keys.numKeys()
+	andNotContainersInRange(a, b, ai, aj, bi, bn, optBuf)
+}
+
+func andNotContainersInRangeB(a, b *Bitmap, bi, bj int, optBuf []uint16) {
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
+	andNotContainersInRange(a, b, ai, an, bi, bj, optBuf)
+}
 
-	for ai < an && bi < bj {
+func andNotContainersInRange(a, b *Bitmap, ai, aj, bi, bj int, optBuf []uint16) {
+	for ai < aj && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
