@@ -640,7 +640,7 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 	mod := numContainers % concurrency
 
 	wg := new(sync.WaitGroup)
-	wg.Add(concurrency)
+	wg.Add(concurrency - 1)
 
 	for i := 0; i < concurrency; i++ {
 		i := i
@@ -654,10 +654,14 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 			to = mod*(div+1) + (i-mod+1)*div
 		}
 
-		go func() {
+		if i != concurrency-1 {
+			go func() {
+				callback(from, to, i)
+				wg.Done()
+			}()
+		} else {
 			callback(from, to, i)
-			wg.Done()
-		}()
+		}
 	}
 	wg.Wait()
 }
