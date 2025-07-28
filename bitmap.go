@@ -178,15 +178,12 @@ func (ra *Bitmap) expandKeys(bySize uint64) uint64 {
 	ra.scootRight(curSize, bySize)
 	ra.keys = uint16To64SliceUnsafe(ra.data[:curSize+bySize])
 	ra.keys.setNodeSize(int(curSize + bySize))
-	
+
 	// All containers have moved to the right by bySize bytes.
 	// Update their offsets.
 	n := ra.keys
-	for i := 0; i < n.maxKeys(); i++ {
-		val := n.val(i)
-		if val > 0 {
-			n.setAt(valOffset(i), val+uint64(bySize))
-		}
+	for i := 0; i < n.numKeys(); i++ {
+		n.setAt(valOffset(i), n.val(i)+uint64(bySize))
 	}
 	return bySize
 }

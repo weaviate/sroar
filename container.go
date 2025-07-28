@@ -115,7 +115,7 @@ func (c array) find(x uint16) int {
 	N := getCardinality(c)
 	si := int(startIdx)
 	lo, hi := si, si+N-1
-	for lo+16 <= hi {
+	for lo+8 <= hi {
 		mid := lo + (hi-lo)/2
 		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, c[mid], x)
 

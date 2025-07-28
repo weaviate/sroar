@@ -59,7 +59,7 @@ func (n node) isFull() bool {
 func (n node) search(k uint64) int {
 	N := n.numKeys()
 	lo, hi := 0, N-1
-	for lo+16 <= hi {
+	for lo+8 <= hi {
 		mid := lo + (hi-lo)/2
 		ki := n.key(mid)
 		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, ki, k)
