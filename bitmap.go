@@ -442,6 +442,10 @@ func (ra *Bitmap) SetV(x uint64, v uint16) bool {
 }
 
 func FromSortedList(vals []uint64) *Bitmap {
+	return FromSortedListV(vals, 0)
+}
+
+func FromSortedListV(vals []uint64, v uint16) *Bitmap {
 	var arr []uint16
 	var hi, lastHi, off uint64
 
@@ -488,7 +492,7 @@ func FromSortedList(vals []uint64) *Bitmap {
 				bitmap(c).add(v)
 			}
 		}
-		ra.setKey(key, off)
+		ra.setKey(key+uint64(v), off)
 		return
 	}
 
@@ -594,6 +598,11 @@ func (ra *Bitmap) RemoveV(x uint64, v uint16) bool {
 
 // Remove range removes [lo, hi) from the bitmap.
 func (ra *Bitmap) RemoveRange(lo, hi uint64) {
+	ra.RemoveRangeV(lo, hi, 0)
+}
+
+// Remove range removes [lo, hi) from the bitmap.
+func (ra *Bitmap) RemoveRangeV(lo, hi uint64, v uint16) {
 	if lo > hi {
 		panic("lo should not be more than hi")
 	}
@@ -601,8 +610,8 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 		return
 	}
 
-	k1 := lo & mask
-	k2 := hi & mask
+	k1 := lo&mask + uint64(v)
+	k2 := hi&mask + uint64(v)
 
 	defer ra.Cleanup()
 
@@ -625,6 +634,9 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 
 	for i := st; i < n; i++ {
 		key := ra.keys.key(i)
+		if uint16(key) != v {
+			continue
+		}
 		if key >= k2 {
 			break
 		}
@@ -1378,4 +1390,8 @@ func (bm *Bitmap) Split(externalSize func(start, end uint64) uint64, maxSz uint6
 	}
 
 	return splits
+}
+
+func (ra *Bitmap) MergeV() {
+
 }

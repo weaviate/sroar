@@ -25,6 +25,7 @@ type Iterator struct {
 
 	keys   []uint64
 	keyIdx int
+	v      uint16
 
 	contIdx int
 
@@ -54,10 +55,15 @@ func (bm *Bitmap) NewRangeIterators(numRanges int) []*Iterator {
 }
 
 func (bm *Bitmap) NewIterator() *Iterator {
+	return bm.NewIteratorV(0)
+}
+
+func (bm *Bitmap) NewIteratorV(v uint16) *Iterator {
 	return &Iterator{
 		bm:        bm,
 		keys:      bm.keys[indexNodeStart : indexNodeStart+bm.keys.numKeys()*2],
 		keyIdx:    0,
+		v:         v,
 		contIdx:   -1,
 		bitmapIdx: -1,
 	}
@@ -69,6 +75,15 @@ func (it *Iterator) Next() uint64 {
 	}
 
 	key := it.keys[it.keyIdx]
+	for uint16(key) != it.v {
+		if it.keyIdx+2 >= len(it.keys) {
+			return 0
+		}
+		// jump by 2 because key is followed by a value
+		it.keyIdx += 2
+		key = it.keys[it.keyIdx]
+	}
+
 	off := it.keys[it.keyIdx+1]
 	cont := it.bm.getContainer(off)
 	card := getCardinality(cont)
@@ -81,15 +96,26 @@ func (it *Iterator) Next() uint64 {
 		}
 		// jump by 2 because key is followed by a value
 		it.keyIdx += 2
+		key = it.keys[it.keyIdx]
+
+		for uint16(key) != it.v {
+			if it.keyIdx+2 >= len(it.keys) {
+				return 0
+			}
+			// jump by 2 because key is followed by a value
+			it.keyIdx += 2
+			key = it.keys[it.keyIdx]
+		}
+
 		it.contIdx = -1
 		it.bitmapIdx = -1
 		it.bitset = 0
-		key = it.keys[it.keyIdx]
 		off = it.keys[it.keyIdx+1]
 		cont = it.bm.getContainer(off)
 		card = getCardinality(cont)
 	}
 
+	key = key & mask
 	//  The above loop assures that we can do next in this container.
 	it.contIdx++
 	switch cont[indexType] {

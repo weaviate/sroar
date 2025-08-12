@@ -1254,3 +1254,65 @@ func TestToArrayV(t *testing.T) {
 		require.ElementsMatch(t, control[v], arr)
 	}
 }
+
+func TestRemoveRangeV(t *testing.T) {
+	versions := uint16(3)
+	a := NewBitmap()
+	N := int(1e7)
+	for i := 0; i < N; i++ {
+		for v := uint16(0); v < versions; v++ {
+			a.SetV(uint64(i), v)
+		}
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		a.RemoveRangeV(0, 0, v)
+		require.Equal(t, N, a.GetCardinalityV(v))
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		a.RemoveRangeV(uint64(N/4), uint64(N/2), v)
+		require.Equal(t, 3*N/4, a.GetCardinalityV(v))
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		a.RemoveRangeV(0, uint64(N/2), v)
+		require.Equal(t, N/2, a.GetCardinalityV(v))
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		a.RemoveRangeV(uint64(N/2), uint64(N), v)
+		require.Equal(t, 0, a.GetCardinalityV(v))
+		a.SetV(uint64(N/4), v)
+		a.SetV(uint64(N/2), v)
+		a.SetV(uint64(3*N/4), v)
+		require.Equal(t, 3, a.GetCardinalityV(v))
+	}
+
+	var arr []uint64
+	for i := 0; i < 123; i++ {
+		arr = append(arr, uint64(i))
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		b := FromSortedListV(arr, v)
+		b.RemoveRangeV(50, math.MaxUint64, v)
+		require.Equal(t, 50, b.GetCardinalityV(v))
+	}
+}
+
+func TestRemoveRangeV2(t *testing.T) {
+	versions := uint16(3)
+	// High from the last container should not be removed.
+	a := NewBitmap()
+	for i := 1; i < 10; i++ {
+		for v := uint16(0); v < versions; v++ {
+			a.SetV(uint64(i*(1<<16)), v)
+			a.SetV(uint64(i*(1<<16))-1, v)
+		}
+	}
+	for v := uint16(0); v < versions; v++ {
+		a.RemoveRangeV(1<<16, (4<<16)-1, v)
+		require.True(t, a.ContainsV((4<<16)-1, v))
+	}
+}

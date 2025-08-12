@@ -139,3 +139,93 @@ func BenchmarkIterator(b *testing.B) {
 		}
 	}
 }
+
+func TestIteratorBasicV(t *testing.T) {
+	versions := uint16(3)
+	n := uint64(1e5)
+	bm := NewBitmap()
+
+	for x := uint64(1); x <= n; x++ {
+		for v := uint16(0); v < versions; v++ {
+			bm.SetV(x, v)
+		}
+	}
+
+	iterators := make([]*Iterator, versions)
+	for v := uint16(0); v < versions; v++ {
+		iterators[v] = bm.NewIteratorV(v)
+	}
+
+	for x := uint64(1); x <= n; x++ {
+		for v := uint16(0); v < versions; v++ {
+			xx := iterators[v].Next()
+			require.Equal(t, x, xx)
+		}
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		xx := iterators[v].Next()
+		require.Equal(t, uint64(0), xx)
+	}
+}
+
+func TestIteratorRandomV(t *testing.T) {
+	versions := uint16(3)
+	n := uint64(1e6)
+	bm := NewBitmap()
+	mp := make(map[uint64]struct{})
+	var arr []uint64
+	for i := uint64(1); i <= n; i++ {
+		x := uint64(rand.Intn(int(n) * 5))
+		if x == 0 {
+			continue
+		}
+		if _, ok := mp[x]; ok {
+			continue
+		}
+		mp[x] = struct{}{}
+		arr = append(arr, x)
+		for v := uint16(0); v < versions; v++ {
+			bm.SetV(x, v)
+		}
+	}
+
+	sort.Slice(arr, func(i, j int) bool {
+		return arr[i] < arr[j]
+	})
+
+	iterators := make([]*Iterator, versions)
+	xx := make([]uint64, versions)
+	for v := uint16(0); v < versions; v++ {
+		iterators[v] = bm.NewIterator()
+		xx[v] = iterators[v].Next()
+	}
+	for i := uint64(0); i < uint64(len(arr)); i++ {
+		for v := uint16(0); v < versions; v++ {
+			require.Equal(t, arr[i], xx[v])
+			xx[v] = iterators[v].Next()
+		}
+	}
+}
+
+func TestIteratorWithRemoveKeysV(t *testing.T) {
+	versions := uint16(3)
+	b := NewBitmap()
+	N := uint64(1e6)
+	for x := uint64(0); x < N; x++ {
+		for v := uint16(0); v < versions; v++ {
+			b.SetV(x, v)
+		}
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		b.RemoveRangeV(0, N, v)
+		it := b.NewIteratorV(v)
+
+		cnt := 0
+		for it.Next() > 0 {
+			cnt++
+		}
+		require.Equal(t, 0, cnt)
+	}
+}
