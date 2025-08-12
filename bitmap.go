@@ -1392,6 +1392,38 @@ func (bm *Bitmap) Split(externalSize func(start, end uint64) uint64, maxSz uint6
 	return splits
 }
 
-func (ra *Bitmap) MergeV() {
+func (ra *Bitmap) MergeV() *Bitmap {
+	bm := NewBitmap()
 
+	buf := make([]uint16, maxContainerSize)
+	for ai, an := 0, ra.keys.numKeys(); ai < an; ai++ {
+		ak := ra.keys.key(ai)
+		aoff := ra.keys.val(ai)
+		ac := ra.getContainer(aoff)
+		key := ak & mask
+
+		bm.expandConditionally(1, len(ac))
+		boff := bm.newContainerNoClr(uint16(len(ac)))
+		copy(bm.data[boff:], ac)
+
+		for ai+1 < an {
+			ak = ra.keys.key(ai + 1)
+			if ak&mask != key {
+				break
+			}
+			ai++
+			aoff = ra.keys.val(ai)
+			ac = ra.getContainer(aoff)
+			bc := bm.getContainer(boff)
+
+			if c := containerOrAlt(bc, ac, buf, runInline); len(c) > 0 {
+				diff := len(c) - len(bc)
+				bm.expandConditionally(0, diff)
+				bm.data = bm.data[:len(bm.data)+diff]
+				copy(bm.data[boff:], c)
+			}
+		}
+		bm.setKey(key, boff)
+	}
+	return bm
 }

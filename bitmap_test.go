@@ -1316,3 +1316,26 @@ func TestRemoveRangeV2(t *testing.T) {
 		require.True(t, a.ContainsV((4<<16)-1, v))
 	}
 }
+
+func TestMergeV(t *testing.T) {
+	versions := uint16(3)
+	firstX := uint64(1234)
+	bm := NewBitmap()
+
+	x := firstX
+	for i := 0; i < 10000; i++ {
+		v := uint16(i) % versions
+		bm.SetV(x, v)
+		x += uint64(maxCardinality) / 307
+	}
+
+	merged := bm.MergeV()
+	it := merged.NewIterator()
+
+	x = firstX
+	for i := 0; i < 10000; i++ {
+		xx := it.Next()
+		require.Equal(t, x, xx)
+		x += uint64(maxCardinality) / 307
+	}
+}
