@@ -1134,3 +1134,123 @@ func Test_Issue_2_OutOfRange(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveV(t *testing.T) {
+	versions := uint16(3)
+	a := NewBitmap()
+	N := int(1e7)
+
+	for v := uint16(0); v < versions; v++ {
+		for i := 0; i < N; i++ {
+			a.SetV(uint64(i), v)
+		}
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		require.Equal(t, N, a.GetCardinalityV(v))
+		for i := 0; i < N/2; i++ {
+			require.True(t, a.RemoveV(uint64(i), v))
+		}
+		require.Equal(t, N/2, a.GetCardinalityV(v))
+	}
+
+	// Remove elelemts which doesn't exist should be no-op
+	for v := uint16(0); v < versions; v++ {
+		for i := 0; i < N/2; i++ {
+			require.False(t, a.RemoveV(uint64(i), v))
+		}
+		require.Equal(t, N/2, a.GetCardinalityV(v))
+	}
+
+	for v := uint16(0); v < versions; v++ {
+		for i := 0; i < N/2; i++ {
+			require.True(t, a.RemoveV(uint64(i+N/2), v))
+		}
+		require.Equal(t, 0, a.GetCardinalityV(v))
+	}
+}
+
+func TestCardinalityV(t *testing.T) {
+	versions := uint16(3)
+	a := NewBitmap()
+	n := 1 << 20
+
+	for v := uint16(0); v < versions; v++ {
+		for i := 0; i < n; i++ {
+			a.SetV(uint64(i), v)
+		}
+		require.Equal(t, n, a.GetCardinalityV(v))
+	}
+}
+
+func TestCleanupV(t *testing.T) {
+	version := uint16(2)
+	a := NewBitmap()
+	n := 10
+	for i := 0; i < n; i++ {
+		a.SetV(uint64(i*(1<<16)), version)
+	}
+	require.Equal(t, n, a.GetCardinalityV(version))
+	require.Equal(t, n+1, a.keys.numKeys())
+
+	for i := 0; i < n; i++ {
+		if i%2 == 1 {
+			a.RemoveV(uint64(i*(1<<16)), version)
+		}
+	}
+	require.Equal(t, n/2, a.GetCardinalityV(version))
+	require.Equal(t, n+1, a.keys.numKeys())
+
+	a.Cleanup()
+	require.Equal(t, n/2, a.GetCardinalityV(version))
+	require.Equal(t, n/2+1, a.keys.numKeys())
+}
+
+func TestContainsV(t *testing.T) {
+	bm := NewBitmap()
+	versions := uint16(4)
+	firstX := uint64(12345)
+
+	x := firstX
+	for i := uint16(0); i < 99; i++ {
+		v := i % versions
+		bm.SetV(x, v)
+		x += uint64(maxCardinality) / 5
+	}
+
+	x = firstX
+	for i := uint16(0); i < 99; i++ {
+		for v := uint16(0); v < versions; v++ {
+			if v == i%versions {
+				require.True(t, bm.ContainsV(x, v))
+			} else {
+				require.False(t, bm.ContainsV(x, v))
+			}
+		}
+		x += uint64(maxCardinality) / 5
+	}
+}
+
+func TestToArrayV(t *testing.T) {
+	bm := NewBitmap()
+	versions := uint16(4)
+	firstX := uint64(12345)
+
+	control := make([][]uint64, versions)
+	for v := range control {
+		control[v] = []uint64{}
+	}
+
+	x := firstX
+	for i := uint16(0); i < 99; i++ {
+		v := i % versions
+		bm.SetV(x, v)
+		control[v] = append(control[v], x)
+		x += uint64(maxCardinality) / 5
+	}
+
+	for v := range control {
+		arr := bm.ToArrayV(uint16(v))
+		require.ElementsMatch(t, control[v], arr)
+	}
+}

@@ -410,7 +410,11 @@ func (ra *Bitmap) IsEmpty() bool {
 }
 
 func (ra *Bitmap) Set(x uint64) bool {
-	key := x & mask
+	return ra.SetV(x, 0)
+}
+
+func (ra *Bitmap) SetV(x uint64, v uint16) bool {
+	key := x&mask + uint64(v)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		// We need to add a container.
@@ -537,10 +541,14 @@ func (ra *Bitmap) Select(x uint64) (uint64, error) {
 }
 
 func (ra *Bitmap) Contains(x uint64) bool {
+	return ra.ContainsV(x, 0)
+}
+
+func (ra *Bitmap) ContainsV(x uint64, v uint16) bool {
 	if ra == nil {
 		return false
 	}
-	key := x & mask
+	key := x&mask + uint64(v)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		return false
@@ -560,10 +568,14 @@ func (ra *Bitmap) Contains(x uint64) bool {
 }
 
 func (ra *Bitmap) Remove(x uint64) bool {
+	return ra.RemoveV(x, 0)
+}
+
+func (ra *Bitmap) RemoveV(x uint64, v uint16) bool {
 	if ra == nil {
 		return false
 	}
-	key := x & mask
+	key := x&mask + uint64(v)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		return false
@@ -654,12 +666,20 @@ func (ra *Bitmap) Reset() {
 }
 
 func (ra *Bitmap) GetCardinality() int {
+	return ra.GetCardinalityV(0)
+}
+
+func (ra *Bitmap) GetCardinalityV(v uint16) int {
 	if ra == nil {
 		return 0
 	}
 	N := ra.keys.numKeys()
 	var sz int
 	for i := 0; i < N; i++ {
+		key := ra.keys.key(i)
+		if uint16(key) != v {
+			continue
+		}
 		offset := ra.keys.val(i)
 		c := ra.getContainer(offset)
 		sz += getCardinality(c)
@@ -668,16 +688,24 @@ func (ra *Bitmap) GetCardinality() int {
 }
 
 func (ra *Bitmap) ToArray() []uint64 {
+	return ra.ToArrayV(0)
+}
+
+func (ra *Bitmap) ToArrayV(v uint16) []uint64 {
 	if ra == nil {
 		return nil
 	}
-	res := make([]uint64, 0, ra.GetCardinality())
+	res := make([]uint64, 0, ra.GetCardinalityV(v))
 	N := ra.keys.numKeys()
 	for i := 0; i < N; i++ {
 		key := ra.keys.key(i)
+		if uint16(key) != v {
+			continue
+		}
 		off := ra.keys.val(i)
 		c := ra.getContainer(off)
 
+		key = key & mask
 		switch c[indexType] {
 		case typeArray:
 			a := array(c)
