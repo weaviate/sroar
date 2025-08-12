@@ -1339,3 +1339,35 @@ func TestMergeV(t *testing.T) {
 		x += uint64(maxCardinality) / 307
 	}
 }
+
+func TestToMapV(t *testing.T) {
+	bm := NewBitmap()
+
+	bm.Set(0)
+	bm.SetV(1, 0)
+	bm.SetV(1, 1)
+	bm.SetV(2, 0)
+	bm.SetV(2, 1)
+	bm.SetV(2, 2)
+	bm.SetV(3, 0)
+	bm.SetV(3, 1)
+	bm.SetV(3, 2)
+	bm.SetV(3, 3)
+	bm.SetV(4, 2)
+	bm.SetV(4, 3)
+	bm.SetV(4, 4)
+	bm.SetV(5, 4)
+	bm.SetV(5, 5)
+	bm.SetV(6, 6)
+
+	mp := bm.ToMapV()
+
+	require.Len(t, mp, 7)
+	require.ElementsMatch(t, []uint16{0}, mp[0])
+	require.ElementsMatch(t, []uint16{0, 1}, mp[1])
+	require.ElementsMatch(t, []uint16{0, 1, 2}, mp[2])
+	require.ElementsMatch(t, []uint16{0, 1, 2, 3}, mp[3])
+	require.ElementsMatch(t, []uint16{2, 3, 4}, mp[4])
+	require.ElementsMatch(t, []uint16{4, 5}, mp[5])
+	require.ElementsMatch(t, []uint16{6}, mp[6])
+}

@@ -1427,3 +1427,35 @@ func (ra *Bitmap) MergeV() *Bitmap {
 	}
 	return bm
 }
+
+func (ra *Bitmap) ToMapV() map[uint64][]uint16 {
+	if ra == nil {
+		return nil
+	}
+	res := map[uint64][]uint16{}
+	N := ra.keys.numKeys()
+	for i := 0; i < N; i++ {
+		k := ra.keys.key(i)
+		off := ra.keys.val(i)
+		c := ra.getContainer(off)
+
+		key := k & mask
+		v := uint16(k)
+		switch c[indexType] {
+		case typeArray:
+			a := array(c)
+			for _, val := range a.all() {
+				x := key | uint64(val)
+				res[x] = append(res[x], v)
+			}
+		case typeBitmap:
+			b := bitmap(c)
+			out := b.all()
+			for _, val := range out {
+				x := key | uint64(val)
+				res[x] = append(res[x], v)
+			}
+		}
+	}
+	return res
+}
