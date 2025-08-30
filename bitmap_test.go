@@ -1134,3 +1134,40 @@ func Test_Issue_2_OutOfRange(t *testing.T) {
 		})
 	}
 }
+
+func TestReset(t *testing.T) {
+	bmTemplate := NewBitmap()
+	delta5 := uint64(maxCardinality / 5)
+	delta7 := uint64(maxCardinality / 7)
+	for i := uint64(0); i < 1000; i++ {
+		bmTemplate.Set(i * delta5)
+		bmTemplate.Set(i * delta7)
+	}
+
+	t.Run("empty after reset", func(t *testing.T) {
+		bm := bmTemplate.Clone()
+
+		bm.Reset()
+
+		require.True(t, bm.IsEmpty())
+		require.Equal(t, 1, bm.keys.numKeys())
+		require.Equal(t, 2, bm.keys.maxKeys())
+		require.Equal(t, 24, bm.keys.size())
+		require.Greater(t, bmTemplate.LenInBytes(), bm.LenInBytes())
+		require.Equal(t, bmTemplate.LenInBytes(), bm.capInBytes())
+	})
+
+	t.Run("no panic on merge after reset", func(t *testing.T) {
+		// due to Bitmap::Reset method not setting keys.size properly
+		// Bitmap::expandConditionally paniced with "slice bounds out of range [4664:1736]".
+		// This test prevents regression.
+
+		bm := bmTemplate.Clone()
+
+		bm.Reset()
+		bm.Or(bmTemplate)
+
+		require.Equal(t, bmTemplate.GetCardinality(), bm.GetCardinality())
+		require.ElementsMatch(t, bmTemplate.ToArray(), bm.ToArray())
+	})
+}

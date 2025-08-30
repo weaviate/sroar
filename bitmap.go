@@ -654,12 +654,15 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 }
 
 func (ra *Bitmap) Reset() {
-	// reset ra.data to size enough for one container and corresponding key.
-	// 2 u64 is needed for header and another 2 u16 for the key 0.
-	ra.data = ra.data[:16+minContainerSize]
+	keysLen := calcInitialKeysLen(2)
+	ra.data = ra.data[:keysLen]
 	ra.keys = toUint64Slice(ra.data)
+	ra.keys.setNodeSize(keysLen)
 
+	// Always generate a container for key = 0x00. Otherwise, node gets confused
+	// about whether a zero key is a new key or not.
 	offset := ra.newContainer(minContainerSize)
+	// First two are for num keys. index=2 -> 0 key. index=3 -> offset.
 	ra.keys.setAt(indexNodeStart+1, offset)
 	ra.keys.setNumKeys(1)
 }
