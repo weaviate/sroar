@@ -378,6 +378,14 @@ func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 }
 
 func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
+	for bi < bn-1 {
+		boff := b.keys.val(bi)
+		bc := b.getContainer(boff)
+		if getCardinality(bc) != 0 {
+			break
+		}
+		bi++
+	}
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
@@ -391,6 +399,10 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
+		for ak < bk && ai < an-1 {
+			ai++
+			ak = a.keys.key(ai)
+		}
 		if ak == bk {
 			aoff := a.keys.val(ai)
 			ac := a.getContainer(aoff)
@@ -512,6 +524,14 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 
 func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMutateLock *sync.RWMutex,
 ) (newKeys, sizeContainers int, bKeys []uint64, bContainers [][]uint16) {
+	for bi < bn-1 {
+		boff := b.keys.val(bi)
+		bc := b.getContainer(boff)
+		if getCardinality(bc) != 0 {
+			break
+		}
+		bi++
+	}
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
@@ -526,6 +546,10 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMut
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
+		for ak < bk && ai < an-1 {
+			ai++
+			ak = a.keys.key(ai)
+		}
 		if ak == bk {
 			inlineVsMutateLock.RLock()
 			off := a.keys.val(ai)
