@@ -1,6 +1,6 @@
 module github.com/weaviate/sroar
 
-go 1.21
+go 1.24
 
 require (
 	github.com/RoaringBitmap/roaring v0.6.1
