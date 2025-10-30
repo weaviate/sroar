@@ -1171,3 +1171,46 @@ func TestReset(t *testing.T) {
 		require.ElementsMatch(t, bmTemplate.ToArray(), bm.ToArray())
 	})
 }
+
+func TestZeroOut(t *testing.T) {
+	bmTemplate := NewBitmap()
+	delta5 := uint64(maxCardinality / 5)
+	delta7 := uint64(maxCardinality / 7)
+	for i := uint64(0); i < 1000; i++ {
+		bmTemplate.Set(i * delta5)
+		bmTemplate.Set(i * delta7)
+	}
+
+	clone := func(template *Bitmap) *Bitmap {
+		buf := make([]byte, 0, template.capInBytes())
+		return template.CloneToBuf(buf)
+	}
+
+	t.Run("empty after zero out, no size has changed", func(t *testing.T) {
+		bm := clone(bmTemplate)
+
+		bm.ZeroOut()
+
+		require.True(t, bm.IsEmpty())
+		require.Equal(t, bmTemplate.keys.numKeys(), bm.keys.numKeys())
+		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
+		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
+		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
+		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+	})
+
+	t.Run("merge after zero out, no size has changed", func(t *testing.T) {
+		bm := clone(bmTemplate)
+
+		bm.ZeroOut()
+		bm.Or(bmTemplate)
+
+		require.Equal(t, bmTemplate.GetCardinality(), bm.GetCardinality())
+		require.ElementsMatch(t, bmTemplate.ToArray(), bm.ToArray())
+		require.Equal(t, bmTemplate.keys.numKeys(), bm.keys.numKeys())
+		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
+		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
+		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
+		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+	})
+}

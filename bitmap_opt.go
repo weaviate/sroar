@@ -46,7 +46,7 @@ func andContainers(a, b, res *Bitmap, optBuf []uint16) {
 
 func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 	if bm.IsEmpty() {
-		ra.Reset()
+		ra.ZeroOut()
 		return ra
 	}
 
@@ -66,7 +66,7 @@ func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 // - maxConcurrency = 6, there will be 4 goroutines executed
 func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	if bm.IsEmpty() {
-		ra.Reset()
+		ra.ZeroOut()
 		return ra
 	}
 
