@@ -4,3 +4,5 @@ vendor/
 # IDE files
 .idea/
 .vscode/
+
+testdata/bitmaps/**/

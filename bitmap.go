@@ -667,6 +667,14 @@ func (ra *Bitmap) Reset() {
 	ra.keys.setNumKeys(1)
 }
 
+func (ra *Bitmap) ZeroOut() {
+	for i := 0; i < ra.keys.numKeys(); i++ {
+		off := ra.keys.val(i)
+		c := ra.getContainer(off)
+		zeroOutContainer(c)
+	}
+}
+
 func (ra *Bitmap) GetCardinality() int {
 	if ra == nil {
 		return 0
