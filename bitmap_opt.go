@@ -372,21 +372,23 @@ func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 		return ra
 	}
 
-	buf := make([]uint16, maxContainerSize)
-	orContainersInRange(ra, bm, 0, bm.keys.numKeys(), buf)
+	orContainersInRange(ra, bm, 0, bm.keys.numKeys())
 	return ra
 }
 
-func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
+func orContainersInRange(a, b *Bitmap, bi, bn int) {
+	buf := make([]uint16, maxContainerSize)
+
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
 
 	// copy containers from b to a all at once
 	// expanding underlying data slice and keys subslice once
-	bkToBc := map[uint64][]uint16{}
 	sizeContainers := 0
 	newKeys := 0
+	bKeys := []uint64{}
+	bContainers := [][]uint16{}
 
 	for ai < an && bi < bn {
 		ak := a.keys.key(ai)
@@ -424,32 +426,50 @@ func orContainersInRange(a, b *Bitmap, bi, bn int, buf []uint16) {
 			off := b.keys.val(bi)
 			bc := b.getContainer(off)
 			if getCardinality(bc) > 0 {
-				bkToBc[bk] = bc
+				bKeys = append(bKeys, bk)
+				bContainers = append(bContainers, bc)
 				sizeContainers += len(bc)
 				newKeys++
 			}
 			bi++
 		}
 	}
-	for ; bi < bn; bi++ {
-		off := b.keys.val(bi)
-		bc := b.getContainer(off)
-		if getCardinality(bc) > 0 {
-			bk := b.keys.key(bi)
-			bkToBc[bk] = bc
-			sizeContainers += len(bc)
-			newKeys++
+
+	// extend bKeys and bContainers to fit all remaining data
+	// (once instead of multiple times by calling append)
+	if diff := bn - bi; diff > 0 {
+		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
+			bKeysCopy := make([]uint64, ln, ln+diff)
+			copy(bKeysCopy, bKeys)
+			bKeys = bKeysCopy
+		}
+		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
+			bContainersCopy := make([][]uint16, ln, ln+diff)
+			copy(bContainersCopy, bContainers)
+			bContainers = bContainersCopy
+		}
+
+		for ; bi < bn; bi++ {
+			off := b.keys.val(bi)
+			bc := b.getContainer(off)
+			if getCardinality(bc) > 0 {
+				bk := b.keys.key(bi)
+				bKeys = append(bKeys, bk)
+				bContainers = append(bContainers, bc)
+				sizeContainers += len(bc)
+				newKeys++
+			}
 		}
 	}
 
 	if sizeContainers > 0 {
 		a.expandConditionally(newKeys, sizeContainers)
 
-		for bk, bc := range bkToBc {
+		for i, bc := range bContainers {
 			// create a new container and update the key offset to this container.
 			offset := a.newContainerNoClr(uint16(len(bc)))
 			copy(a.data[offset:], bc)
-			a.setKey(bk, offset)
+			a.setKey(bKeys[i], offset)
 		}
 	}
 }
@@ -473,45 +493,46 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
 
 	if concurrency <= 1 {
-		buf := make([]uint16, maxContainerSize)
-		orContainersInRange(ra, bm, 0, numContainers, buf)
+		orContainersInRange(ra, bm, 0, numContainers)
 		return ra
 	}
 
 	var totalNewKeys int
 	var totalSizeContainers int
-	var allKeys []uint64
-	var allContainers [][]uint16
+	allKeys := make([][]uint64, concurrency)
+	allContainers := make([][][]uint16, concurrency)
 	lock := new(sync.Mutex)
-	inlineVsMutateLock := new(sync.RWMutex)
-	callback := func(bi, bj, _ int) {
-		buf := make([]uint16, maxContainerSize)
-		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, buf, inlineVsMutateLock)
+	callback := func(bi, bj, i int) {
+		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj)
 
 		lock.Lock()
 		totalNewKeys += newKeys
 		totalSizeContainers += sizeContainers
-		allKeys = append(allKeys, keys...)
-		allContainers = append(allContainers, containers...)
 		lock.Unlock()
+		allKeys[i] = keys
+		allContainers[i] = containers
 	}
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	if totalSizeContainers > 0 {
 		ra.expandConditionally(totalNewKeys, totalSizeContainers)
 
-		for i, container := range allContainers {
-			// create a new container and update the key offset to this container.
-			offset := ra.newContainerNoClr(uint16(len(container)))
-			copy(ra.data[offset:], container)
-			ra.setKey(allKeys[i], offset)
+		for i, containers := range allContainers {
+			for j, container := range containers {
+				// create a new container and update the key offset to this container.
+				offset := ra.newContainerNoClr(uint16(len(container)))
+				copy(ra.data[offset:], container)
+				ra.setKey(allKeys[i][j], offset)
+			}
 		}
 	}
 
 	return ra
 }
 
-func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMutateLock *sync.RWMutex,
+func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 ) (newKeys, sizeContainers int, bKeys []uint64, bContainers [][]uint16) {
+	buf := make([]uint16, maxContainerSize)
+
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
@@ -527,35 +548,17 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMut
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
-			inlineVsMutateLock.RLock()
 			off := a.keys.val(ai)
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
 			c := containerOrAlt(ac, bc, buf, runInline)
-			inlineVsMutateLock.RUnlock()
-
-			if len(c) > 0 {
-				inlineVsMutateLock.Lock()
-				// Since buffer is used in containers merge, result container has to be copied
-				// to the bitmap immediately to let buffer be reused in next merge,
-				// contrary to unique containers from bitmap b copied at the end of method execution
-
-				// Replacing previous container with merged one, that requires moving data
-				// to the right to make enough space for merged container is slower
-				// than appending bitmap with entirely new container and "forgetting" old one
-				// for large bitmaps, so it is performed only on small ones
-				if an > 10 {
-					// create a new container and update the key off to this container.
-					off = a.newContainerNoClr(uint16(len(c)))
-					copy(a.data[off:], c)
-				} else {
-					// make room for container, replacing smaller one and update key offset to new container.
-					off = a.keys.val(ai)
-					a.insertAt(off, c)
-				}
-				a.setKey(ak, off)
-				inlineVsMutateLock.Unlock()
+			if clen := len(c); clen > 0 {
+				cc := make([]uint16, clen)
+				copy(cc, c)
+				bKeys = append(bKeys, bk)
+				bContainers = append(bContainers, cc)
+				sizeContainers += clen
 			}
 			ai++
 			bi++
@@ -573,15 +576,31 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int, buf []uint16, inlineVsMut
 			bi++
 		}
 	}
-	for ; bi < bn; bi++ {
-		off := b.keys.val(bi)
-		bc := b.getContainer(off)
-		if getCardinality(bc) > 0 {
-			bk := b.keys.key(bi)
-			bKeys = append(bKeys, bk)
-			bContainers = append(bContainers, bc)
-			sizeContainers += len(bc)
-			newKeys++
+
+	// extend bKeys and bContainers to fit all remaining data
+	// (once instead of multiple times by calling append)
+	if diff := bn - bi; diff > 0 {
+		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
+			bKeysCopy := make([]uint64, ln, ln+diff)
+			copy(bKeysCopy, bKeys)
+			bKeys = bKeysCopy
+		}
+		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
+			bContainersCopy := make([][]uint16, ln, ln+diff)
+			copy(bContainersCopy, bContainers)
+			bContainers = bContainersCopy
+		}
+
+		for ; bi < bn; bi++ {
+			off := b.keys.val(bi)
+			bc := b.getContainer(off)
+			if getCardinality(bc) > 0 {
+				bk := b.keys.key(bi)
+				bKeys = append(bKeys, bk)
+				bContainers = append(bContainers, bc)
+				sizeContainers += len(bc)
+				newKeys++
+			}
 		}
 	}
 
