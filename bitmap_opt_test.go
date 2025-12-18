@@ -944,7 +944,7 @@ func TestLenBytes(t *testing.T) {
 		for _, x := range []int{1, 1 + maxCardinality, 1 + maxCardinality*2} {
 			bm.Set(uint64(x))
 
-			require.Equal(t, len(bm.ToBuffer()), bm.LenInBytes())
+			require.Equal(t, len(bm.ToBuffer()), bm.LenSerializedInBytes())
 		}
 	})
 
@@ -952,13 +952,13 @@ func TestLenBytes(t *testing.T) {
 		bm := NewBitmap()
 
 		// real length is greater then 0, though ToBuffer() returns empty slice
-		require.Less(t, 0, bm.LenInBytes())
+		require.Equal(t, 0, bm.LenSerializedInBytes())
 	})
 
 	t.Run("nil bitmap", func(t *testing.T) {
 		var bm *Bitmap
 
-		require.Equal(t, 0, bm.LenInBytes())
+		require.Equal(t, 0, bm.LenSerializedInBytes())
 	})
 }
 

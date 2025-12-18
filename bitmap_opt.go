@@ -689,6 +689,20 @@ func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
 	}
 }
 
+func (ra *Bitmap) LenSerializedInBytes() int {
+	if ra == nil {
+		return 0
+	}
+	if ra.IsEmpty() {
+		return 0
+	}
+	card := ra.GetCardinality()
+	if card <= serializeAsIntThreshold {
+		return card * 8
+	}
+	return len(ra.data) * 2
+}
+
 func (ra *Bitmap) LenInBytes() int {
 	if ra == nil {
 		return 0
