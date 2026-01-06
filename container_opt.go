@@ -828,14 +828,15 @@ func bufAsArray(buf []uint16, lastIdx uint16) []uint16 {
 }
 
 func roundSize(size uint16) uint16 {
-	// <=64 -> 64
+	// <=X -> X	// X = minContainerSize
+	// ...
 	// <=128 -> 128
 	// <=256 -> 256
 	// <=512 -> 512
 	// <=1024 -> 1024
 	// <=2048 -> 2048
 	//  >2048 -> maxSize
-	for i := uint16(64); i <= 2048; i *= 2 {
+	for i := uint16(minContainerSize); i <= 2048; i *= 2 {
 		if size <= i {
 			return i
 		}

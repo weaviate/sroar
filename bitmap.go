@@ -334,13 +334,14 @@ func (ra *Bitmap) expandContainer(offset uint64) {
 // stepSize would return the target size. This function is used to reduce the
 // number of times expansion needs to happen for each container.
 func stepSize(n uint16) uint16 {
-	// <=64 -> 128
+	// <=X -> 2*X	// X = minContainerSize
+	// ...
 	// <=128 -> 256
 	// <=256 -> 512
 	// <=512 -> 1024
 	// <=1024 -> 2048
 	// >1024 -> maxSize (convert to bitmap)
-	for i := uint16(64); i <= 1024; i *= 2 {
+	for i := uint16(minContainerSize); i <= 1024; i *= 2 {
 		if n <= i {
 			return i * 2
 		}

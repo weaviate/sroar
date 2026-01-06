@@ -41,7 +41,7 @@ const (
 	// 2^16 will not fit in uint16.
 	startIdx uint16 = 4
 
-	minContainerSize = 64 // In Uint16.
+	minContainerSize = 16 // In Uint16.
 	// Bitmap container can contain 2^16 integers. Each integer would use one bit to represent.
 	// Given that our data is represented in []uint16s, that'd mean the size of container to store
 	// it would be divided by 16.
