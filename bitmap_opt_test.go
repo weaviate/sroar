@@ -1292,8 +1292,6 @@ func TestPrefill(t *testing.T) {
 }
 
 func TestFillUp(t *testing.T) {
-	t.Skip("adjust to new minContainerSize")
-
 	t.Run("nil bitmap, noop", func(t *testing.T) {
 		maxX := maxCardinality + 1
 		var bmNil *Bitmap
@@ -1312,7 +1310,7 @@ func TestFillUp(t *testing.T) {
 		require.Less(t, lenBytes, bmSmall.LenInBytes())
 		require.Less(t, capBytes, bmSmall.capInBytes())
 
-		// + 8 (key) + 2x 4100 container - 64 container
+		// + 8 (key) + 2x 4100 container - minContainerSize container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
 		require.Equal(t, lenBytes+addLen, bmSmall.LenInBytes())
 		require.Equal(t, capBytes+addLen, bmSmall.capInBytes())
@@ -1331,7 +1329,7 @@ func TestFillUp(t *testing.T) {
 		require.Less(t, lenBytes, bmBig.LenInBytes())
 		require.Equal(t, capBytes, bmBig.capInBytes())
 
-		// + 8 (key) + 2x 4100 container - 64 container
+		// + 8 (key) + 2x 4100 container - minContainerSize container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
 		require.Equal(t, lenBytes+addLen, bmBig.LenInBytes())
 
@@ -1409,12 +1407,19 @@ func TestFillUp(t *testing.T) {
 		})
 
 		t.Run("single elem array, no resize", func(t *testing.T) {
+			// maxFillUpOffset is the number of elements that can be added to the
+			// initial container without expanding it: minContainerSize minus the
+			// 4-word header minus the 1 element already present.
+			maxFillUpOffset := int(minContainerSize-startIdx) - 1
+
 			for _, currentMaxX := range []int{
 				1023, 1024, 1025, 1039, 1040, 1041,
 			} {
-				for _, fillUpX := range []int{
-					1055, 1056, 1057, 1082,
+				for _, fillUpOffset := range []int{
+					3, maxFillUpOffset/2 + 1, maxFillUpOffset - 1, maxFillUpOffset,
 				} {
+					fillUpX := currentMaxX + fillUpOffset
+
 					t.Run(fmt.Sprintf("filled 1x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
 						singleElem := NewBitmap()
 						singleElem.Set(uint64(currentMaxX))
@@ -1434,8 +1439,8 @@ func TestFillUp(t *testing.T) {
 						lenBytes := singleElem.LenInBytes()
 						capBytes := singleElem.capInBytes()
 
-						singleElem.FillUp(uint64(fillUpX) - 10)
-						singleElem.FillUp(uint64(fillUpX) - 5)
+						singleElem.FillUp(uint64(currentMaxX) + uint64(fillUpOffset)/3)
+						singleElem.FillUp(uint64(currentMaxX) + uint64(fillUpOffset)*2/3)
 						singleElem.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, singleElem.LenInBytes())
 						require.Equal(t, capBytes, singleElem.capInBytes())
@@ -1741,7 +1746,7 @@ func TestFillUp(t *testing.T) {
 				fnExp3xAddCap func(prevCap int) (newCap int)
 			}{
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1749,7 +1754,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1022,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1757,7 +1762,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1023,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1765,7 +1770,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1024,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1773,7 +1778,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3*maxCardinality - 1,
 					fnExpAddLen:   plusKeysAndContainers(2, 2),
 					fnExpAddCap:   plusKeysAndContainers(2, 2),
@@ -1781,7 +1786,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3 * maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1791,7 +1796,7 @@ func TestFillUp(t *testing.T) {
 					},
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3*maxCardinality + 1,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1802,7 +1807,7 @@ func TestFillUp(t *testing.T) {
 				},
 
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1810,7 +1815,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1022,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1818,7 +1823,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1023,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1826,7 +1831,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1024,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1834,7 +1839,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3*maxCardinality - 1,
 					fnExpAddLen:   plusKeysAndContainers(2, 2),
 					fnExpAddCap:   plusKeysAndContainers(2, 2),
@@ -1842,7 +1847,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3 * maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1852,7 +1857,7 @@ func TestFillUp(t *testing.T) {
 					},
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3*maxCardinality + 1,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
