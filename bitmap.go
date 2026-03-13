@@ -413,27 +413,17 @@ func (ra *Bitmap) Set(x uint64) bool {
 	key := x & mask
 	offset, has := ra.keys.getValue(key)
 	if !has {
+		ra.expandConditionally(1, minContainerSize)
 		// We need to add a container.
 		o := ra.newContainer(minContainerSize)
 		// offset might have been updated by setKey.
 		offset = ra.setKey(key, o)
 	}
 
-	// make sure there is enough space to put new value in array container
 	c := ra.getContainer(offset)
-	if c[indexType] == typeArray && array(c).isFull() {
+	// ensure there is enough space to put new value in existing array container
+	if has && c[indexType] == typeArray && array(c).isFull() {
 		ra.expandContainer(offset)
-
-		// not sure if needed after expanding,
-		// just in case get offset and container again
-		offset, has = ra.keys.getValue(key)
-		if !has {
-			// We need to add a container.
-			o := ra.newContainer(minContainerSize)
-			// offset might have been updated by setKey.
-			offset = ra.setKey(key, o)
-		}
-
 		c = ra.getContainer(offset)
 	}
 

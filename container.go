@@ -49,8 +49,6 @@ const (
 	maxContainerSize = 4 + (1<<16)/16
 )
 
-func dataAt(data []uint16, i int) uint16 { return data[int(startIdx)+i] }
-
 func incrCardinality(data []uint16) {
 	cur := getCardinality(data)
 	if cur+1 > math.MaxUint16 {
