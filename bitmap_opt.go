@@ -1176,3 +1176,72 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 	ra.keys.setNodeSize(newSizeKeys)
 	ra.keys.addToAllVals(uint64(sizeKeys))
 }
+
+// Masked applies the given mask to every key and returns a new bitmap.
+// Keys that collapse to the same masked value have their containers merged
+// via container-level OR operations.
+func (ra *Bitmap) Masked(mask uint64) *Bitmap {
+	return ra.maskedInto(mask, NewBitmap())
+}
+
+// MaskedToBuf is like Masked but uses the provided byte slice as the
+// underlying buffer for the result bitmap, avoiding heap allocation when
+// the buffer is large enough.
+func (ra *Bitmap) MaskedToBuf(mask uint64, buf []byte) *Bitmap {
+	return ra.maskedInto(mask, NewBitmapToBuf(buf))
+}
+
+func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
+	if ra == nil {
+		return b
+	}
+	an := ra.keys.numKeys()
+	if an == 0 {
+		return b
+	}
+
+	// Ensure the mask has its lowest 16 bits unset, since keys always do.
+	mask &= 0xFFFFFFFFFFFF0000
+
+	// Pre-size key space so that expandConditionally calls inside the loop
+	// don't need to repeatedly move container data to make room for keys.
+	b.expandConditionally(an, 0)
+
+	buf := make([]uint16, maxContainerSize)
+	for ai := 0; ai < an; ai++ {
+		ak := ra.keys.key(ai)
+		aoff := ra.keys.val(ai)
+		ac := ra.getContainer(aoff)
+
+		if getCardinality(ac) == 0 {
+			continue
+		}
+
+		maskedKey := ak & mask
+
+		boff, has := b.keys.getValue(maskedKey)
+		if !has {
+			// First container for this masked key — copy it directly.
+			b.expandConditionally(0, len(ac))
+			boff = b.newContainerNoClr(uint16(len(ac)))
+			copy(b.data[boff:], ac)
+			b.setKey(maskedKey, boff)
+		} else {
+			// Merge with the existing container via OR.
+			bc := b.getContainer(boff)
+			if c := containerOrAlt(bc, ac, buf, runInline); len(c) > 0 {
+				// Inline failed (container grew). If the old container
+				// is at the end of b.data, trim and regrow in place to
+				// avoid dead space. Otherwise append (dead space).
+				if boff+uint64(len(bc)) == uint64(len(b.data)) {
+					b.data = b.data[:boff]
+				}
+				b.expandConditionally(0, len(c))
+				boff = b.newContainerNoClr(uint16(len(c)))
+				copy(b.data[boff:], c)
+				b.setKey(maskedKey, boff)
+			}
+		}
+	}
+	return b
+}
