@@ -30,6 +30,135 @@ func TestModify(t *testing.T) {
 	}
 }
 
+func TestNewBitmapToBuf(t *testing.T) {
+	t.Run("basic set and contains", func(t *testing.T) {
+		buf := make([]byte, 4096)
+		bm := NewBitmapToBuf(buf)
+
+		bm.Set(1)
+		bm.Set(100)
+		bm.Set(1000)
+
+		require.Equal(t, 3, bm.GetCardinality())
+		require.True(t, bm.Contains(1))
+		require.True(t, bm.Contains(100))
+		require.True(t, bm.Contains(1000))
+	})
+
+	t.Run("uses provided buffer memory", func(t *testing.T) {
+		buf := make([]byte, 4096)
+		bm := NewBitmapToBuf(buf)
+		bm.Set(42)
+
+		// The bitmap's data should be backed by buf: the buffer
+		// should no longer be all zeros after a Set.
+		allZero := true
+		for _, b := range buf {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		require.False(t, allZero)
+	})
+
+	t.Run("panics on too small buffer", func(t *testing.T) {
+		buf := make([]byte, 10)
+		require.Panics(t, func() {
+			NewBitmapToBuf(buf)
+		})
+	})
+
+	t.Run("odd length buffer is truncated", func(t *testing.T) {
+		buf := make([]byte, 4097) // odd
+		bm := NewBitmapToBuf(buf)
+		bm.Set(7)
+		require.True(t, bm.Contains(7))
+	})
+
+	t.Run("behaves like NewBitmap", func(t *testing.T) {
+		buf := make([]byte, 1<<20) // 1MB
+		bm1 := NewBitmapToBuf(buf)
+		bm2 := NewBitmap()
+
+		for i := uint64(0); i < 5000; i++ {
+			bm1.Set(i)
+			bm2.Set(i)
+		}
+
+		require.Equal(t, bm2.GetCardinality(), bm1.GetCardinality())
+		for _, v := range bm2.ToArray() {
+			require.True(t, bm1.Contains(v))
+		}
+	})
+
+	t.Run("no allocation when buffer is large enough for many containers", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Insert values across many different containers.
+		// Each unique high-48-bit key creates a new container.
+		// Spread values across 100 containers.
+		for container := uint64(0); container < 100; container++ {
+			key := container << 16
+			for v := uint64(0); v < 100; v++ {
+				bm.Set(key | v)
+			}
+		}
+
+		require.Equal(t, 10000, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("no allocation as keys expand", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Force many key expansions by creating many distinct containers.
+		// Initial key space holds 2 keys; this forces multiple doublings.
+		for container := uint64(0); container < 200; container++ {
+			bm.Set(container << 16)
+		}
+
+		require.Equal(t, 200, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("no allocation with bitmap containers", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Fill a single container past the array→bitmap conversion threshold
+		// (4096+ elements triggers bitmap container, which is 4100 uint16s).
+		for v := uint64(0); v < 5000; v++ {
+			bm.Set(v)
+		}
+
+		require.Equal(t, 5000, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("length grows but capacity stays", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		initialLenInBytes := bm.LenInBytes()
+
+		for container := uint64(0); container < 50; container++ {
+			bm.Set(container << 16)
+		}
+
+		require.Greater(t, bm.LenInBytes(), initialLenInBytes, "length should grow as containers are added")
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+}
+
 func TestContainer(t *testing.T) {
 	ra := NewBitmap()
 
