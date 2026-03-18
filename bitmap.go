@@ -433,7 +433,14 @@ func (ra *Bitmap) IsEmpty() bool {
 }
 
 func (ra *Bitmap) Set(x uint64) bool {
-	key := x & mask
+	return ra.SetDim(x, 0)
+}
+
+// SetDim adds x to the bitmap under the given dimension. The key is formed
+// from the upper 48 bits of x combined with dim in the lowest 16 bits,
+// enabling storage of 80-bit values (64-bit x + 16-bit dim).
+func (ra *Bitmap) SetDim(x uint64, dim uint16) bool {
+	key := x&mask | uint64(dim)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		ra.expandConditionally(1, minContainerSize)
@@ -462,6 +469,12 @@ func (ra *Bitmap) Set(x uint64) bool {
 }
 
 func FromSortedList(vals []uint64) *Bitmap {
+	return FromSortedListDim(vals, 0)
+}
+
+// FromSortedListDim creates a bitmap from a sorted list of values, all
+// stored under the given dimension.
+func FromSortedListDim(vals []uint64, dim uint16) *Bitmap {
 	var arr []uint16
 	var hi, lastHi, off uint64
 
@@ -508,8 +521,7 @@ func FromSortedList(vals []uint64) *Bitmap {
 				bitmap(c).add(v)
 			}
 		}
-		ra.setKey(key, off)
-		return
+		ra.setKey(key+uint64(dim), off)
 	}
 
 	lastHi = 0
@@ -561,10 +573,15 @@ func (ra *Bitmap) Select(x uint64) (uint64, error) {
 }
 
 func (ra *Bitmap) Contains(x uint64) bool {
+	return ra.ContainsDim(x, 0)
+}
+
+// ContainsDim reports whether x is present in the bitmap under the given dimension.
+func (ra *Bitmap) ContainsDim(x uint64, dim uint16) bool {
 	if ra == nil {
 		return false
 	}
-	key := x & mask
+	key := x&mask | uint64(dim)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		return false
@@ -584,10 +601,15 @@ func (ra *Bitmap) Contains(x uint64) bool {
 }
 
 func (ra *Bitmap) Remove(x uint64) bool {
+	return ra.RemoveDim(x, 0)
+}
+
+// RemoveDim removes x from the bitmap under the given dimension.
+func (ra *Bitmap) RemoveDim(x uint64, dim uint16) bool {
 	if ra == nil {
 		return false
 	}
-	key := x & mask
+	key := x&mask | uint64(dim)
 	offset, has := ra.keys.getValue(key)
 	if !has {
 		return false
@@ -606,6 +628,11 @@ func (ra *Bitmap) Remove(x uint64) bool {
 
 // Remove range removes [lo, hi) from the bitmap.
 func (ra *Bitmap) RemoveRange(lo, hi uint64) {
+	ra.RemoveRangeDim(lo, hi, 0)
+}
+
+// RemoveRangeDim removes all values in [lo, hi) from the bitmap under the given dimension.
+func (ra *Bitmap) RemoveRangeDim(lo, hi uint64, dim uint16) {
 	if lo > hi {
 		panic("lo should not be more than hi")
 	}
@@ -613,8 +640,8 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 		return
 	}
 
-	k1 := lo & mask
-	k2 := hi & mask
+	k1 := lo&mask | uint64(dim)
+	k2 := hi&mask | uint64(dim)
 
 	defer ra.Cleanup()
 
@@ -637,6 +664,9 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 
 	for i := st; i < n; i++ {
 		key := ra.keys.key(i)
+		if uint16(key) != dim {
+			continue
+		}
 		if key >= k2 {
 			break
 		}
@@ -689,12 +719,21 @@ func (ra *Bitmap) ZeroOut() {
 }
 
 func (ra *Bitmap) GetCardinality() int {
+	return ra.GetCardinalityDim(0)
+}
+
+// GetCardinalityDim returns the number of values stored under the given dimension.
+func (ra *Bitmap) GetCardinalityDim(dim uint16) int {
 	if ra == nil {
 		return 0
 	}
 	N := ra.keys.numKeys()
 	var sz int
 	for i := 0; i < N; i++ {
+		key := ra.keys.key(i)
+		if uint16(key) != dim {
+			continue
+		}
 		offset := ra.keys.val(i)
 		c := ra.getContainer(offset)
 		sz += getCardinality(c)
@@ -703,16 +742,25 @@ func (ra *Bitmap) GetCardinality() int {
 }
 
 func (ra *Bitmap) ToArray() []uint64 {
+	return ra.ToArrayDim(0)
+}
+
+// ToArrayDim returns all values stored under the given dimension as a sorted slice.
+func (ra *Bitmap) ToArrayDim(dim uint16) []uint64 {
 	if ra == nil {
 		return nil
 	}
-	res := make([]uint64, 0, ra.GetCardinality())
+	res := make([]uint64, 0, ra.GetCardinalityDim(dim))
 	N := ra.keys.numKeys()
 	for i := 0; i < N; i++ {
 		key := ra.keys.key(i)
+		if uint16(key) != dim {
+			continue
+		}
 		off := ra.keys.val(i)
 		c := ra.getContainer(off)
 
+		key = key & mask
 		switch c[indexType] {
 		case typeArray:
 			a := array(c)
@@ -1385,4 +1433,47 @@ func (bm *Bitmap) Split(externalSize func(start, end uint64) uint64, maxSz uint6
 	}
 
 	return splits
+}
+
+// MergeDims merges containers across all dimensions, returning a new bitmap
+// where keys that share the same upper 48 bits (differing only in the dim
+// bits 0-15) have their containers OR-merged.
+func (ra *Bitmap) MergeDims() *Bitmap {
+	return ra.maskedInto(0xFFFFFFFFFFFF0000, NewBitmap())
+}
+
+// ToMapDims returns a map from each 64-bit value to the list of dimensions
+// in which it is stored.
+func (ra *Bitmap) ToMapDims() map[uint64][]uint16 {
+	if ra == nil {
+		return nil
+	}
+
+	res := map[uint64][]uint16{}
+	N := ra.keys.numKeys()
+	for i := 0; i < N; i++ {
+		k := ra.keys.key(i)
+		off := ra.keys.val(i)
+		c := ra.getContainer(off)
+		if getCardinality(c) == 0 {
+			continue
+		}
+
+		key := k & mask
+		dim := uint16(k)
+		var all []uint16
+
+		switch c[indexType] {
+		case typeArray:
+			all = array(c).all()
+		case typeBitmap:
+			all = bitmap(c).all()
+		}
+
+		for _, val := range all {
+			x := key | uint64(val)
+			res[x] = append(res[x], dim)
+		}
+	}
+	return res
 }

@@ -141,7 +141,7 @@ func (n node) compact(lo uint64) int {
 
 // getValue returns the value corresponding to the key if found.
 func (n node) getValue(k uint64) (uint64, bool) {
-	k &= mask // Ensure k has its lowest bits unset.
+	// k &= mask // Ensure k has its lowest bits unset.
 	idx := n.search(k)
 	// key is not found
 	if idx >= n.numKeys() {

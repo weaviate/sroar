@@ -25,6 +25,7 @@ type Iterator struct {
 
 	keys   []uint64
 	keyIdx int
+	dim    uint16
 
 	contIdx int
 
@@ -54,58 +55,78 @@ func (bm *Bitmap) NewRangeIterators(numRanges int) []*Iterator {
 }
 
 func (bm *Bitmap) NewIterator() *Iterator {
+	return bm.NewIteratorDim(0)
+}
+
+// NewIteratorDim returns an iterator that yields only the values stored under the given dimension.
+// In a dim-aware bitmap each value is keyed by (value & mask) | uint64(dim), so iterators for
+// different dimensions are independent and return the same logical values in ascending order.
+// Call Next() repeatedly until it returns 0, which signals exhaustion.
+// Use NewIterator() to iterate over dim 0.
+func (bm *Bitmap) NewIteratorDim(dim uint16) *Iterator {
 	return &Iterator{
 		bm:        bm,
 		keys:      bm.keys[indexNodeStart : indexNodeStart+bm.keys.numKeys()*2],
 		keyIdx:    0,
+		dim:       dim,
 		contIdx:   -1,
 		bitmapIdx: -1,
 	}
 }
 
+// advanceToDim advances keyIdx until it finds a key matching it.dim.
+// Returns false if no such key exists.
+func (it *Iterator) advanceToDim() bool {
+	for uint16(it.keys[it.keyIdx]) != it.dim {
+		if it.keyIdx+2 >= len(it.keys) {
+			return false
+		}
+		// jump by 2 because key is followed by a value
+		it.keyIdx += 2
+	}
+	return true
+}
+
 func (it *Iterator) Next() uint64 {
-	if len(it.keys) == 0 {
+	if len(it.keys) == 0 || !it.advanceToDim() {
 		return 0
 	}
 
-	key := it.keys[it.keyIdx]
 	off := it.keys[it.keyIdx+1]
 	cont := it.bm.getContainer(off)
 	card := getCardinality(cont)
 
-	// Loop until we find a container on which next operation is possible. When such a container
-	// is found, reset the variables responsible for container iteration.
+	// Advance past empty or exhausted containers.
 	for card == 0 || it.contIdx+1 >= card {
 		if it.keyIdx+2 >= len(it.keys) {
 			return 0
 		}
-		// jump by 2 because key is followed by a value
 		it.keyIdx += 2
 		it.contIdx = -1
 		it.bitmapIdx = -1
 		it.bitset = 0
-		key = it.keys[it.keyIdx]
+		if !it.advanceToDim() {
+			return 0
+		}
 		off = it.keys[it.keyIdx+1]
 		cont = it.bm.getContainer(off)
 		card = getCardinality(cont)
 	}
 
-	//  The above loop assures that we can do next in this container.
+	key := it.keys[it.keyIdx] & mask
 	it.contIdx++
 	switch cont[indexType] {
 	case typeArray:
 		return key | uint64(cont[int(startIdx)+it.contIdx])
 	case typeBitmap:
-		// A bitmap container is an array of uint16s.
-		// If the container is bitmap, go to the index which has a non-zero value.
+		// A bitmap container is an array of uint16s; advance to the next non-zero word.
 		for it.bitset == 0 && it.bitmapIdx+1 < len(cont[startIdx:]) {
 			it.bitmapIdx++
 			it.bitset = cont[int(startIdx)+it.bitmapIdx]
 		}
 		assert(it.bitset > 0)
 
-		// msbIdx is the index of most-significant bit. In this iteration we choose this set bit
-		// and make it zero.
+		// Pick the most-significant set bit, then clear it.
 		msbIdx := uint16(bits.LeadingZeros16(it.bitset))
 		msb := 1 << (16 - msbIdx - 1)
 		it.bitset ^= uint16(msb)

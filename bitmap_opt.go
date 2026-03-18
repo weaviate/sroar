@@ -1115,14 +1115,16 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 // Masked applies the given mask to every key and returns a new bitmap.
 // Keys that collapse to the same masked value have their containers merged
-// via container-level OR operations.
+// via container-level OR operations. The lowest 16 bits of keys (used for
+// dimensions in Dim-aware bitmaps) are always zeroed, collapsing all
+// dimensions implicitly.
 func (ra *Bitmap) Masked(mask uint64) *Bitmap {
 	return ra.maskedInto(mask, NewBitmap())
 }
 
 // MaskedToBuf is like Masked but uses the provided byte slice as the
 // underlying buffer for the result bitmap, avoiding heap allocation when
-// the buffer is large enough.
+// the buffer is large enough. The lowest 16 bits of keys are always zeroed.
 func (ra *Bitmap) MaskedToBuf(mask uint64, buf []byte) *Bitmap {
 	return ra.maskedInto(mask, NewBitmapToBuf(buf))
 }
