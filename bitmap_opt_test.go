@@ -3317,3 +3317,54 @@ func TestAndMaskedConc(t *testing.T) {
 		}
 	})
 }
+
+// TestAndMaskedDimAware confirms that AndMasked and AndMaskedConc correctly
+// handle dim-aware ra bitmaps (keys with non-zero low 16 bits).
+//
+// Bug: andMaskedContainersInRange calls maskedEntriesFor(entries, ak, from)
+// where entries have maskedKey = bk & 0xFFFFFFFFFFFF0000 (low bits zeroed)
+// but ak is a dim-aware key with non-zero low bits. The exact match can never
+// succeed, so all ra containers are silently zeroed regardless of b's content.
+func TestAndMaskedDimAware(t *testing.T) {
+	// ra has a single value stored under dim=1.
+	// b has the same value stored under dim=0 (plain Set).
+	// Under mask=0xFFFFFFFFFFFF0000 the two keys collapse to the same masked
+	// key, so the AND should leave ra's container intact (value present in both).
+	const (
+		val  = uint64(0x00010001) // upper 48 bits = 0x00010000, lower 16 = 0x0001
+		dim  = uint16(1)
+		mask = uint64(0xFFFFFFFFFFFF0000)
+	)
+
+	t.Run("AndMasked: dim-aware ra is not zeroed when b has matching value", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.SetDim(val, dim) // key = 0x00010001, container value = 0x0001
+
+		b := NewBitmap()
+		b.Set(val) // key = 0x00010000, container value = 0x0001
+
+		ra.AndMasked(b, mask)
+
+		// ra key 0x00010001 masked = 0x00010000
+		// b  key 0x00010000 masked = 0x00010000  → match → container survives AND
+		require.Equal(t, 1, ra.GetCardinalityDim(dim),
+			"dim=1 container should survive: b has a matching value under the mask")
+		require.True(t, ra.ContainsDim(val, dim),
+			"value should still be present in dim=1 after AndMasked")
+	})
+
+	t.Run("AndMaskedConc: dim-aware ra is not zeroed when b has matching value", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.SetDim(val, dim)
+
+		b := NewBitmap()
+		b.Set(val)
+
+		ra.AndMaskedConc(b, mask, 0)
+
+		require.Equal(t, 1, ra.GetCardinalityDim(dim),
+			"dim=1 container should survive: b has a matching value under the mask")
+		require.True(t, ra.ContainsDim(val, dim),
+			"value should still be present in dim=1 after AndMaskedConc")
+	})
+}

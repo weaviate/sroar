@@ -1179,14 +1179,16 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 // Masked applies the given mask to every key and returns a new bitmap.
 // Keys that collapse to the same masked value have their containers merged
-// via container-level OR operations.
+// via container-level OR operations. The lowest 16 bits of keys (used for
+// dimensions in Dim-aware bitmaps) are always zeroed, collapsing all
+// dimensions implicitly.
 func (ra *Bitmap) Masked(mask uint64) *Bitmap {
 	return ra.maskedInto(mask, NewBitmap())
 }
 
 // MaskedToBuf is like Masked but uses the provided byte slice as the
 // underlying buffer for the result bitmap, avoiding heap allocation when
-// the buffer is large enough.
+// the buffer is large enough. The lowest 16 bits of keys are always zeroed.
 func (ra *Bitmap) MaskedToBuf(mask uint64, buf []byte) *Bitmap {
 	return ra.maskedInto(mask, NewBitmapToBuf(buf))
 }
@@ -1380,9 +1382,12 @@ func maskedEntriesFor(entries []maskedEntry, key uint64, from int) ([]maskedEntr
 // AndMasked is equivalent to ra.And(b.Masked(mask)) but avoids allocating
 // an intermediate masked bitmap. b is not modified.
 //
-// For each key k in ra, AndMasked finds all keys k' in b where k'&mask == k,
-// ORs their containers together, then ANDs the result into ra's container at k.
-// If no key in b maps to k under the mask, ra's container at k is zeroed out.
+// For each key k in ra with dim=0 (low 16 bits == 0), AndMasked finds all
+// keys k' in b where k'&mask == k, ORs their containers together, then ANDs
+// the result into ra's container at k. If no key in b maps to k under the
+// mask, ra's container at k is zeroed out.
+// Containers in ra whose key has a non-zero dimension (low 16 bits != 0) are
+// left untouched — they are neither ANDed nor zeroed.
 // The lowest 16 bits of the mask are always ignored.
 func (ra *Bitmap) AndMasked(b *Bitmap, mask uint64) *Bitmap {
 	if b.IsEmpty() {
@@ -1397,6 +1402,8 @@ func (ra *Bitmap) AndMasked(b *Bitmap, mask uint64) *Bitmap {
 }
 
 // AndMaskedConc is like AndMasked but processes ra's containers concurrently.
+// Containers in ra with a non-zero dimension (low 16 bits != 0) are left
+// untouched — they are neither ANDed nor zeroed. See AndMasked for details.
 // Concurrency is calculated based on number of internal containers in ra, so
 // that each goroutine handles at least [minContainersPerRoutine] containers.
 // maxConcurrency limits concurrency calculated internally.
@@ -1442,6 +1449,12 @@ func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int
 
 	for ; ai < aj; ai++ {
 		ak := ra.keys.key(ai)
+		if uint16(ak) != 0 {
+			// Non-zero dimension — leave container untouched and do not
+			// advance from, preserving the monotonic scan invariant for
+			// the dim=0 keys that follow.
+			continue
+		}
 		ac := ra.getContainer(ra.keys.val(ai))
 
 		var group []maskedEntry

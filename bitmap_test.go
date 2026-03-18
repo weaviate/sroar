@@ -1649,3 +1649,353 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
 	})
 }
+
+func TestRemoveDim(t *testing.T) {
+	dims := uint16(3)
+	a := NewBitmap()
+	N := int(1e7)
+
+	for dim := uint16(0); dim < dims; dim++ {
+		for i := 0; i < N; i++ {
+			a.SetDim(uint64(i), dim)
+		}
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		require.Equal(t, N, a.GetCardinalityDim(dim))
+		for i := 0; i < N/2; i++ {
+			require.True(t, a.RemoveDim(uint64(i), dim))
+		}
+		require.Equal(t, N/2, a.GetCardinalityDim(dim))
+	}
+
+	// Remove non-existent elements should be no-op
+	for dim := uint16(0); dim < dims; dim++ {
+		for i := 0; i < N/2; i++ {
+			require.False(t, a.RemoveDim(uint64(i), dim))
+		}
+		require.Equal(t, N/2, a.GetCardinalityDim(dim))
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		for i := 0; i < N/2; i++ {
+			require.True(t, a.RemoveDim(uint64(i+N/2), dim))
+		}
+		require.Equal(t, 0, a.GetCardinalityDim(dim))
+	}
+}
+
+func TestCardinalityDim(t *testing.T) {
+	dims := uint16(3)
+	a := NewBitmap()
+	n := 1 << 20
+
+	for dim := uint16(0); dim < dims; dim++ {
+		for i := 0; i < n; i++ {
+			a.SetDim(uint64(i), dim)
+		}
+		require.Equal(t, n, a.GetCardinalityDim(dim))
+	}
+}
+
+func TestCleanupDim(t *testing.T) {
+	dim := uint16(2)
+	a := NewBitmap()
+	n := 10
+	for i := 0; i < n; i++ {
+		a.SetDim(uint64(i*(1<<16)), dim)
+	}
+	require.Equal(t, n, a.GetCardinalityDim(dim))
+	require.Equal(t, n+1, a.keys.numKeys())
+
+	for i := 0; i < n; i++ {
+		if i%2 == 1 {
+			a.RemoveDim(uint64(i*(1<<16)), dim)
+		}
+	}
+	require.Equal(t, n/2, a.GetCardinalityDim(dim))
+	require.Equal(t, n+1, a.keys.numKeys())
+
+	a.Cleanup()
+	require.Equal(t, n/2, a.GetCardinalityDim(dim))
+	require.Equal(t, n/2+1, a.keys.numKeys())
+}
+
+func TestContainsDim(t *testing.T) {
+	bm := NewBitmap()
+	dims := uint16(4)
+	firstX := uint64(12345)
+
+	x := firstX
+	for i := uint16(0); i < 99; i++ {
+		dim := i % dims
+		bm.SetDim(x, dim)
+		x += uint64(maxCardinality) / 5
+	}
+
+	x = firstX
+	for i := uint16(0); i < 99; i++ {
+		for dim := uint16(0); dim < dims; dim++ {
+			if dim == i%dims {
+				require.True(t, bm.ContainsDim(x, dim))
+			} else {
+				require.False(t, bm.ContainsDim(x, dim))
+			}
+		}
+		x += uint64(maxCardinality) / 5
+	}
+}
+
+func TestToArrayDim(t *testing.T) {
+	bm := NewBitmap()
+	dims := uint16(4)
+	firstX := uint64(12345)
+
+	control := make([][]uint64, dims)
+	for v := range control {
+		control[v] = []uint64{}
+	}
+
+	x := firstX
+	for i := uint16(0); i < 99; i++ {
+		dim := i % dims
+		bm.SetDim(x, dim)
+		control[dim] = append(control[dim], x)
+		x += uint64(maxCardinality) / 5
+	}
+
+	for dim := range control {
+		arr := bm.ToArrayDim(uint16(dim))
+		require.ElementsMatch(t, control[dim], arr)
+	}
+}
+
+func TestRemoveRangeDim(t *testing.T) {
+	dims := uint16(3)
+	a := NewBitmap()
+	N := int(1e7)
+	for i := 0; i < N; i++ {
+		for dim := uint16(0); dim < dims; dim++ {
+			a.SetDim(uint64(i), dim)
+		}
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		a.RemoveRangeDim(0, 0, dim)
+		require.Equal(t, N, a.GetCardinalityDim(dim))
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		a.RemoveRangeDim(uint64(N/4), uint64(N/2), dim)
+		require.Equal(t, 3*N/4, a.GetCardinalityDim(dim))
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		a.RemoveRangeDim(0, uint64(N/2), dim)
+		require.Equal(t, N/2, a.GetCardinalityDim(dim))
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		a.RemoveRangeDim(uint64(N/2), uint64(N), dim)
+		require.Equal(t, 0, a.GetCardinalityDim(dim))
+		a.SetDim(uint64(N/4), dim)
+		a.SetDim(uint64(N/2), dim)
+		a.SetDim(uint64(3*N/4), dim)
+		require.Equal(t, 3, a.GetCardinalityDim(dim))
+	}
+
+	var arr []uint64
+	for i := 0; i < 123; i++ {
+		arr = append(arr, uint64(i))
+	}
+
+	for dim := uint16(0); dim < dims; dim++ {
+		b := FromSortedListDim(arr, dim)
+		b.RemoveRangeDim(50, math.MaxUint64, dim)
+		require.Equal(t, 50, b.GetCardinalityDim(dim))
+	}
+}
+
+func TestRemoveRangeDim2(t *testing.T) {
+	dims := uint16(3)
+	// High from the last container should not be removed.
+	a := NewBitmap()
+	for i := 1; i < 10; i++ {
+		for dim := uint16(0); dim < dims; dim++ {
+			a.SetDim(uint64(i*(1<<16)), dim)
+			a.SetDim(uint64(i*(1<<16))-1, dim)
+		}
+	}
+	for dim := uint16(0); dim < dims; dim++ {
+		a.RemoveRangeDim(1<<16, (4<<16)-1, dim)
+		require.True(t, a.ContainsDim((4<<16)-1, dim))
+	}
+}
+
+func TestMergeDims(t *testing.T) {
+	t.Run("original large test", func(t *testing.T) {
+		dims := uint16(3)
+		firstX := uint64(1234)
+		bm := NewBitmap()
+
+		x := firstX
+		for i := 0; i < 10000; i++ {
+			dim := uint16(i) % dims
+			bm.SetDim(x, dim)
+			x += uint64(maxCardinality) / 307
+		}
+
+		merged := bm.MergeDims()
+		it := merged.NewIterator()
+
+		x = firstX
+		for i := 0; i < 10000; i++ {
+			xx := it.Next()
+			require.Equal(t, x, xx)
+			x += uint64(maxCardinality) / 307
+		}
+	})
+
+	t.Run("no bitmap", func(t *testing.T) {
+		var bm *Bitmap
+		result := bm.MergeDims()
+		require.Equal(t, 0, result.GetCardinality())
+	})
+
+	t.Run("empty bitmap", func(t *testing.T) {
+		bm := NewBitmap()
+		result := bm.MergeDims()
+		require.Equal(t, 0, result.GetCardinality())
+	})
+
+	t.Run("single dim is identity", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.SetDim(0x0001_0000|10, 0)
+		bm.SetDim(0x0001_0000|20, 0)
+		bm.SetDim(0x0002_0000|30, 0)
+
+		result := bm.MergeDims()
+
+		require.Equal(t, 3, result.GetCardinality())
+		require.True(t, result.Contains(0x0001_0000|10))
+		require.True(t, result.Contains(0x0001_0000|20))
+		require.True(t, result.Contains(0x0002_0000|30))
+	})
+
+	t.Run("different dims same value merge", func(t *testing.T) {
+		bm := NewBitmap()
+		// Same value, different dims — should merge to one container.
+		bm.SetDim(0x0001_0000|5, 0)
+		bm.SetDim(0x0001_0000|6, 1)
+		bm.SetDim(0x0001_0000|7, 2)
+
+		result := bm.MergeDims()
+
+		require.Equal(t, 3, result.GetCardinality())
+		require.True(t, result.Contains(0x0001_0000|5))
+		require.True(t, result.Contains(0x0001_0000|6))
+		require.True(t, result.Contains(0x0001_0000|7))
+	})
+
+	t.Run("different dims overlapping values merge via OR", func(t *testing.T) {
+		bm := NewBitmap()
+		// Overlapping values across dims — OR should deduplicate.
+		bm.SetDim(0x0001_0000|10, 0)
+		bm.SetDim(0x0001_0000|10, 1) // same value, different dim
+		bm.SetDim(0x0001_0000|20, 1)
+
+		result := bm.MergeDims()
+
+		require.Equal(t, 2, result.GetCardinality())
+		require.True(t, result.Contains(0x0001_0000|10))
+		require.True(t, result.Contains(0x0001_0000|20))
+	})
+
+	t.Run("many dims collapsing", func(t *testing.T) {
+		bm := NewBitmap()
+		numDims := uint16(10)
+		numValues := uint64(100)
+
+		for dim := uint16(0); dim < numDims; dim++ {
+			for v := uint64(0); v < numValues; v++ {
+				bm.SetDim(v, dim)
+			}
+		}
+
+		result := bm.MergeDims()
+
+		require.Equal(t, int(numValues), result.GetCardinality())
+		for v := uint64(0); v < numValues; v++ {
+			require.True(t, result.Contains(v))
+		}
+	})
+
+	t.Run("does not modify original", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.SetDim(0x0001_0000|10, 0)
+		bm.SetDim(0x0001_0000|20, 1)
+
+		origCard := bm.GetCardinalityDim(0) + bm.GetCardinalityDim(1)
+		_ = bm.MergeDims()
+
+		require.Equal(t, origCard, bm.GetCardinalityDim(0)+bm.GetCardinalityDim(1))
+		require.True(t, bm.ContainsDim(0x0001_0000|10, 0))
+		require.True(t, bm.ContainsDim(0x0001_0000|20, 1))
+	})
+
+	t.Run("multiple keys multiple dims", func(t *testing.T) {
+		bm := NewBitmap()
+		// Key 0x0001_0000: dim 0 has {1,2}, dim 1 has {2,3}
+		bm.SetDim(0x0001_0000|1, 0)
+		bm.SetDim(0x0001_0000|2, 0)
+		bm.SetDim(0x0001_0000|2, 1)
+		bm.SetDim(0x0001_0000|3, 1)
+		// Key 0x0002_0000: dim 0 has {10}, dim 2 has {20}
+		bm.SetDim(0x0002_0000|10, 0)
+		bm.SetDim(0x0002_0000|20, 2)
+
+		result := bm.MergeDims()
+
+		// Key 0x0001_0000: OR of {1,2} and {2,3} = {1,2,3}
+		require.True(t, result.Contains(0x0001_0000|1))
+		require.True(t, result.Contains(0x0001_0000|2))
+		require.True(t, result.Contains(0x0001_0000|3))
+		// Key 0x0002_0000: OR of {10} and {20} = {10,20}
+		require.True(t, result.Contains(0x0002_0000|10))
+		require.True(t, result.Contains(0x0002_0000|20))
+
+		require.Equal(t, 5, result.GetCardinality())
+	})
+}
+
+func TestToMapDims(t *testing.T) {
+	bm := NewBitmap()
+
+	bm.Set(0)
+	bm.SetDim(1, 0)
+	bm.SetDim(1, 1)
+	bm.SetDim(2, 0)
+	bm.SetDim(2, 1)
+	bm.SetDim(2, 2)
+	bm.SetDim(3, 0)
+	bm.SetDim(3, 1)
+	bm.SetDim(3, 2)
+	bm.SetDim(3, 3)
+	bm.SetDim(4, 2)
+	bm.SetDim(4, 3)
+	bm.SetDim(4, 4)
+	bm.SetDim(5, 4)
+	bm.SetDim(5, 5)
+	bm.SetDim(6, 6)
+
+	mp := bm.ToMapDims()
+
+	require.Len(t, mp, 7)
+	require.ElementsMatch(t, []uint16{0}, mp[0])
+	require.ElementsMatch(t, []uint16{0, 1}, mp[1])
+	require.ElementsMatch(t, []uint16{0, 1, 2}, mp[2])
+	require.ElementsMatch(t, []uint16{0, 1, 2, 3}, mp[3])
+	require.ElementsMatch(t, []uint16{2, 3, 4}, mp[4])
+	require.ElementsMatch(t, []uint16{4, 5}, mp[5])
+	require.ElementsMatch(t, []uint16{6}, mp[6])
+}
