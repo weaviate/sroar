@@ -1245,3 +1245,86 @@ func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
 	}
 	return b
 }
+
+// MaskedAnd returns a new bitmap containing the AND of a and b, with mask
+// applied to all keys. Keys that become equal after masking have their
+// containers merged via OR. This is equivalent to Masked(And(a, b), mask)
+// but allocates only one bitmap instead of two. Neither a nor b is modified.
+// The lowest 16 bits of keys are always zeroed.
+func MaskedAnd(a, b *Bitmap, mask uint64) *Bitmap {
+	return maskedAndInto(a, b, mask, NewBitmap())
+}
+
+// MaskedAndToBuf is like MaskedAnd but uses the provided byte slice as the
+// underlying buffer for the result bitmap, avoiding heap allocation when
+// the buffer is large enough. The lowest 16 bits of keys are always zeroed.
+func MaskedAndToBuf(a, b *Bitmap, mask uint64, buf []byte) *Bitmap {
+	return maskedAndInto(a, b, mask, NewBitmapToBuf(buf))
+}
+
+func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap) *Bitmap {
+	if a.IsEmpty() || b.IsEmpty() {
+		return res
+	}
+
+	mask &= 0xFFFFFFFFFFFF0000
+
+	ai, an := 0, a.keys.numKeys()
+	bi, bn := 0, b.keys.numKeys()
+
+	// AND can produce at most min(an, bn) distinct keys before masking.
+	minKeys := min(an, bn)
+	res.expandConditionally(minKeys, 0)
+
+	// andBuf holds the AND result for one container pair.
+	// orBuf is the scratch for merging into res when masked keys collide.
+	// They must be separate since andBuf is the OR source.
+	andBuf := make([]uint16, maxContainerSize)
+	orBuf := make([]uint16, maxContainerSize)
+
+	for ai < an && bi < bn {
+		ak := a.keys.key(ai)
+		bk := b.keys.key(bi)
+
+		if ak == bk {
+			ac := a.getContainer(a.keys.val(ai))
+			bc := b.getContainer(b.keys.val(bi))
+
+			c := containerAndAlt(ac, bc, andBuf, 0)
+			if len(c) > 0 && getCardinality(c) > 0 {
+				maskedKey := ak & mask
+
+				roff, has := res.keys.getValue(maskedKey)
+				if !has {
+					// First container for this masked key — copy it directly.
+					res.expandConditionally(0, len(c))
+					roff = res.newContainerNoClr(uint16(len(c)))
+					copy(res.data[roff:], c)
+					res.setKey(maskedKey, roff)
+				} else {
+					// Merge with the existing container via OR.
+					rc := res.getContainer(roff)
+					if out := containerOrAlt(rc, c, orBuf, runInline); len(out) > 0 {
+						// Inline failed (container grew). If the old container
+						// is at the end of res.data, trim and regrow in place to
+						// avoid dead space. Otherwise append (dead space).
+						if roff+uint64(len(rc)) == uint64(len(res.data)) {
+							res.data = res.data[:roff]
+						}
+						res.expandConditionally(0, len(out))
+						roff = res.newContainerNoClr(uint16(len(out)))
+						copy(res.data[roff:], out)
+						res.setKey(maskedKey, roff)
+					}
+				}
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			ai++
+		} else {
+			bi++
+		}
+	}
+	return res
+}
