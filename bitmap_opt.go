@@ -3,6 +3,7 @@ package sroar
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 )
 
@@ -52,6 +53,157 @@ func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 
 	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), nil)
 	return ra
+}
+
+// maskedEntry pairs a bitmap container's offset with the masked value of its key.
+type maskedEntry struct{ maskedKey, offset uint64 }
+
+// buildMaskedEntries returns a sorted slice of maskedEntry for bm, with each
+// key masked by mask. The result is sorted by maskedKey for binary search.
+func buildMaskedEntries(bm *Bitmap, mask uint64) []maskedEntry {
+	n := bm.keys.numKeys()
+	entries := make([]maskedEntry, n)
+	for i := 0; i < n; i++ {
+		entries[i] = maskedEntry{
+			maskedKey: bm.keys.key(i) & mask,
+			offset:    bm.keys.val(i),
+		}
+	}
+	slices.SortFunc(entries, func(a, b maskedEntry) int {
+		if a.maskedKey < b.maskedKey {
+			return -1
+		}
+		if a.maskedKey > b.maskedKey {
+			return 1
+		}
+		return 0
+	})
+	return entries
+}
+
+// maskedEntriesFor returns the subslice of entries whose maskedKey equals key
+// and the position to pass as from on the next call, or nil if no match exists.
+// from is a hint: the caller passes back the value returned by the previous
+// call, allowing a linear scan across a sorted sequence of keys instead of a
+// binary search on every call.
+// entries must be sorted by maskedKey, and successive calls must use
+// non-decreasing key values.
+func maskedEntriesFor(entries []maskedEntry, key uint64, from int) ([]maskedEntry, int) {
+	for from < len(entries) && entries[from].maskedKey < key {
+		from++
+	}
+	if from >= len(entries) || entries[from].maskedKey != key {
+		return nil, from
+	}
+	lo := from
+	hi := lo + 1
+	for hi < len(entries) && entries[hi].maskedKey == key {
+		hi++
+	}
+	return entries[lo:hi], hi
+}
+
+// AndMasked is equivalent to ra.And(b.Masked(mask)) but avoids allocating
+// an intermediate masked bitmap. b is not modified.
+//
+// For each key k in ra, AndMasked finds all keys k' in b where k'&mask == k,
+// ORs their containers together, then ANDs the result into ra's container at k.
+// If no key in b maps to k under the mask, ra's container at k is zeroed out.
+// The lowest 16 bits of the mask are always ignored.
+func (ra *Bitmap) AndMasked(b *Bitmap, mask uint64) *Bitmap {
+	if b.IsEmpty() {
+		ra.ZeroOut()
+		return ra
+	}
+
+	mask &= 0xFFFFFFFFFFFF0000
+	entries := buildMaskedEntries(b, mask)
+	andMaskedContainersInRange(ra, b, entries, 0, ra.keys.numKeys())
+	return ra
+}
+
+// AndMaskedConc is like AndMasked but processes ra's containers concurrently.
+// Concurrency is calculated based on number of internal containers in ra, so
+// that each goroutine handles at least [minContainersPerRoutine] containers.
+// maxConcurrency limits concurrency calculated internally.
+// If maxConcurrency <= 0, then calculated concurrency is not limited.
+func (ra *Bitmap) AndMaskedConc(b *Bitmap, mask uint64, maxConcurrency int) *Bitmap {
+	if b.IsEmpty() {
+		ra.ZeroOut()
+		return ra
+	}
+
+	mask &= 0xFFFFFFFFFFFF0000
+
+	// Build entries once; goroutines only read from it.
+	entries := buildMaskedEntries(b, mask)
+
+	an := ra.keys.numKeys()
+	concurrency := calcConcurrency(an, minContainersPerRoutine, maxConcurrency)
+	callback := func(ai, aj, _ int) { andMaskedContainersInRange(ra, b, entries, ai, aj) }
+	concurrentlyInRanges(an, concurrency, callback)
+	return ra
+}
+
+func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int) {
+	// orBuf holds the accumulated OR result across the group.
+	// fallbackBuf is needed only when inline OR fails (array+array that must
+	// convert to bitmap): the result lands in fallbackBuf, which is then swapped
+	// with orBuf so subsequent iterations continue to use orBuf as the target.
+	orBuf := make([]uint16, maxContainerSize)
+	fallbackBuf := make([]uint16, maxContainerSize)
+
+	// Binary search to find the starting position in entries for this range.
+	// The two-pointer optimisation used in the sequential path is not applicable
+	// here since each goroutine starts at an arbitrary key.
+	from, _ := slices.BinarySearchFunc(entries, ra.keys.key(ai), func(e maskedEntry, k uint64) int {
+		if e.maskedKey < k {
+			return -1
+		}
+		if e.maskedKey > k {
+			return 1
+		}
+		return 0
+	})
+
+	for ; ai < aj; ai++ {
+		ak := ra.keys.key(ai)
+		ac := ra.getContainer(ra.keys.val(ai))
+
+		var group []maskedEntry
+		group, from = maskedEntriesFor(entries, ak, from)
+		if group == nil {
+			// No b key maps to ak under the mask — zero out ra's container.
+			zeroOutContainer(ac)
+			continue
+		}
+
+		// Build the OR of all b containers in the group.
+		var orResult []uint16
+		if len(group) == 1 {
+			// Single container — use directly, no OR needed.
+			orResult = b.getContainer(group[0].offset)
+		} else {
+			// Copy the first container into orBuf so we can OR into it in place.
+			copy(orBuf, b.getContainer(group[0].offset))
+			orResult = orBuf
+
+			for i := 1; i < len(group); i++ {
+				if c := containerOrAlt(orResult, b.getContainer(group[i].offset), fallbackBuf, runInline); len(c) > 0 {
+					// Inline failed (array→bitmap conversion): result is in fallbackBuf.
+					// Swap so orBuf always holds the current result.
+					orBuf, fallbackBuf = fallbackBuf, orBuf
+					orResult = c
+				}
+			}
+		}
+
+		// AND ra's container with the OR result, in place. AND can only
+		// shrink a container so inline always succeeds.
+		if c := containerAndAlt(ac, orResult, nil, runInline); len(c) > 0 {
+			panic("new container not expected in AndMasked inline mode")
+		}
+	}
 }
 
 // AndConc performs And merge concurrently.
