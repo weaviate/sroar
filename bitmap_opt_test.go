@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"fmt"
+	"math"
 	"math/bits"
 	"math/rand"
 	"slices"
@@ -2665,5 +2666,167 @@ func TestExpandConditionally(t *testing.T) {
 				})
 			}
 		})
+	})
+}
+
+func TestMaskedAnd(t *testing.T) {
+	t.Run("nil inputs", func(t *testing.T) {
+		var a, b *Bitmap
+		require.Equal(t, 0, MaskedAnd(a, b, math.MaxUint64).GetCardinality())
+		require.Equal(t, 0, MaskedAnd(NewBitmap(), b, math.MaxUint64).GetCardinality())
+		require.Equal(t, 0, MaskedAnd(a, NewBitmap(), math.MaxUint64).GetCardinality())
+	})
+
+	t.Run("empty inputs", func(t *testing.T) {
+		require.Equal(t, 0, MaskedAnd(NewBitmap(), NewBitmap(), math.MaxUint64).GetCardinality())
+	})
+
+	t.Run("no overlap produces empty result", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(0x00010000)
+		a.Set(0x00010001)
+
+		b := NewBitmap()
+		b.Set(0x00020000)
+		b.Set(0x00020001)
+
+		result := MaskedAnd(a, b, math.MaxUint64)
+		require.Equal(t, 0, result.GetCardinality())
+	})
+
+	t.Run("matches Masked(And(a,b))", func(t *testing.T) {
+		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
+
+		a := NewBitmap()
+		b := NewBitmap()
+		for pos := uint64(0); pos < 5; pos++ {
+			for v := uint64(0); v < 100; v++ {
+				a.Set(pos<<48 | v)
+				// b overlaps on even positions only
+				if pos%2 == 0 {
+					b.Set(pos<<48 | v)
+				}
+			}
+		}
+
+		for _, m := range masks {
+			expected := And(a, b).Masked(m)
+			got := MaskedAnd(a, b, m)
+
+			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "mask %#x", m)
+			for _, v := range expected.ToArray() {
+				require.True(t, got.Contains(v), "mask %#x missing %d", m, v)
+			}
+		}
+	})
+
+	t.Run("key collision after masking merges via OR", func(t *testing.T) {
+		// Two key pairs that AND to non-empty, both mapping to same masked key.
+		a := NewBitmap()
+		b := NewBitmap()
+
+		// pos=1: a has {0,1}, b has {0,1} → AND = {0,1}
+		a.Set(0x0001_0000_0000 | 0)
+		a.Set(0x0001_0000_0000 | 1)
+		b.Set(0x0001_0000_0000 | 0)
+		b.Set(0x0001_0000_0000 | 1)
+
+		// pos=2: a has {2,3}, b has {2,3} → AND = {2,3}
+		a.Set(0x0002_0000_0000 | 2)
+		a.Set(0x0002_0000_0000 | 3)
+		b.Set(0x0002_0000_0000 | 2)
+		b.Set(0x0002_0000_0000 | 3)
+
+		// mask zeroes bits 32-63 → both key pairs collapse to masked key 0
+		result := MaskedAnd(a, b, 0x00000000FFFF0000)
+
+		require.Equal(t, 4, result.GetCardinality())
+		require.True(t, result.Contains(0))
+		require.True(t, result.Contains(1))
+		require.True(t, result.Contains(2))
+		require.True(t, result.Contains(3))
+	})
+
+	t.Run("does not modify either source", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(uint64(1)<<48 | 10)
+		a.Set(uint64(2)<<48 | 20)
+
+		b := NewBitmap()
+		b.Set(uint64(1)<<48 | 10)
+		b.Set(uint64(3)<<48 | 30)
+
+		aCard := a.GetCardinality()
+		bCard := b.GetCardinality()
+		_ = MaskedAnd(a, b, 0x0000FFFFFFFFFFFF)
+
+		require.Equal(t, aCard, a.GetCardinality())
+		require.Equal(t, bCard, b.GetCardinality())
+		require.True(t, a.Contains(uint64(1)<<48|10))
+		require.True(t, a.Contains(uint64(2)<<48|20))
+		require.True(t, b.Contains(uint64(1)<<48|10))
+		require.True(t, b.Contains(uint64(3)<<48|30))
+	})
+
+	t.Run("low 16 bits of mask are ignored", func(t *testing.T) {
+		a := NewBitmap()
+		b := NewBitmap()
+		a.Set(uint64(1)<<48 | 1)
+		b.Set(uint64(1)<<48 | 1)
+
+		r1 := MaskedAnd(a, b, 0x0000FFFFFFFFFFFF)
+		r2 := MaskedAnd(a, b, 0x0000FFFFFFFFFFFF|0xFFFF)
+
+		require.Equal(t, r1.GetCardinality(), r2.GetCardinality())
+		for _, v := range r1.ToArray() {
+			require.True(t, r2.Contains(v))
+		}
+	})
+}
+
+func TestMaskedAndToBuf(t *testing.T) {
+	t.Run("nil inputs", func(t *testing.T) {
+		var a, b *Bitmap
+		result := MaskedAndToBuf(a, b, math.MaxUint64, make([]byte, 4096))
+		require.Equal(t, 0, result.GetCardinality())
+	})
+
+	t.Run("matches MaskedAnd results", func(t *testing.T) {
+		a := NewBitmap()
+		b := NewBitmap()
+		for pos := uint64(0); pos < 5; pos++ {
+			for v := uint64(0); v < 100; v++ {
+				a.Set(pos<<48 | v)
+				b.Set(pos<<48 | v)
+			}
+		}
+
+		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
+		for _, m := range masks {
+			expected := MaskedAnd(a, b, m)
+			got := MaskedAndToBuf(a, b, m, make([]byte, 1<<20))
+
+			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "mask %#x", m)
+			for _, v := range expected.ToArray() {
+				require.True(t, got.Contains(v), "mask %#x missing %d", m, v)
+			}
+		}
+	})
+
+	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
+		a := NewBitmap()
+		b := NewBitmap()
+		for pos := uint64(0); pos < 5; pos++ {
+			for v := uint64(0); v < 100; v++ {
+				a.Set(pos<<48 | v)
+				b.Set(pos<<48 | v)
+			}
+		}
+
+		bufSize := 1 << 20
+		result := MaskedAndToBuf(a, b, 0x0000FFFFFFFFFFFF, make([]byte, bufSize))
+
+		require.Greater(t, result.GetCardinality(), 0)
+		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
 	})
 }
