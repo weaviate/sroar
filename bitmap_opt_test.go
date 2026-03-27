@@ -2879,3 +2879,441 @@ func TestMaskedAndToBuf(t *testing.T) {
 		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
 	})
 }
+
+func TestAndMasked(t *testing.T) {
+	t.Run("empty b zeroes ra", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.Set(1)
+		ra.Set(2)
+		ra.AndMasked(NewBitmap(), math.MaxUint64)
+		require.Equal(t, 0, ra.GetCardinality())
+	})
+
+	t.Run("nil b zeroes ra", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.Set(1)
+		var b *Bitmap
+		ra.AndMasked(b, math.MaxUint64)
+		require.Equal(t, 0, ra.GetCardinality())
+	})
+
+	t.Run("identity mask matches ra.And(b)", func(t *testing.T) {
+		for _, mask := range []uint64{math.MaxUint64, math.MaxUint64 | 0xFFFF} {
+			ra := NewBitmap()
+			b := NewBitmap()
+			for i := uint64(0); i < 200; i++ {
+				ra.Set(i)
+				if i%2 == 0 {
+					b.Set(i)
+				}
+			}
+
+			expected := ra.Clone()
+			expected.And(b)
+
+			ra.AndMasked(b, mask)
+
+			require.Equal(t, expected.GetCardinality(), ra.GetCardinality(), "mask %#x", mask)
+			for _, v := range expected.ToArray() {
+				require.True(t, ra.Contains(v), "mask %#x missing %d", mask, v)
+			}
+		}
+	})
+
+	t.Run("matches ra.Clone().And(b.Masked(mask))", func(t *testing.T) {
+		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
+
+		b := NewBitmap()
+		for pos := uint64(0); pos < 5; pos++ {
+			for v := uint64(0); v < 100; v++ {
+				b.Set(pos<<48 | v)
+			}
+		}
+
+		for _, mask := range masks {
+			ra := NewBitmap()
+			for pos := uint64(0); pos < 3; pos++ {
+				for v := uint64(0); v < 100; v++ {
+					ra.Set(pos<<48 | v)
+				}
+			}
+
+			expected := ra.Clone()
+			expected.And(b.Masked(mask))
+
+			ra.AndMasked(b, mask)
+
+			require.Equal(t, expected.GetCardinality(), ra.GetCardinality(), "mask %#x", mask)
+			for _, v := range expected.ToArray() {
+				require.True(t, ra.Contains(v), "mask %#x missing %d", mask, v)
+			}
+		}
+	})
+
+	t.Run("zero mask collapses all b keys to zero", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.Set(0x00000000 | 1) // key 0, value 1
+		ra.Set(0x00000000 | 2) // key 0, value 2
+		ra.Set(0x00010000 | 3) // key 1, value 3 — no b key maps here under zero mask
+
+		b := NewBitmap()
+		b.Set(0x00010000 | 1) // key 1 → masked 0, value 1
+		b.Set(0x00020000 | 2) // key 2 → masked 0, value 2
+
+		// Masked(b) at key 0 = OR({1}, {2}) = {1, 2}
+		// ra[key 0] AND {1, 2} = {1, 2} AND {1, 2} = {1, 2}
+		// ra[key 1] has no match → zeroed
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 2, ra.GetCardinality())
+		require.True(t, ra.Contains(1))
+		require.True(t, ra.Contains(2))
+		require.False(t, ra.Contains(0x00010000|3))
+	})
+
+	t.Run("b not modified", func(t *testing.T) {
+		ra := NewBitmap()
+		b := NewBitmap()
+		for i := uint64(0); i < 100; i++ {
+			ra.Set(i)
+			b.Set(uint64(1)<<48 | i)
+		}
+		bCard := b.GetCardinality()
+		bValues := b.ToArray()
+
+		ra.AndMasked(b, 0x0000FFFFFFFFFFFF)
+
+		require.Equal(t, bCard, b.GetCardinality())
+		for _, v := range bValues {
+			require.True(t, b.Contains(v))
+		}
+	})
+
+	t.Run("multiple b keys OR before AND", func(t *testing.T) {
+		ra := NewBitmap()
+		// key 0: values {0, 1, 2, 3}
+		for v := uint64(0); v <= 3; v++ {
+			ra.Set(v)
+		}
+
+		b := NewBitmap()
+		// Two b keys both masked to 0: first has {1,2}, second has {3,4}
+		// OR = {1,2,3,4}; AND with ra[key 0]={0,1,2,3} = {1,2,3}
+		b.Set(0x00010000 | 1)
+		b.Set(0x00010000 | 2)
+		b.Set(0x00020000 | 3)
+		b.Set(0x00020000 | 4)
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 3, ra.GetCardinality())
+		require.True(t, ra.Contains(1))
+		require.True(t, ra.Contains(2))
+		require.True(t, ra.Contains(3))
+		require.False(t, ra.Contains(0))
+		require.False(t, ra.Contains(4))
+	})
+
+	// The next four tests target the buffer-swap logic in the OR accumulation loop.
+	// The source container (orBuf) is always exactly-sized after copying group[0],
+	// so any non-overlapping element OR'd in will not fit inline — the result
+	// lands in fallbackBuf and the two buffers are swapped.
+
+	t.Run("non-overlapping arrays: inline fails due to size, buffers swapped", func(t *testing.T) {
+		// group[0] has 50 elements → orBuf.indexSize = 54 (4 header + 50 values).
+		// group[1] adds 50 non-overlapping elements → result needs indexSize 104.
+		// 54 < 104 → inline fails, result is in fallbackBuf, swap occurs.
+		ra := NewBitmap()
+		for v := uint64(0); v < 100; v++ {
+			ra.Set(v)
+		}
+
+		b := NewBitmap()
+		for v := uint64(0); v < 50; v++ {
+			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-49
+		}
+		for v := uint64(50); v < 100; v++ {
+			b.Set(0x00020000 | v) // key 2 → masked 0, values 50-99
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 100, ra.GetCardinality())
+		for v := uint64(0); v < 100; v++ {
+			require.True(t, ra.Contains(v))
+		}
+	})
+
+	t.Run("overlapping arrays: inline succeeds, no swap", func(t *testing.T) {
+		// group[0] and group[1] have identical values → OR result cardinality
+		// equals group[0] cardinality → fits within orBuf.indexSize → no swap.
+		ra := NewBitmap()
+		for v := uint64(0); v < 50; v++ {
+			ra.Set(v)
+		}
+
+		b := NewBitmap()
+		for v := uint64(0); v < 50; v++ {
+			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-49
+		}
+		for v := uint64(0); v < 50; v++ {
+			b.Set(0x00020000 | v) // key 2 → masked 0, same values 0-49
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 50, ra.GetCardinality())
+		for v := uint64(0); v < 50; v++ {
+			require.True(t, ra.Contains(v))
+		}
+	})
+
+	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
+		// cnum + onum = 1228 + 1228 = 2456 >= 2456 → array-to-bitmap conversion.
+		// Source container has indexSize = 1232 < maxContainerSize → inline fails,
+		// result (bitmap) lands in fallbackBuf, buffers are swapped.
+		const half = 1228 // cnum + onum == 2456 == maxContainerSize/5*3 - startIdx
+
+		ra := NewBitmap()
+		for v := uint64(0); v < 2*half; v++ {
+			ra.Set(v)
+		}
+
+		b := NewBitmap()
+		for v := uint64(0); v < half; v++ {
+			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-1227
+		}
+		for v := uint64(half); v < 2*half; v++ {
+			b.Set(0x00020000 | v) // key 2 → masked 0, values 1228-2455
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 2*half, ra.GetCardinality())
+		for v := uint64(0); v < 2*half; v++ {
+			require.True(t, ra.Contains(v))
+		}
+	})
+
+	t.Run("three containers: swap on first pair, then OR into bitmap succeeds inline", func(t *testing.T) {
+		// First OR triggers bitmap conversion and swap (result now in orBuf as bitmap).
+		// Second OR is bitmap+array: inline always succeeds, fallbackBuf unused.
+		// Verifies that orResult correctly points into orBuf after the swap.
+		const half = 1228
+
+		ra := NewBitmap()
+		for v := uint64(0); v < 3*half; v++ {
+			ra.Set(v)
+		}
+
+		b := NewBitmap()
+		for v := uint64(0); v < half; v++ {
+			b.Set(0x00010000 | v) // key 1 → masked 0
+		}
+		for v := uint64(half); v < 2*half; v++ {
+			b.Set(0x00020000 | v) // key 2 → masked 0, triggers swap with key 1
+		}
+		for v := uint64(2*half); v < 3*half; v++ {
+			b.Set(0x00030000 | v) // key 3 → masked 0, OR'd into bitmap inline
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 3*half, ra.GetCardinality())
+		for v := uint64(0); v < 3*half; v++ {
+			require.True(t, ra.Contains(v))
+		}
+	})
+}
+
+func TestAndMaskedConc(t *testing.T) {
+	// n is large enough to guarantee at least 2 goroutines:
+	// calcConcurrency uses minContainersPerRoutine=24, so n >= 48 gives concurrency >= 2.
+	const n = minContainersPerRoutine * 3 // 72 keys
+
+	// mask keeps bits 16-31 and zeroes bits 32-63.
+	// b keys at (g<<32 | k<<16) all map to ra key (k<<16) under this mask.
+	const mask uint64 = 0x00000000FFFF0000
+
+	// assertMatchesSeq verifies that AndMaskedConc produces the same result as
+	// AndMasked at several concurrency levels, including one that forces
+	// actual goroutine spawning (maxConc=0 means unlimited).
+	assertMatchesSeq := func(t *testing.T, ra, b *Bitmap, m uint64) {
+		t.Helper()
+		expected := ra.Clone()
+		expected.AndMasked(b, m)
+		for _, maxConc := range []int{1, 2, 4, 0} {
+			got := ra.Clone()
+			got.AndMaskedConc(b, m, maxConc)
+			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "maxConc=%d", maxConc)
+			for _, v := range expected.ToArray() {
+				require.True(t, got.Contains(v), "maxConc=%d missing %d", maxConc, v)
+			}
+		}
+	}
+
+	t.Run("empty b zeroes ra", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.Set(1)
+		ra.AndMaskedConc(NewBitmap(), math.MaxUint64, 0)
+		require.Equal(t, 0, ra.GetCardinality())
+	})
+
+	t.Run("nil b zeroes ra", func(t *testing.T) {
+		ra := NewBitmap()
+		ra.Set(1)
+		var b *Bitmap
+		ra.AndMaskedConc(b, math.MaxUint64, 0)
+		require.Equal(t, 0, ra.GetCardinality())
+	})
+
+	t.Run("identity mask", func(t *testing.T) {
+		// Mirror of TestAndMasked/identity_mask_matches_ra.And(b).
+		// n ra keys, b has same keys with even-valued elements only.
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 200; v++ {
+				ra.Set(k<<16 | v)
+				if v%2 == 0 {
+					b.Set(k<<16 | v)
+				}
+			}
+		}
+		assertMatchesSeq(t, ra, b, math.MaxUint64)
+	})
+
+	t.Run("matches AndMasked across masks", func(t *testing.T) {
+		// Mirror of TestAndMasked/matches_ra.Clone().And(b.Masked(mask)).
+		// n ra keys; b spreads the same keys across 5 high-bit positions.
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 100; v++ {
+				ra.Set(k<<16 | v)
+			}
+			for pos := uint64(0); pos < 5; pos++ {
+				for v := uint64(0); v < 100; v++ {
+					b.Set(pos<<32 | k<<16 | v)
+				}
+			}
+		}
+		for _, m := range []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, mask} {
+			assertMatchesSeq(t, ra, b, m)
+		}
+	})
+
+	t.Run("zero mask: most ra containers zeroed out", func(t *testing.T) {
+		// Mirror of TestAndMasked/zero_mask_collapses_all_b_keys_to_zero.
+		// Under mask=0 only ra key 0 has a match; all others are zeroed.
+		// This exercises the zero-out path across n-1 containers concurrently.
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			ra.Set(k<<16 | 1)
+			ra.Set(k<<16 | 2)
+		}
+		b.Set(0x00010000 | 1) // maps to masked key 0
+		b.Set(0x00020000 | 2) // maps to masked key 0
+		assertMatchesSeq(t, ra, b, 0)
+	})
+
+	t.Run("multiple b keys OR before AND", func(t *testing.T) {
+		// Mirror of TestAndMasked/multiple_b_keys_OR_before_AND.
+		// Each ra key has 2 b keys mapping to it; OR triggers buffer swap
+		// (non-overlapping arrays, result doesn't fit in source container).
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v <= 3; v++ {
+				ra.Set(k<<16 | v)
+			}
+			b.Set(uint64(1)<<32 | k<<16 | 1)
+			b.Set(uint64(1)<<32 | k<<16 | 2)
+			b.Set(uint64(2)<<32 | k<<16 | 3)
+			b.Set(uint64(2)<<32 | k<<16 | 4)
+		}
+		assertMatchesSeq(t, ra, b, mask)
+	})
+
+	t.Run("overlapping arrays: inline OR succeeds without swap", func(t *testing.T) {
+		// Mirror of TestAndMasked/overlapping_arrays:_inline_succeeds,_no_swap.
+		// Two b keys per ra key with identical values — OR result fits in source.
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 50; v++ {
+				ra.Set(k<<16 | v)
+				b.Set(uint64(1)<<32 | k<<16 | v)
+				b.Set(uint64(2)<<32 | k<<16 | v)
+			}
+		}
+		assertMatchesSeq(t, ra, b, mask)
+	})
+
+	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
+		// Mirror of TestAndMasked/large_non-overlapping_arrays.
+		// Per ra key: two b keys with 1228 non-overlapping values each →
+		// cnum+onum=2456 triggers array-to-bitmap conversion and buffer swap.
+		const half = 1228
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 2*half; v++ {
+				ra.Set(k<<16 | v)
+			}
+			for v := uint64(0); v < half; v++ {
+				b.Set(uint64(1)<<32 | k<<16 | v)
+			}
+			for v := uint64(half); v < 2*half; v++ {
+				b.Set(uint64(2)<<32 | k<<16 | v)
+			}
+		}
+		assertMatchesSeq(t, ra, b, mask)
+	})
+
+	t.Run("three containers: swap then OR into bitmap", func(t *testing.T) {
+		// Mirror of TestAndMasked/three_containers:_swap_on_first_pair.
+		// Per ra key: first pair triggers bitmap conversion and swap;
+		// third container is OR'd inline into the resulting bitmap.
+		const half = 1228
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 3*half; v++ {
+				ra.Set(k<<16 | v)
+			}
+			for v := uint64(0); v < half; v++ {
+				b.Set(uint64(1)<<32 | k<<16 | v)
+			}
+			for v := uint64(half); v < 2*half; v++ {
+				b.Set(uint64(2)<<32 | k<<16 | v)
+			}
+			for v := uint64(2*half); v < 3*half; v++ {
+				b.Set(uint64(3)<<32 | k<<16 | v)
+			}
+		}
+		assertMatchesSeq(t, ra, b, mask)
+	})
+
+	t.Run("b not modified", func(t *testing.T) {
+		ra := NewBitmap()
+		b := NewBitmap()
+		for k := uint64(0); k < n; k++ {
+			for v := uint64(0); v < 50; v++ {
+				ra.Set(k<<16 | v)
+				b.Set(uint64(1)<<32 | k<<16 | v)
+				b.Set(uint64(2)<<32 | k<<16 | v)
+			}
+		}
+		bCard := b.GetCardinality()
+		bValues := b.ToArray()
+
+		ra.AndMaskedConc(b, mask, 0)
+
+		require.Equal(t, bCard, b.GetCardinality())
+		for _, v := range bValues {
+			require.True(t, b.Contains(v))
+		}
+	})
+}
