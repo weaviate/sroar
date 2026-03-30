@@ -33,6 +33,14 @@ func (n node) setAt(idx int, k uint64) { n[idx] = k }
 func (n node) setNumKeys(num int) { n[indexNumKeys] = uint64(num) }
 func (n node) setNodeSize(sz int) { n[indexNodeSize] = uint64(sz) }
 
+// addToAllVals adds delta to every container offset stored in the node.
+// It is used when the key region grows and all offsets must be shifted right.
+func (n node) addToAllVals(delta uint64) {
+	for i := valOffset(0); i < valOffset(n.numKeys()); i += 2 {
+		n[i] += delta
+	}
+}
+
 func (n node) maxKey() uint64 {
 	idx := n.numKeys()
 	// numKeys == index of the max key, because 0th index is being used for meta information.
