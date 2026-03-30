@@ -117,7 +117,7 @@ func NewBitmapToBuf(buf []byte) *Bitmap {
 	}
 
 	u16 := byteTo16SliceUnsafe(buf)
-	Memclr(u16)
+	clear(u16)
 	ra := newBitampToBuf(keysLen, minContainerSize, u16)
 	ra._ptr = buf
 	return ra
@@ -249,7 +249,7 @@ func (ra *Bitmap) scootRight(offset uint64, bySize uint64) {
 	n := copy(right, left) // Move data right.
 	ra.memMoved += n
 
-	Memclr(ra.data[offset : offset+uint64(bySize)]) // Zero out the space in the middle.
+	clear(ra.data[offset : offset+uint64(bySize)]) // Zero out the space in the middle.
 }
 
 // scootLeft removes size number of uint16s starting from the given offset.
@@ -263,7 +263,7 @@ func (ra *Bitmap) scootLeft(offset uint64, size uint64) {
 func (ra *Bitmap) newContainer(sz uint16) uint64 {
 	offset := ra.newContainerNoClr(sz)
 	ra.data[offset] = sz
-	Memclr(ra.data[offset+1 : offset+uint64(sz)])
+	clear(ra.data[offset+1 : offset+uint64(sz)])
 	return offset
 }
 
@@ -377,7 +377,7 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 
 		// Convert the src array to bitmap and write it directly over to the container.
 		out := ra.getContainer(offset)
-		Memclr(out)
+		clear(out)
 		s.toBitmapContainer(out)
 		return
 	}
@@ -714,8 +714,7 @@ func (ra *Bitmap) Reset() {
 func (ra *Bitmap) ZeroOut() {
 	for i := 0; i < ra.keys.numKeys(); i++ {
 		off := ra.keys.val(i)
-		c := ra.getContainer(off)
-		zeroOutContainer(c)
+		zeroOutContainer(ra.data[off:])
 	}
 }
 

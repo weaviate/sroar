@@ -77,11 +77,10 @@ func setCardinality(data []uint16, c int) {
 }
 
 func zeroOutContainer(c []uint16) {
-	switch c[indexType] {
-	case typeArray:
-		array(c).zeroOut()
-	case typeBitmap:
-		bitmap(c).zeroOut()
+	c[indexCardinality] = 0
+	c[indexCardinality+1] = 0
+	if c[indexType] == typeBitmap {
+		clear(c[startIdx:c[indexSize]])
 	}
 }
 
@@ -304,7 +303,7 @@ func (c array) andBitmap(other bitmap) []uint16 {
 func (c array) andNotBitmap(other bitmap, buf []uint16) []uint16 {
 	assert(len(buf) == maxContainerSize)
 	res := array(buf)
-	Memclr(res)
+	clear(res)
 	res[indexSize] = 4
 	for _, e := range c.all() {
 		if !other.has(e) {
@@ -685,7 +684,7 @@ var zeroContainer = make([]uint16, maxContainerSize)
 
 func (b bitmap) zeroOut() {
 	setCardinality(b, 0)
-	copy(b[startIdx:], zeroContainer[startIdx:])
+	clear(b[startIdx:b[indexSize]])
 }
 
 var (

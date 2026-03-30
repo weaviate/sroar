@@ -80,16 +80,6 @@ func toUint64Slice(b []uint16) []uint64 {
 	return u64s
 }
 
-//go:linkname memclrNoHeapPointers runtime.memclrNoHeapPointers
-func memclrNoHeapPointers(p unsafe.Pointer, n uintptr)
-
-func Memclr(b []uint16) {
-	if len(b) == 0 {
-		return
-	}
-	p := unsafe.Pointer(&b[0])
-	memclrNoHeapPointers(p, uintptr(len(b)))
-}
 
 // Following methods do not make copies, they are pointer-based (unsafe).
 // The caller is responsible to ensure that the input slice does not get garbage collected,
