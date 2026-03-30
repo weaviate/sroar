@@ -424,8 +424,9 @@ func (ra *Bitmap) IsEmpty() bool {
 	N := ra.keys.numKeys()
 	for i := 0; i < N; i++ {
 		offset := ra.keys.val(i)
-		cont := ra.getContainer(offset)
-		if c := getCardinality(cont); c > 0 {
+		// Read cardinality fields directly, skipping getContainer.
+		// Container layout: [size, type, cardinality_lo, cardinality_hi, ...]
+		if ra.data[offset+uint64(indexCardinality)]|ra.data[offset+uint64(indexCardinality)+1] != 0 {
 			return false
 		}
 	}
@@ -735,8 +736,9 @@ func (ra *Bitmap) GetCardinalityDim(dim uint16) int {
 			continue
 		}
 		offset := ra.keys.val(i)
-		c := ra.getContainer(offset)
-		sz += getCardinality(c)
+		// Pass ra.data[offset:] directly to skip getContainer — getCardinality
+		// only reads indices 2 and 3, so no bounded slice is needed.
+		sz += getCardinality(ra.data[offset:])
 	}
 	return sz
 }
