@@ -1081,7 +1081,7 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 			ra.data = ra.data[:ln+sizeKeys]
 			n := copy(ra.data[newSizeKeys:], ra.data[curSizeKeys:])
 			ra.memMoved += n
-			Memclr(ra.data[curSizeKeys:newSizeKeys]) // Zero out the space in the middle.
+			clear(ra.data[curSizeKeys:newSizeKeys]) // Zero out the space in the middle.
 
 			ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 			ra.keys.setNodeSize(newSizeKeys)
