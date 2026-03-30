@@ -66,6 +66,10 @@ func getCardinality(data []uint16) int {
 	return int(data[indexCardinality]) + int(data[indexCardinality+1])
 }
 
+func isEmpty(data []uint16) bool {
+	return data[indexCardinality]|data[indexCardinality+1] == 0
+}
+
 func setCardinality(data []uint16, c int) {
 	if c > math.MaxUint16 {
 		data[indexCardinality] = math.MaxUint16

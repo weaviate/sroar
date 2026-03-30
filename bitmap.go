@@ -401,8 +401,7 @@ func (ra *Bitmap) IsEmpty() bool {
 	N := ra.keys.numKeys()
 	for i := 0; i < N; i++ {
 		offset := ra.keys.val(i)
-		cont := ra.getContainer(offset)
-		if c := getCardinality(cont); c > 0 {
+		if !isEmpty(ra.data[offset:]) {
 			return false
 		}
 	}
@@ -673,8 +672,9 @@ func (ra *Bitmap) GetCardinality() int {
 	var sz int
 	for i := 0; i < N; i++ {
 		offset := ra.keys.val(i)
-		c := ra.getContainer(offset)
-		sz += getCardinality(c)
+		// Pass ra.data[offset:] directly to skip getContainer — getCardinality
+		// only reads indices 2 and 3, so no bounded slice is needed.
+		sz += getCardinality(ra.data[offset:])
 	}
 	return sz
 }
