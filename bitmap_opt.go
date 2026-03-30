@@ -1205,9 +1205,11 @@ func (b bitmap) fillWithOnes() {
 func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 	cp := cap(ra.data)
 	ln := len(ra.data)
+	curNumKeys := ra.keys.numKeys()
+	curSizeKeys := ra.keys.size()
 
 	sizeKeys := 8 * newKeys // 2x uint64 (key+offset) = 8x uint16
-	if ra.keys.numKeys()+newKeys < ra.keys.maxKeys() {
+	if curNumKeys+newKeys < ra.keys.maxKeys() {
 		if ln+sizeContainers <= cp {
 			// keys and containers fit. nothing to do
 			return
@@ -1215,8 +1217,6 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 		// keys fit, containers do not. expand slice to make room for containers and only new keys
 	} else {
 		if ln+sizeKeys+sizeContainers <= cp {
-			curNumKeys := ra.keys.numKeys()
-
 			// keys do not fit, containers do. just move containers to make room for keys
 			if curNumKeys > newKeys {
 				// make room for up to curNumKeys additional keys
@@ -1227,7 +1227,6 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 			}
 
 			// new containers will fit. just move containers to make room for keys
-			curSizeKeys := ra.keys.size()
 			newSizeKeys := curSizeKeys + sizeKeys
 
 			ra.data = ra.data[:ln+sizeKeys]
@@ -1237,20 +1236,17 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 			ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 			ra.keys.setNodeSize(newSizeKeys)
-			for i := 0; i < curNumKeys; i++ {
-				ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
-			}
+			ra.keys.addToAllVals(uint64(sizeKeys))
 			return
 		}
 		// neither keys nor containers fit. expand slice to make room for containers and more keys
-		sizeKeys = 8 * max(newKeys, ra.keys.numKeys()) // 2x uint64 (key+offset) = 8x uint16
+		sizeKeys = 8 * max(newKeys, curNumKeys) // 2x uint64 (key+offset) = 8x uint16
 	}
 
 	// expand 2x (or up to sizeKeys+sizeNewContainers if 2x is too little)
 	growBy := max(cp, sizeKeys+sizeContainers)
 	out := make([]uint16, ln+sizeKeys, cp+growBy)
 
-	curSizeKeys := ra.keys.size()
 	newSizeKeys := curSizeKeys + sizeKeys
 	copy(out, ra.data[:curSizeKeys])
 	copy(out[newSizeKeys:], ra.data[curSizeKeys:])
@@ -1260,9 +1256,7 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 	ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 	ra.keys.setNodeSize(newSizeKeys)
-	for i := 0; i < ra.keys.numKeys(); i++ {
-		ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
-	}
+	ra.keys.addToAllVals(uint64(sizeKeys))
 }
 
 // Masked applies the given mask to every key and returns a new bitmap.
