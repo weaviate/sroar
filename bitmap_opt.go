@@ -51,7 +51,8 @@ func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 		return ra
 	}
 
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), nil)
+	n := ra.keys.numKeys()
+	andContainersInRange(ra, bm, 0, n, nil, bm.keys.numKeys() > n*8)
 	return ra
 }
 
@@ -224,12 +225,17 @@ func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 
 	numContainers := ra.keys.numKeys()
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil) }
+	useGallop := bm.keys.numKeys() > numContainers*8
+	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil, useGallop) }
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	return ra
 }
 
-func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16) {
+// andContainersInRange ANDs a's containers in [ai, aj) with b in place.
+// When useGallop is true, b's pointer advances via exponential search
+// (searchFrom) instead of bi++, skipping large gaps in O(log gap).
+// useGallop should be set when b has many more keys than a's range (b >> a).
+func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16, useGallop bool) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
@@ -249,17 +255,19 @@ func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16) {
 			bi++
 		} else if ak < bk {
 			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			zeroOutContainer(ac)
+			zeroOutContainer(a.data[off:])
 			ai++
 		} else {
-			bi++
+			if useGallop {
+				bi = b.keys.searchFrom(bi, ak)
+			} else {
+				bi++
+			}
 		}
 	}
 	for ; ai < aj; ai++ {
 		off := a.keys.val(ai)
-		ac := a.getContainer(off)
-		zeroOutContainer(ac)
+		zeroOutContainer(a.data[off:])
 	}
 }
 
