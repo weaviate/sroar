@@ -346,7 +346,7 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 		buf = make([]uint16, maxContainerSize)
 	} else {
 		assert(len(buf) == maxContainerSize)
-		assert(len(buf) == copy(buf, zeroContainer))
+		clear(buf[startIdx:])
 	}
 
 	b := bitmap(buf)
@@ -679,8 +679,6 @@ func (b bitmap) cardinality() int {
 	}
 	return num
 }
-
-var zeroContainer = make([]uint16, maxContainerSize)
 
 func (b bitmap) zeroOut() {
 	setCardinality(b, 0)

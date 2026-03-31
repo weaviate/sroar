@@ -52,7 +52,8 @@ func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 	}
 
 	n := ra.keys.numKeys()
-	andContainersInRange(ra, bm, 0, n, nil, bm.keys.numKeys() > n*8)
+	bn := bm.keys.numKeys()
+	andContainersInRange(ra, bm, 0, n, nil, bn > n*8 && bn > minKeysForGallop)
 	return ra
 }
 
@@ -225,7 +226,8 @@ func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 
 	numContainers := ra.keys.numKeys()
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	useGallop := bm.keys.numKeys() > numContainers*8
+	bn := bm.keys.numKeys()
+	useGallop := bn*concurrency > numContainers*8 && bn > minKeysForGallop
 	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil, useGallop) }
 	concurrentlyInRanges(numContainers, concurrency, callback)
 	return ra
@@ -532,11 +534,14 @@ func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 		return ra
 	}
 
-	orContainersInRange(ra, bm, 0, bm.keys.numKeys())
+	bj := bm.keys.numKeys()
+	an := ra.keys.numKeys()
+	useGallop := an*1 > bj*8 && an > minKeysForGallop
+	orContainersInRange(ra, bm, 0, bj, useGallop)
 	return ra
 }
 
-func orContainersInRange(a, b *Bitmap, bi, bn int) {
+func orContainersInRange(a, b *Bitmap, bi, bj int, useGallop bool) {
 	buf := make([]uint16, maxContainerSize)
 
 	bk := b.keys.key(bi)
@@ -547,10 +552,11 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 	// expanding underlying data slice and keys subslice once
 	sizeContainers := 0
 	newKeys := 0
-	bKeys := []uint64{}
-	bContainers := [][]uint16{}
+	initialCap := min(bj-bi, 16)
+	bKeys := make([]uint64, 0, initialCap)
+	bContainers := make([][]uint16, 0, initialCap)
 
-	for ai < an && bi < bn {
+	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
@@ -581,11 +587,15 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallop {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
 				sizeContainers += len(bc)
@@ -595,24 +605,15 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 		}
 	}
 
-	// extend bKeys and bContainers to fit all remaining data
-	// (once instead of multiple times by calling append)
-	if diff := bn - bi; diff > 0 {
-		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
-			bKeysCopy := make([]uint64, ln, ln+diff)
-			copy(bKeysCopy, bKeys)
-			bKeys = bKeysCopy
-		}
-		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
-			bContainersCopy := make([][]uint16, ln, ln+diff)
-			copy(bContainersCopy, bContainers)
-			bContainers = bContainersCopy
-		}
-
-		for ; bi < bn; bi++ {
+	if remaining := bj - bi; remaining > 0 {
+		// All remaining b keys are b-only. Pre-extend capacity to avoid
+		// append doubling in the tail loop.
+		bKeys = slices.Grow(bKeys, remaining)
+		bContainers = slices.Grow(bContainers, remaining)
+		for ; bi < bj; bi++ {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bk := b.keys.key(bi)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
@@ -652,8 +653,10 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	numContainers := bm.keys.numKeys()
 	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
 
+	an := ra.keys.numKeys()
+	useGallop := an*concurrency > numContainers*8 && an > minKeysForGallop
 	if concurrency <= 1 {
-		orContainersInRange(ra, bm, 0, numContainers)
+		orContainersInRange(ra, bm, 0, numContainers, useGallop)
 		return ra
 	}
 
@@ -663,7 +666,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	allContainers := make([][][]uint16, concurrency)
 	lock := new(sync.Mutex)
 	callback := func(bi, bj, i int) {
-		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj)
+		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, useGallop)
 
 		lock.Lock()
 		totalNewKeys += newKeys
@@ -689,7 +692,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	return ra
 }
 
-func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
+func orContainersInRangeConc(a, b *Bitmap, bi, bj int, useGallop bool,
 ) (newKeys, sizeContainers int, bKeys []uint64, bContainers [][]uint16) {
 	buf := make([]uint16, maxContainerSize)
 
@@ -701,10 +704,11 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 	// expanding underlying data slice and keys subslice once
 	sizeContainers = 0
 	newKeys = 0
-	bKeys = []uint64{}
-	bContainers = [][]uint16{}
+	initialCap := min(bj-bi, 16)
+	bKeys = make([]uint64, 0, initialCap)
+	bContainers = make([][]uint16, 0, initialCap)
 
-	for ai < an && bi < bn {
+	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
@@ -723,11 +727,15 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallop {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
 				sizeContainers += len(bc)
@@ -737,24 +745,15 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 		}
 	}
 
-	// extend bKeys and bContainers to fit all remaining data
-	// (once instead of multiple times by calling append)
-	if diff := bn - bi; diff > 0 {
-		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
-			bKeysCopy := make([]uint64, ln, ln+diff)
-			copy(bKeysCopy, bKeys)
-			bKeys = bKeysCopy
-		}
-		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
-			bContainersCopy := make([][]uint16, ln, ln+diff)
-			copy(bContainersCopy, bContainers)
-			bContainers = bContainersCopy
-		}
-
-		for ; bi < bn; bi++ {
+	if remaining := bj - bi; remaining > 0 {
+		// All remaining b keys are b-only. Pre-extend capacity to avoid
+		// append doubling in the tail loop.
+		bKeys = slices.Grow(bKeys, remaining)
+		bContainers = slices.Grow(bContainers, remaining)
+		for ; bi < bj; bi++ {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bk := b.keys.key(bi)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
@@ -768,6 +767,14 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 }
 
 const minContainersPerRoutine = 24
+
+// minKeysForGallop is the minimum number of keys a bitmap must have for
+// galloping (exponential+binary search) to outperform sequential bi++ in
+// the two-pointer walk. Below this threshold the key node fits comfortably
+// in CPU cache and hardware prefetching of sequential access beats the
+// scattered memory accesses of exponential search.
+// Applies to And/AndConc (galloping on bm) and Or/OrConc (galloping on ra).
+const minKeysForGallop = 1000
 
 func calcConcurrency(numContainers, minContainers, maxConcurrency int) int {
 	concurrency := numContainers / minContainers
