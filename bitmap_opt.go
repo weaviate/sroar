@@ -774,28 +774,25 @@ func (ra *Bitmap) capInBytes() int {
 }
 
 func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
-	c := cap(buf)
-	dstbuf := buf[:c]
-	if c%2 != 0 {
-		dstbuf = buf[:c-1]
-	}
-
-	src := ra
 	if ra == nil {
-		src = NewBitmap()
+		return NewBitmapToBuf(buf)
 	}
 
-	srclen := src.LenInBytes()
-	if srclen > len(dstbuf) {
-		panic(fmt.Sprintf("Buffer too small, given %d, required %d", cap(buf), srclen))
+	// Use full capacity, rounded down to an even number of bytes since
+	// the bitmap operates on []uint16 (2 bytes per element).
+	buf = buf[:cap(buf)/2*2]
+
+	srcLen := ra.LenInBytes()
+	if srcLen > len(buf) {
+		panic(fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", srcLen, cap(buf)))
 	}
 
-	srcbuf := toByteSlice(src.data)
-	copy(dstbuf, srcbuf)
-
-	// adjust length to src length, keep capacity as entire buffer
-	bm := FromBuffer(dstbuf)
-	bm.data = bm.data[:srclen/2]
+	// Copy at the uint16 level into the destination buffer, then trim data
+	// to the used length while keeping the full buffer capacity available
+	// for future growth.
+	copy(byteTo16SliceUnsafe(buf), ra.data)
+	bm := FromBuffer(buf)
+	bm.data = bm.data[:srcLen/2]
 	return bm
 }
 

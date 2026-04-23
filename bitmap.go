@@ -101,26 +101,25 @@ func NewBitmapWith(numKeys int) *Bitmap {
 }
 
 // NewBitmapToBuf creates a new bitmap using the provided byte slice as the
-// underlying data buffer. The buffer must be large enough to hold at least the
-// initial keys and one container (minimum 2*(24+64) = 176 bytes). The _ptr
+// underlying data buffer. If the buffer is too small to hold the initial
+// bitmap structure, a heap-allocated bitmap is returned instead. The _ptr
 // field is set to keep a GC reference to buf, since the bitmap operates on an
 // unsafe []uint16 view of the same memory.
 func NewBitmapToBuf(buf []byte) *Bitmap {
-	if len(buf)%2 != 0 {
-		buf = buf[:len(buf)-1]
-	}
-	numKeys := 2
-	keysLen := calcInitialKeysLen(numKeys)
-	minBytes := (keysLen + minContainerSize) * 2
-	if len(buf) < minBytes {
-		panic(fmt.Sprintf("buf too small: need at least %d bytes, got %d", minBytes, len(buf)))
+	// Use full capacity, rounded down to an even number of bytes since
+	// the bitmap operates on []uint16 (2 bytes per element).
+	buf = buf[:cap(buf)/2*2]
+
+	keysLen := calcInitialKeysLen(2)
+	if minLen := (keysLen + minContainerSize) * 2; minLen > len(buf) {
+		return NewBitmap()
 	}
 
-	u16 := byteTo16SliceUnsafe(buf)
-	clear(u16)
-	ra := newBitampToBuf(keysLen, minContainerSize, u16)
-	ra._ptr = buf
-	return ra
+	bufU16 := byteTo16SliceUnsafe(buf)
+	clear(bufU16)
+	bm := newBitampToBuf(keysLen, minContainerSize, bufU16)
+	bm._ptr = buf
+	return bm
 }
 
 func newBitmapWith(numKeys, initialContainerSize, additionalCapacity int) *Bitmap {
