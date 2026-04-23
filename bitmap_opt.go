@@ -1188,6 +1188,45 @@ func (ra *Bitmap) MaskedToBuf(mask uint64, buf []byte) *Bitmap {
 	return ra.maskedInto(mask, NewBitmapToBuf(buf))
 }
 
+// writeToMaskedResult writes src into res under maskedKey, OR-merging with
+// any existing container for that key. orBuf is a scratch buffer for the OR
+// operation when inline merge fails (container grew beyond current allocation).
+func writeToMaskedResult(res *Bitmap, maskedKey uint64, src, orBuf []uint16) {
+	off, has := res.keys.getValue(maskedKey)
+	if !has {
+		// First container for this masked key — copy it directly.
+		res.expandConditionally(0, len(src))
+		off = res.newContainerNoClr(uint16(len(src)))
+		copy(res.data[off:], src)
+		res.setKey(maskedKey, off)
+	} else {
+		// Merge with the existing container via OR.
+		existing := res.getContainer(off)
+		if c := containerOrAlt(existing, src, orBuf, runInline); len(c) > 0 {
+			// Inline failed (container grew). If the old container
+			// is at the end of res.data, trim and regrow in place to
+			// avoid dead space. Otherwise append (dead space).
+			if off+uint64(len(existing)) == uint64(len(res.data)) {
+				res.data = res.data[:off]
+			}
+			res.expandConditionally(0, len(c))
+			off = res.newContainerNoClr(uint16(len(c)))
+			copy(res.data[off:], c)
+			res.setKey(maskedKey, off)
+		}
+	}
+}
+
+// maskedInto is the core implementation of Masked and MaskedToBuf.
+//
+// Alternative approach was considered and benchmarked: sort source keys by
+// masked value upfront, count distinct masked keys for exact key pre-allocation,
+// accumulate OR per group in scratch buffers, then write each group's final
+// container once — eliminating getValue binary searches, setKey shifts, and
+// dead-space risk. In practice this was not faster: the extra allocations
+// (maskedEntry slice + two scratch buffers vs one) and the sort cost outweigh
+// the savings from avoiding binary searches and in-place OR. Memory consumption
+// was also higher in most cases. Current approach wins.
 func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
 	if ra == nil {
 		return b
@@ -1215,30 +1254,7 @@ func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
 		}
 
 		maskedKey := ak & mask
-
-		boff, has := b.keys.getValue(maskedKey)
-		if !has {
-			// First container for this masked key — copy it directly.
-			b.expandConditionally(0, len(ac))
-			boff = b.newContainerNoClr(uint16(len(ac)))
-			copy(b.data[boff:], ac)
-			b.setKey(maskedKey, boff)
-		} else {
-			// Merge with the existing container via OR.
-			bc := b.getContainer(boff)
-			if c := containerOrAlt(bc, ac, buf, runInline); len(c) > 0 {
-				// Inline failed (container grew). If the old container
-				// is at the end of b.data, trim and regrow in place to
-				// avoid dead space. Otherwise append (dead space).
-				if boff+uint64(len(bc)) == uint64(len(b.data)) {
-					b.data = b.data[:boff]
-				}
-				b.expandConditionally(0, len(c))
-				boff = b.newContainerNoClr(uint16(len(c)))
-				copy(b.data[boff:], c)
-				b.setKey(maskedKey, boff)
-			}
-		}
+		writeToMaskedResult(b, maskedKey, ac, buf)
 	}
 	return b
 }
@@ -1273,6 +1289,11 @@ func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap) *Bitmap {
 	minKeys := min(an, bn)
 	res.expandConditionally(minKeys, 0)
 
+	// Only the larger side can trigger galloping — the smaller side can never
+	// satisfy candidate > threshold*8, so exactly one flag can be true.
+	useGallopA := shouldGallop(an, bn)
+	useGallopB := shouldGallop(bn, an)
+
 	// andBuf holds the AND result for one container pair.
 	// orBuf is the scratch for merging into res when masked keys collide.
 	// They must be separate since andBuf is the OR source.
@@ -1290,37 +1311,22 @@ func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap) *Bitmap {
 			c := containerAndAlt(ac, bc, andBuf, 0)
 			if len(c) > 0 && getCardinality(c) > 0 {
 				maskedKey := ak & mask
-
-				roff, has := res.keys.getValue(maskedKey)
-				if !has {
-					// First container for this masked key — copy it directly.
-					res.expandConditionally(0, len(c))
-					roff = res.newContainerNoClr(uint16(len(c)))
-					copy(res.data[roff:], c)
-					res.setKey(maskedKey, roff)
-				} else {
-					// Merge with the existing container via OR.
-					rc := res.getContainer(roff)
-					if out := containerOrAlt(rc, c, orBuf, runInline); len(out) > 0 {
-						// Inline failed (container grew). If the old container
-						// is at the end of res.data, trim and regrow in place to
-						// avoid dead space. Otherwise append (dead space).
-						if roff+uint64(len(rc)) == uint64(len(res.data)) {
-							res.data = res.data[:roff]
-						}
-						res.expandConditionally(0, len(out))
-						roff = res.newContainerNoClr(uint16(len(out)))
-						copy(res.data[roff:], out)
-						res.setKey(maskedKey, roff)
-					}
-				}
+				writeToMaskedResult(res, maskedKey, c, orBuf)
 			}
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallopA {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
-			bi++
+			if useGallopB {
+				bi = b.keys.searchFrom(bi, ak)
+			} else {
+				bi++
+			}
 		}
 	}
 	return res
@@ -1469,8 +1475,9 @@ func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int
 			}
 		}
 
-		// AND ra's container with the OR result, in place. AND can only
-		// shrink a container so inline always succeeds.
+		// AND ra's container with the OR result, in place. AND keeps the
+		// container size unchanged (only the number of elements decreases),
+		// so inline always succeeds.
 		if c := containerAndAlt(ac, orResult, nil, runInline); len(c) > 0 {
 			panic("new container not expected in AndMasked inline mode")
 		}
