@@ -7,6 +7,89 @@ import (
 	"sync"
 )
 
+// Intersects reports whether ra and bm share at least one element.
+// Equivalent to !ra.Clone().And(bm).IsEmpty() but short-circuits at the
+// first common element without allocating a result bitmap.
+func (ra *Bitmap) Intersects(bm *Bitmap) bool {
+	if ra.IsEmpty() || bm.IsEmpty() {
+		return false
+	}
+
+	an := ra.keys.numKeys()
+	bn := bm.keys.numKeys()
+	useGallopA := shouldGallop(an, bn)
+	useGallopB := shouldGallop(bn, an)
+
+	// Start bi at the first bm key >= ra's first key.
+	bi := bm.keys.search(ra.keys.key(0))
+
+	for ai := 0; ai < an && bi < bn; {
+		ak := ra.keys.key(ai)
+		bk := bm.keys.key(bi)
+		if ak == bk {
+			ac := ra.getContainer(ra.keys.val(ai))
+			bc := bm.getContainer(bm.keys.val(bi))
+			if containerIntersects(ac, bc) {
+				return true
+			}
+			ai++
+			bi++
+		} else if ak < bk {
+			if useGallopA {
+				ai = ra.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
+		} else {
+			if useGallopB {
+				bi = bm.keys.searchFrom(bi, ak)
+			} else {
+				bi++
+			}
+		}
+	}
+	return false
+}
+
+// IntersectsMasked reports whether ra and bm share at least one element after
+// applying mask to bm's keys. Equivalent to !ra.Clone().And(bm.Masked(mask)).IsEmpty()
+// but short-circuits at the first common element without allocating.
+// Containers in ra whose key has a non-zero dimension (low 16 bits != 0) are
+// not checked — same behaviour as AndMasked.
+func (ra *Bitmap) IntersectsMasked(bm *Bitmap, mask uint64) bool {
+	if ra.IsEmpty() || bm.IsEmpty() {
+		return false
+	}
+
+	mask &= 0xFFFFFFFFFFFF0000
+	entries := buildMaskedEntries(bm, mask)
+
+	var from int
+	var group []maskedEntry
+
+	an := ra.keys.numKeys()
+	for ai := 0; ai < an; ai++ {
+		ak := ra.keys.key(ai)
+		if uint16(ak) != 0 {
+			continue
+		}
+
+		group, from = maskedEntriesFor(entries, ak, from)
+		if group == nil {
+			continue
+		}
+
+		ac := ra.getContainer(ra.keys.val(ai))
+		for _, e := range group {
+			bc := bm.getContainer(e.offset)
+			if containerIntersects(ac, bc) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func And(a, b *Bitmap) *Bitmap {
 	res := NewBitmap()
 	if a.IsEmpty() || b.IsEmpty() {
