@@ -823,23 +823,11 @@ func (ra *Bitmap) ConvertToBitmapContainers() {
 	}
 }
 
-func (dst *Bitmap) CompareNumKeys(src *Bitmap) int {
-	if dst == nil && src == nil {
+func (ra *Bitmap) NumContainers() int {
+	if ra == nil {
 		return 0
 	}
-	if src == nil {
-		return 1
-	}
-	if dst == nil {
-		return -1
-	}
-	if dstN, srcN := dst.keys.numKeys(), src.keys.numKeys(); dstN > srcN {
-		return 1
-	} else if dstN < srcN {
-		return -1
-	} else {
-		return 0
-	}
+	return ra.keys.numKeys()
 }
 
 func (ra *Bitmap) LenInBytes() int {
