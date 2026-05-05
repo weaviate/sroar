@@ -30,6 +30,145 @@ func TestModify(t *testing.T) {
 	}
 }
 
+func TestNewBitmapToBuf(t *testing.T) {
+	t.Run("basic set and contains", func(t *testing.T) {
+		buf := make([]byte, 4096)
+		bm := NewBitmapToBuf(buf)
+
+		bm.Set(1)
+		bm.Set(100)
+		bm.Set(1000)
+
+		require.Equal(t, 3, bm.GetCardinality())
+		require.True(t, bm.Contains(1))
+		require.True(t, bm.Contains(100))
+		require.True(t, bm.Contains(1000))
+	})
+
+	t.Run("uses provided buffer memory", func(t *testing.T) {
+		buf := make([]byte, 4096)
+		bm := NewBitmapToBuf(buf)
+		bm.Set(42)
+
+		// The bitmap's data should be backed by buf: the buffer
+		// should no longer be all zeros after a Set.
+		allZero := true
+		for _, b := range buf {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		require.False(t, allZero)
+	})
+
+	t.Run("len=0 cap=valid works", func(t *testing.T) {
+		buf := make([]byte, 0, 4096)
+		bm := NewBitmapToBuf(buf)
+		bm.Set(1)
+		bm.Set(100)
+		require.Equal(t, 2, bm.GetCardinality())
+		require.True(t, bm.Contains(1))
+		require.True(t, bm.Contains(100))
+	})
+
+	t.Run("falls back to heap on too small buffer", func(t *testing.T) {
+		bm := NewBitmapToBuf(make([]byte, 10))
+		bm.Set(1)
+		require.Equal(t, 1, bm.GetCardinality())
+		require.True(t, bm.Contains(1))
+	})
+
+	t.Run("odd length buffer is truncated", func(t *testing.T) {
+		buf := make([]byte, 4097) // odd
+		bm := NewBitmapToBuf(buf)
+		bm.Set(7)
+		require.True(t, bm.Contains(7))
+	})
+
+	t.Run("behaves like NewBitmap", func(t *testing.T) {
+		buf := make([]byte, 1<<20) // 1MB
+		bm1 := NewBitmapToBuf(buf)
+		bm2 := NewBitmap()
+
+		for i := uint64(0); i < 5000; i++ {
+			bm1.Set(i)
+			bm2.Set(i)
+		}
+
+		require.Equal(t, bm2.GetCardinality(), bm1.GetCardinality())
+		for _, v := range bm2.ToArray() {
+			require.True(t, bm1.Contains(v))
+		}
+	})
+
+	t.Run("no allocation when buffer is large enough for many containers", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Insert values across many different containers.
+		// Each unique high-48-bit key creates a new container.
+		// Spread values across 100 containers.
+		for container := uint64(0); container < 100; container++ {
+			key := container << 16
+			for v := uint64(0); v < 100; v++ {
+				bm.Set(key | v)
+			}
+		}
+
+		require.Equal(t, 10000, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("no allocation as keys expand", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Force many key expansions by creating many distinct containers.
+		// Initial key space holds 2 keys; this forces multiple doublings.
+		for container := uint64(0); container < 200; container++ {
+			bm.Set(container << 16)
+		}
+
+		require.Equal(t, 200, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("no allocation with bitmap containers", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		require.Equal(t, bufSize, bm.capInBytes())
+
+		// Fill a single container past the array→bitmap conversion threshold
+		// (4096+ elements triggers bitmap container, which is 4100 uint16s).
+		for v := uint64(0); v < 5000; v++ {
+			bm.Set(v)
+		}
+
+		require.Equal(t, 5000, bm.GetCardinality())
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("length grows but capacity stays", func(t *testing.T) {
+		bufSize := 1 << 20 // 1MB
+		bm := NewBitmapToBuf(make([]byte, bufSize))
+
+		initialLenInBytes := bm.LenInBytes()
+
+		for container := uint64(0); container < 50; container++ {
+			bm.Set(container << 16)
+		}
+
+		require.Greater(t, bm.LenInBytes(), initialLenInBytes, "length should grow as containers are added")
+		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+	})
+}
+
 func TestContainer(t *testing.T) {
 	ra := NewBitmap()
 
@@ -384,6 +523,295 @@ func TestSetSorted(t *testing.T) {
 	}
 	check(10)
 	check(1e6)
+}
+
+// testMaskedCommon runs the shared correctness cases for Masked and MaskedToBuf.
+// masker abstracts the call so each test function can pass its own implementation.
+func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap) {
+	t.Helper()
+
+	t.Run("no bitmap", func(t *testing.T) {
+		var bm *Bitmap
+		require.Equal(t, 0, masker(bm, 0x0000FFFFFFFFFFFF).GetCardinality())
+	})
+
+	t.Run("empty bitmap", func(t *testing.T) {
+		require.Equal(t, 0, masker(NewBitmap(), 0x0000FFFFFFFFFFFF).GetCardinality())
+	})
+
+	t.Run("all bits mask is identity", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(0x00010000) // key=0x10000, container value=0
+		bm.Set(0x00020000) // key=0x20000, container value=0
+		bm.Set(0x00010001) // key=0x10000, container value=1
+
+		result := masker(bm, math.MaxUint64)
+
+		require.Equal(t, 3, result.GetCardinality())
+		require.True(t, result.Contains(0x00010000))
+		require.True(t, result.Contains(0x00020000))
+		require.True(t, result.Contains(0x00010001))
+	})
+
+	t.Run("zero mask collapses all keys", func(t *testing.T) {
+		bm := NewBitmap()
+		// Values that differ only in the key portion (bits 16+) collapse,
+		// but their low 16 bits (container values) are preserved and merged.
+		bm.Set(0x00010000) // key=0x10000, container value=0
+		bm.Set(0x00020000) // key=0x20000, container value=0
+		bm.Set(0x00010001) // key=0x10000, container value=1
+
+		result := masker(bm, 0)
+
+		// All keys become 0, containers merge: values 0 and 1
+		require.Equal(t, 2, result.GetCardinality())
+		require.True(t, result.Contains(0))
+		require.True(t, result.Contains(1))
+	})
+
+	t.Run("mask preserving middle bits", func(t *testing.T) {
+		// Use a mask that keeps bits 16-31 and zeroes bits 32-63.
+		// This groups values that share the same bits 16-31.
+		var m uint64 = 0x00000000FFFF0000
+
+		bm := NewBitmap()
+		// Two values with same bits 16-31 but different bits 32+
+		bm.Set(0x0001_0005_0003) // key bits 16-31 = 0x0005, bits 32+ = 0x0001
+		bm.Set(0x0002_0005_0007) // key bits 16-31 = 0x0005, bits 32+ = 0x0002
+		bm.Set(0x0003_0005_0007) // key bits 16-31 = 0x0005, bits 32+ = 0x0002
+
+		result := masker(bm, m)
+
+		// Both collapse to masked key 0x00050000, container values 3 and 7 merged
+		require.Equal(t, 2, result.GetCardinality())
+		require.True(t, result.Contains(0x00050003))
+		require.True(t, result.Contains(0x00050007))
+	})
+
+	t.Run("does not modify original", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(uint64(1)<<48 | 10)
+		bm.Set(uint64(2)<<48 | 20)
+
+		origCard := bm.GetCardinality()
+		_ = masker(bm, 0x0000FFFFFFFFFFFF)
+
+		require.Equal(t, origCard, bm.GetCardinality())
+		require.True(t, bm.Contains(uint64(1)<<48|10))
+		require.True(t, bm.Contains(uint64(2)<<48|20))
+	})
+
+	t.Run("many keys collapsing", func(t *testing.T) {
+		bm := NewBitmap()
+		numPositions := uint16(10)
+		numValues := uint64(1000)
+
+		for pos := uint16(0); pos < numPositions; pos++ {
+			for v := uint64(0); v < numValues; v++ {
+				bm.Set(uint64(pos)<<48 | v)
+			}
+		}
+
+		result := masker(bm, 0x0000FFFFFFFFFFFF)
+
+		require.Equal(t, int(numValues), result.GetCardinality())
+		for v := uint64(0); v < numValues; v++ {
+			require.True(t, result.Contains(v))
+		}
+	})
+
+	t.Run("non-contiguous masked keys merge correctly", func(t *testing.T) {
+		// Source keys are sorted by full value. When the mask zeroes high
+		// bits, keys that map to the same masked key may NOT be adjacent
+		// in source order. All such keys must still be OR-merged.
+		bm := NewBitmap()
+
+		// Two positions (high bits differ), two groups (middle bits differ).
+		// Each (pos,group) has distinct values so we can detect lost merges.
+		// pos=0 group=0: values {0, 1}
+		bm.Set(0x0001_0000_0000 | 0)
+		bm.Set(0x0001_0000_0000 | 1)
+		// pos=0 group=1: values {10, 11}
+		bm.Set(0x0001_0001_0000 | 10)
+		bm.Set(0x0001_0001_0000 | 11)
+		// pos=1 group=0: values {2, 3}  — same masked key as pos=0 group=0
+		bm.Set(0x0002_0000_0000 | 2)
+		bm.Set(0x0002_0000_0000 | 3)
+		// pos=1 group=1: values {12, 13} — same masked key as pos=0 group=1
+		bm.Set(0x0002_0001_0000 | 12)
+		bm.Set(0x0002_0001_0000 | 13)
+
+		// Mask zeroes bits 32-63, keeps bits 16-31.
+		// group=0 keys collapse to masked key 0x00000000
+		// group=1 keys collapse to masked key 0x00010000
+		result := masker(bm, 0x00000000FFFF0000)
+
+		// group=0 must contain OR of {0,1} and {2,3}
+		require.True(t, result.Contains(0), "group 0 missing value 0")
+		require.True(t, result.Contains(1), "group 0 missing value 1")
+		require.True(t, result.Contains(2), "group 0 missing value 2 (from pos=1)")
+		require.True(t, result.Contains(3), "group 0 missing value 3 (from pos=1)")
+
+		// group=1 must contain OR of {10,11} and {12,13}
+		require.True(t, result.Contains(0x0001_0000|10), "group 1 missing value 10")
+		require.True(t, result.Contains(0x0001_0000|11), "group 1 missing value 11")
+		require.True(t, result.Contains(0x0001_0000|12), "group 1 missing value 12 (from pos=1)")
+		require.True(t, result.Contains(0x0001_0000|13), "group 1 missing value 13 (from pos=1)")
+
+		require.Equal(t, 8, result.GetCardinality())
+	})
+
+	t.Run("low 16 bits of mask are ignored", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(uint64(1)<<48 | 1)
+		bm.Set(uint64(2)<<48 | 1)
+
+		// Passing mask with low bits set should behave the same
+		// because keys always have low 16 bits unset.
+		r1 := masker(bm, 0x0000FFFFFFFFFFFF)
+		r2 := masker(bm, 0x0000FFFFFFFFFFFF|0xFFFF)
+
+		require.Equal(t, r1.GetCardinality(), r2.GetCardinality())
+		for _, v := range r1.ToArray() {
+			require.True(t, r2.Contains(v))
+		}
+	})
+
+	t.Run("trim-and-regrow: no dead space when inline OR fails on last container", func(t *testing.T) {
+		// Two source keys collapse to the same masked key with non-overlapping
+		// values. The first source container (50 elements, 54 uint16s) is copied
+		// into the result. When the second source key is processed the OR result
+		// (100 elements, 104 uint16s) does not fit inline in the 54-uint16 slot.
+		// Since this is the only container in the result it is always the last
+		// one, so the trim-and-regrow path fires: result.data is truncated back
+		// to before the old container before the new one is appended.
+		//
+		// Without the optimisation the old 54-uint16 container would remain as
+		// dead space, making LenInBytes 108 bytes larger than necessary.
+		bm := NewBitmap()
+		for v := uint64(0); v < 50; v++ {
+			bm.Set(0x0001_0000_0000 | v) // key 1 → masked 0, values 0-49
+		}
+		for v := uint64(50); v < 100; v++ {
+			bm.Set(0x0002_0000_0000 | v) // key 2 → masked 0, values 50-99 (non-overlapping)
+		}
+
+		result := masker(bm, 0x0000_0000_FFFF_0000)
+
+		require.Equal(t, 100, result.GetCardinality())
+		for v := uint64(0); v < 100; v++ {
+			require.True(t, result.Contains(v), "missing value %d", v)
+		}
+
+		// Verify no dead space: total data must equal keys section + single container.
+		// If dead space existed it would add 108 bytes (the old 54-uint16 container).
+		containerOffset := result.keys.val(0)
+		containerSize := int(result.data[containerOffset]) // first uint16 of container = its size
+		expectedLen := (result.keys.size() + containerSize) * 2
+		require.Equal(t, expectedLen, result.LenInBytes(),
+			"LenInBytes should equal keys section + container size with no dead space")
+	})
+
+	t.Run("trim-and-regrow: no dead space when array-to-bitmap conversion on last container", func(t *testing.T) {
+		// Two source keys collapse to the same masked key. Each has 1228
+		// non-overlapping values. When OR'd, cnum+onum = 2456 which meets the
+		// array-to-bitmap conversion threshold (maxContainerSize/5*3 - startIdx).
+		// The first source container (1228 elements, 1232 uint16s) is copied into
+		// the result as an array. The OR with the second source container triggers
+		// conversion to a bitmap (4100 uint16s) which cannot fit inline in the
+		// 1232-uint16 slot. Since this is the only (last) container in the result,
+		// the trim-and-regrow path fires, leaving no dead space.
+		//
+		// Without the optimisation the old 1232-uint16 array container would
+		// remain as dead space, making LenInBytes 2464 bytes larger than necessary.
+		const half = 1228 // cnum+onum = 2456 = maxContainerSize/5*3 - startIdx
+		bm := NewBitmap()
+		for v := uint64(0); v < half; v++ {
+			bm.Set(0x0001_0000_0000 | v) // key 1 → masked 0, values 0-1227
+		}
+		for v := uint64(half); v < 2*half; v++ {
+			bm.Set(0x0002_0000_0000 | v) // key 2 → masked 0, values 1228-2455 (non-overlapping)
+		}
+
+		result := masker(bm, 0x0000_0000_FFFF_0000)
+
+		require.Equal(t, 2*half, result.GetCardinality())
+		for v := uint64(0); v < 2*half; v++ {
+			require.True(t, result.Contains(v), "missing value %d", v)
+		}
+
+		// Verify no dead space: total data must equal keys section + bitmap container.
+		// If dead space existed it would add 2464 bytes (the old 1232-uint16 array).
+		containerOffset := result.keys.val(0)
+		containerSize := int(result.data[containerOffset]) // first uint16 = size = 4100 for bitmap
+		expectedLen := (result.keys.size() + containerSize) * 2
+		require.Equal(t, expectedLen, result.LenInBytes(),
+			"LenInBytes should equal keys section + bitmap container size with no dead space")
+	})
+}
+
+func TestMasked(t *testing.T) {
+	testMaskedCommon(t, func(bm *Bitmap, mask uint64) *Bitmap {
+		return bm.Masked(mask)
+	})
+}
+
+func TestMaskedToBuf(t *testing.T) {
+	testMaskedCommon(t, func(bm *Bitmap, mask uint64) *Bitmap {
+		return bm.MaskedToBuf(mask, make([]byte, 1<<20))
+	})
+
+	t.Run("matches Masked results", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(uint64(1)<<48 | 1)
+		bm.Set(uint64(2)<<48 | 1)
+		bm.Set(uint64(3)<<48 | 2)
+		bm.Set(0x0001_0005_0003)
+		bm.Set(0x0002_0005_0007)
+
+		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
+		for _, m := range masks {
+			expected := bm.Masked(m)
+			got := bm.MaskedToBuf(m, make([]byte, 1<<20))
+
+			require.Equal(t, expected.GetCardinality(), got.GetCardinality())
+			for _, v := range expected.ToArray() {
+				require.True(t, got.Contains(v))
+			}
+		}
+	})
+
+	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
+		bm := NewBitmap()
+		numPositions := uint16(10)
+		numValues := uint64(1000)
+
+		for pos := uint16(0); pos < numPositions; pos++ {
+			for v := uint64(0); v < numValues; v++ {
+				bm.Set(uint64(pos)<<48 | v)
+			}
+		}
+
+		bufSize := 1 << 20 // 1MB
+		result := bm.MaskedToBuf(0x0000FFFFFFFFFFFF, make([]byte, bufSize))
+
+		require.Equal(t, int(numValues), result.GetCardinality())
+		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+	})
+
+	t.Run("length grows but capacity stays", func(t *testing.T) {
+		bm := NewBitmap()
+		for container := uint64(0); container < 50; container++ {
+			bm.Set(container << 16)
+		}
+
+		bufSize := 1 << 20 // 1MB
+		result := bm.MaskedToBuf(math.MaxUint64, make([]byte, bufSize))
+
+		require.Equal(t, 50, result.GetCardinality())
+		require.Greater(t, result.LenInBytes(), 0)
+		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+	})
 }
 
 func TestAnd(t *testing.T) {

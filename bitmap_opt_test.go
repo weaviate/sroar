@@ -1090,21 +1090,26 @@ func TestCloneToBuf(t *testing.T) {
 
 		require.Less(t, clonedLen, cloned.LenInBytes())
 		require.Equal(t, clonedCap, cloned.capInBytes())
+
+		// Verify that expansion reuses the pre-allocated buffer without
+		// allocating new memory. CloneToBuf itself allocates exactly one
+		// Bitmap struct; the Set that triggers data expansion must not
+		// allocate since the buffer has sufficient capacity.
+		allocs := testing.AllocsPerRun(10, func() {
+			c := bm.CloneToBuf(buf)
+			c.Set(1 + uint64(maxCardinality))
+		})
+		require.Equal(t, float64(1), allocs,
+			"only the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
 	})
 
 	t.Run("panic on smaller buffer size", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			require.NotNil(t, r)
-			require.Contains(t, r, "Buffer too small")
-		}()
-
 		bm := NewBitmap()
 		bm.Set(1)
-		bmLen := bm.LenInBytes()
-
-		buf := make([]byte, 0, bmLen-1)
-		bm.CloneToBuf(buf)
+		buf := make([]byte, 0, bm.LenInBytes()-1)
+		require.PanicsWithValue(t,
+			fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
+			func() { bm.CloneToBuf(buf) })
 	})
 
 	t.Run("allow buffer of odd size", func(t *testing.T) {
