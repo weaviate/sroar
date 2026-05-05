@@ -3,6 +3,7 @@ package sroar
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 )
 
@@ -44,19 +45,26 @@ func andContainers(a, b, res *Bitmap, optBuf []uint16) {
 	}
 }
 
+// And performs in-place AND of ra and bm (ra &= bm).
+// ra drives the two-pointer walk: ra containers with no matching bm key must
+// be zeroed out, so every ra container must be visited.
 func (ra *Bitmap) And(bm *Bitmap) *Bitmap {
 	if bm.IsEmpty() {
 		ra.ZeroOut()
 		return ra
 	}
 
-	andContainersInRange(ra, bm, 0, ra.keys.numKeys(), nil)
+	an := ra.keys.numKeys()
+	bn := bm.keys.numKeys()
+	useGallopB := shouldGallop(bn, an)
+	andContainersInRange(ra, bm, 0, an, nil, useGallopB)
 	return ra
 }
 
-// AndConc performs And merge concurrently.
-// Concurrency is calculated based on number of internal containers
-// in destination bitmap, so that each goroutine handles at least
+// AndConc performs And merge concurrently (ra &= bm).
+// ra drives the walk: every ra container must be visited to zero out those
+// with no matching bm key. Concurrency is calculated based on number of
+// internal containers in ra, so that each goroutine handles at least
 // [minContainersPerRoutine] containers.
 // maxConcurrency limits concurrency calculated internally.
 // If maxConcurrency <= 0, then calculated concurrency is not limited.
@@ -70,14 +78,20 @@ func (ra *Bitmap) AndConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		return ra
 	}
 
-	numContainers := ra.keys.numKeys()
-	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil) }
-	concurrentlyInRanges(numContainers, concurrency, callback)
+	an := ra.keys.numKeys()
+	bn := bm.keys.numKeys()
+	concurrency := calcConcurrency(an, minContainersPerRoutine, maxConcurrency)
+	useGallopB := shouldGallop(bn, an/concurrency)
+	callback := func(ai, aj, _ int) { andContainersInRange(ra, bm, ai, aj, nil, useGallopB) }
+	concurrentlyInRanges(an, concurrency, callback)
 	return ra
 }
 
-func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16) {
+// andContainersInRange ANDs a's containers in [ai, aj) with b in place.
+// When useGallop is true, b's pointer advances via exponential search
+// (searchFrom) instead of bi++, skipping large gaps in O(log gap).
+// useGallop should be set when b has many more keys than a's range (b >> a).
+func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16, useGallopB bool) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
@@ -97,17 +111,19 @@ func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16) {
 			bi++
 		} else if ak < bk {
 			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			zeroOutContainer(ac)
+			zeroOutContainer(a.data[off:])
 			ai++
 		} else {
-			bi++
+			if useGallopB {
+				bi = b.keys.searchFrom(bi, ak)
+			} else {
+				bi++
+			}
 		}
 	}
 	for ; ai < aj; ai++ {
 		off := a.keys.val(ai)
-		ac := a.getContainer(off)
-		zeroOutContainer(ac)
+		zeroOutContainer(a.data[off:])
 	}
 }
 
@@ -185,24 +201,35 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	}
 }
 
+// AndNot performs in-place AND-NOT of ra and bm (ra &^= bm).
+// Neither bitmap has unmatched containers requiring mandatory action:
+// unmatched ra containers are kept, unmatched bm containers are irrelevant.
+// The smaller bitmap drives for a minor sequential optimisation.
 func (ra *Bitmap) AndNot(bm *Bitmap) *Bitmap {
 	if bm.IsEmpty() || ra.IsEmpty() {
 		return ra
 	}
 
-	if numContainersA, numContainersB := ra.keys.numKeys(), bm.keys.numKeys(); numContainersB < numContainersA {
-		andNotContainersInRangeB(ra, bm, 0, numContainersB, nil)
+	an, bn := ra.keys.numKeys(), bm.keys.numKeys()
+	// Drive from the larger bitmap so the initial binary search hits the
+	// smaller side. Only the larger side can trigger galloping (the smaller
+	// side can never satisfy candidate > threshold*8), so one flag is always false.
+	if bn > an {
+		useGallopB := shouldGallop(bn, an)
+		andNotContainersInRangeB(ra, bm, 0, bn, nil, false, useGallopB)
 	} else {
-		andNotContainersInRangeA(ra, bm, 0, numContainersA, nil)
+		useGallopA := shouldGallop(an, bn)
+		andNotContainersInRangeA(ra, bm, 0, an, nil, useGallopA, false)
 	}
 
 	return ra
 }
 
-// AndNotConc performs AndNot merge concurrently.
-// Concurrency is calculated based on number of internal containers
-// in source bitmap, so that each goroutine handles at least
-// [minContainersPerRoutine] containers.
+// AndNotConc performs AndNot merge concurrently (ra &^= bm).
+// Neither bitmap has unmatched containers requiring mandatory action, so the
+// smaller bitmap drives to minimise goroutine count. Concurrency is calculated
+// based on number of internal containers in the smaller bitmap, so that each
+// goroutine handles at least [minContainersPerRoutine] containers.
 // maxConcurrency limits concurrency calculated internally.
 // If maxConcurrency <= 0, then calculated concurrency is not limited.
 //
@@ -214,35 +241,55 @@ func (ra *Bitmap) AndNotConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		return ra
 	}
 
-	numContainers := ra.keys.numKeys()
-	andNotCallback := andNotContainersInRangeA
-	if numContainersB := bm.keys.numKeys(); numContainersB < numContainers {
-		numContainers = numContainersB
+	// Drive concurrency from the larger bitmap to maximise the number of
+	// goroutines. Each goroutine independently handles a disjoint range of
+	// the driving bitmap's keys and binary-searches the other bitmap for its
+	// starting position — both directions are safe for concurrent execution.
+	an, bn := ra.keys.numKeys(), bm.keys.numKeys()
+	// Drive from the smaller bitmap: useful work is bounded by min(an, bn)
+	// (only matching keys trigger container operations), so goroutines on the
+	// larger side would scan with no matches. The larger "other" side is then
+	// searched via binary search and is also the one where galloping kicks in.
+	n := min(an, bn)
+	concurrency := calcConcurrency(n, minContainersPerRoutine, maxConcurrency)
+
+	var andNotCallback func(a, b *Bitmap, i, j int, optBuf []uint16, useGallopAi, useGallopBi bool)
+	var useGallopA, useGallopB bool
+	if bn < an {
+		// B is smaller: drive from B, search A.
+		// useGallopB is always false: bn/concurrency < bn < an, so
+		// bn/concurrency > an*8 is impossible.
 		andNotCallback = andNotContainersInRangeB
+		useGallopA = shouldGallop(an, bn/concurrency)
+	} else {
+		// A is smaller (or equal): drive from A, search B.
+		// useGallopA is always false: an/concurrency <= an <= bn, so
+		// an/concurrency > bn*8 is impossible.
+		andNotCallback = andNotContainersInRangeA
+		useGallopB = shouldGallop(bn, an/concurrency)
 	}
 
-	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-	callback := func(i, j, _ int) { andNotCallback(ra, bm, i, j, nil) }
-	concurrentlyInRanges(numContainers, concurrency, callback)
+	callback := func(i, j, _ int) { andNotCallback(ra, bm, i, j, nil, useGallopA, useGallopB) }
+	concurrentlyInRanges(n, concurrency, callback)
 
 	return ra
 }
 
-func andNotContainersInRangeA(a, b *Bitmap, ai, aj int, optBuf []uint16) {
+func andNotContainersInRangeA(a, b *Bitmap, ai, aj int, optBuf []uint16, useGallopA, useGallopB bool) {
 	ak := a.keys.key(ai)
 	bi := b.keys.search(ak)
 	bn := b.keys.numKeys()
-	andNotContainersInRange(a, b, ai, aj, bi, bn, optBuf)
+	andNotContainersInRange(a, b, ai, aj, bi, bn, optBuf, useGallopA, useGallopB)
 }
 
-func andNotContainersInRangeB(a, b *Bitmap, bi, bj int, optBuf []uint16) {
+func andNotContainersInRangeB(a, b *Bitmap, bi, bj int, optBuf []uint16, useGallopA, useGallopB bool) {
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
-	andNotContainersInRange(a, b, ai, an, bi, bj, optBuf)
+	andNotContainersInRange(a, b, ai, an, bi, bj, optBuf, useGallopA, useGallopB)
 }
 
-func andNotContainersInRange(a, b *Bitmap, ai, aj, bi, bj int, optBuf []uint16) {
+func andNotContainersInRange(a, b *Bitmap, ai, aj, bi, bj int, optBuf []uint16, useGallopA, useGallopB bool) {
 	for ai < aj && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
@@ -257,9 +304,17 @@ func andNotContainersInRange(a, b *Bitmap, ai, aj, bi, bj int, optBuf []uint16) 
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallopA {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
-			bi++
+			if useGallopB {
+				bi = b.keys.searchFrom(bi, ak)
+			} else {
+				bi++
+			}
 		}
 	}
 }
@@ -367,16 +422,23 @@ func orContainers(a, b, res *Bitmap, buf []uint16) {
 	}
 }
 
+// Or performs in-place OR of ra and bm (ra |= bm).
+// bm drives the two-pointer walk: bm containers with no matching ra key must
+// be added to ra, so every bm container must be visited. Ra containers with
+// no matching bm key are left unchanged — no visit required.
 func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 	if bm.IsEmpty() {
 		return ra
 	}
 
-	orContainersInRange(ra, bm, 0, bm.keys.numKeys())
+	an := ra.keys.numKeys()
+	bn := bm.keys.numKeys()
+	useGallopA := shouldGallop(an, bn)
+	orContainersInRange(ra, bm, 0, bn, useGallopA)
 	return ra
 }
 
-func orContainersInRange(a, b *Bitmap, bi, bn int) {
+func orContainersInRange(a, b *Bitmap, bi, bj int, useGallopA bool) {
 	buf := make([]uint16, maxContainerSize)
 
 	bk := b.keys.key(bi)
@@ -387,10 +449,11 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 	// expanding underlying data slice and keys subslice once
 	sizeContainers := 0
 	newKeys := 0
-	bKeys := []uint64{}
-	bContainers := [][]uint16{}
+	initialCap := min(bj-bi, 16)
+	bKeys := make([]uint64, 0, initialCap)
+	bContainers := make([][]uint16, 0, initialCap)
 
-	for ai < an && bi < bn {
+	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
@@ -421,11 +484,15 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallopA {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
 				sizeContainers += len(bc)
@@ -435,24 +502,15 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 		}
 	}
 
-	// extend bKeys and bContainers to fit all remaining data
-	// (once instead of multiple times by calling append)
-	if diff := bn - bi; diff > 0 {
-		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
-			bKeysCopy := make([]uint64, ln, ln+diff)
-			copy(bKeysCopy, bKeys)
-			bKeys = bKeysCopy
-		}
-		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
-			bContainersCopy := make([][]uint16, ln, ln+diff)
-			copy(bContainersCopy, bContainers)
-			bContainers = bContainersCopy
-		}
-
-		for ; bi < bn; bi++ {
+	if remaining := bj - bi; remaining > 0 {
+		// All remaining b keys are b-only. Pre-extend capacity to avoid
+		// append doubling in the tail loop.
+		bKeys = slices.Grow(bKeys, remaining)
+		bContainers = slices.Grow(bContainers, remaining)
+		for ; bi < bj; bi++ {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bk := b.keys.key(bi)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
@@ -474,9 +532,10 @@ func orContainersInRange(a, b *Bitmap, bi, bn int) {
 	}
 }
 
-// OrConc performs Or merge concurrently.
-// Concurrency is calculated based on number of internal containers
-// in source bitmap, so that each goroutine handles at least
+// OrConc performs Or merge concurrently (ra |= bm).
+// bm drives the walk: every bm container must be visited to add those with no
+// matching ra key. Concurrency is calculated based on number of internal
+// containers in bm, so that each goroutine handles at least
 // [minContainersPerRoutine] containers.
 // maxConcurrency limits concurrency calculated internally.
 // If maxConcurrency <= 0, then calculated concurrency is not limited.
@@ -489,11 +548,12 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		return ra
 	}
 
-	numContainers := bm.keys.numKeys()
-	concurrency := calcConcurrency(numContainers, minContainersPerRoutine, maxConcurrency)
-
-	if concurrency <= 1 {
-		orContainersInRange(ra, bm, 0, numContainers)
+	an := ra.keys.numKeys()
+	bn := bm.keys.numKeys()
+	concurrency := calcConcurrency(bn, minContainersPerRoutine, maxConcurrency)
+	useGallopA := shouldGallop(an, bn/concurrency)
+	if concurrency == 1 {
+		orContainersInRange(ra, bm, 0, bn, useGallopA)
 		return ra
 	}
 
@@ -503,7 +563,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	allContainers := make([][][]uint16, concurrency)
 	lock := new(sync.Mutex)
 	callback := func(bi, bj, i int) {
-		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj)
+		newKeys, sizeContainers, keys, containers := orContainersInRangeConc(ra, bm, bi, bj, useGallopA)
 
 		lock.Lock()
 		totalNewKeys += newKeys
@@ -512,7 +572,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 		allKeys[i] = keys
 		allContainers[i] = containers
 	}
-	concurrentlyInRanges(numContainers, concurrency, callback)
+	concurrentlyInRanges(bn, concurrency, callback)
 	if totalSizeContainers > 0 {
 		ra.expandConditionally(totalNewKeys, totalSizeContainers)
 
@@ -529,7 +589,7 @@ func (ra *Bitmap) OrConc(bm *Bitmap, maxConcurrency int) *Bitmap {
 	return ra
 }
 
-func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
+func orContainersInRangeConc(a, b *Bitmap, bi, bj int, useGallopA bool,
 ) (newKeys, sizeContainers int, bKeys []uint64, bContainers [][]uint16) {
 	buf := make([]uint16, maxContainerSize)
 
@@ -541,10 +601,11 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 	// expanding underlying data slice and keys subslice once
 	sizeContainers = 0
 	newKeys = 0
-	bKeys = []uint64{}
-	bContainers = [][]uint16{}
+	initialCap := min(bj-bi, 16)
+	bKeys = make([]uint64, 0, initialCap)
+	bContainers = make([][]uint16, 0, initialCap)
 
-	for ai < an && bi < bn {
+	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
 		bk := b.keys.key(bi)
 		if ak == bk {
@@ -563,11 +624,15 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 			ai++
 			bi++
 		} else if ak < bk {
-			ai++
+			if useGallopA {
+				ai = a.keys.searchFrom(ai, bk)
+			} else {
+				ai++
+			}
 		} else {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
 				sizeContainers += len(bc)
@@ -577,24 +642,15 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 		}
 	}
 
-	// extend bKeys and bContainers to fit all remaining data
-	// (once instead of multiple times by calling append)
-	if diff := bn - bi; diff > 0 {
-		if cp, ln := cap(bKeys), len(bKeys); cp-ln < diff {
-			bKeysCopy := make([]uint64, ln, ln+diff)
-			copy(bKeysCopy, bKeys)
-			bKeys = bKeysCopy
-		}
-		if cp, ln := cap(bContainers), len(bContainers); cp-ln < diff {
-			bContainersCopy := make([][]uint16, ln, ln+diff)
-			copy(bContainersCopy, bContainers)
-			bContainers = bContainersCopy
-		}
-
-		for ; bi < bn; bi++ {
+	if remaining := bj - bi; remaining > 0 {
+		// All remaining b keys are b-only. Pre-extend capacity to avoid
+		// append doubling in the tail loop.
+		bKeys = slices.Grow(bKeys, remaining)
+		bContainers = slices.Grow(bContainers, remaining)
+		for ; bi < bj; bi++ {
 			off := b.keys.val(bi)
-			bc := b.getContainer(off)
-			if getCardinality(bc) > 0 {
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
 				bk := b.keys.key(bi)
 				bKeys = append(bKeys, bk)
 				bContainers = append(bContainers, bc)
@@ -609,12 +665,26 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bn int,
 
 const minContainersPerRoutine = 24
 
+// minKeysForGallop is the minimum number of keys a bitmap must have for
+// galloping (exponential+binary search) to outperform sequential bi++ in
+// the two-pointer walk. Below this threshold the key node fits comfortably
+// in CPU cache and hardware prefetching of sequential access beats the
+// scattered memory accesses of exponential search.
+// Applies to And/AndConc (galloping on bm) and Or/OrConc (galloping on ra).
+const minKeysForGallop = 1000
+
+// shouldGallop reports whether the candidate range is large enough relative to
+// the threshold range for exponential search (searchFrom) to outperform linear
+// bi++ / ai++. True when candidate is at least 8× the threshold AND candidate
+// exceeds minKeysForGallop (below which sequential prefetching wins).
+func shouldGallop(candidate, threshold int) bool {
+	return candidate > threshold*8 && candidate > minKeysForGallop
+}
+
 func calcConcurrency(numContainers, minContainers, maxConcurrency int) int {
-	concurrency := numContainers / minContainers
-	if concurrency < 1 || maxConcurrency == 1 {
-		concurrency = 1
-	} else if maxConcurrency > 1 && maxConcurrency < concurrency {
-		concurrency = maxConcurrency
+	concurrency := max(numContainers/minContainers, 1)
+	if maxConcurrency > 0 {
+		concurrency = min(concurrency, maxConcurrency)
 	}
 	return concurrency
 }
@@ -644,10 +714,10 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 		}
 
 		if i != concurrency-1 {
-			go func() {
-				callback(from, to, i)
+			go func(f, t, idx int) {
+				callback(f, t, idx)
 				wg.Done()
-			}()
+			}(from, to, i)
 		} else {
 			callback(from, to, i)
 		}
@@ -1053,9 +1123,11 @@ func (b bitmap) fillWithOnes() {
 func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 	cp := cap(ra.data)
 	ln := len(ra.data)
+	curNumKeys := ra.keys.numKeys()
+	curSizeKeys := ra.keys.size()
 
 	sizeKeys := 8 * newKeys // 2x uint64 (key+offset) = 8x uint16
-	if ra.keys.numKeys()+newKeys < ra.keys.maxKeys() {
+	if curNumKeys+newKeys < ra.keys.maxKeys() {
 		if ln+sizeContainers <= cp {
 			// keys and containers fit. nothing to do
 			return
@@ -1063,8 +1135,6 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 		// keys fit, containers do not. expand slice to make room for containers and only new keys
 	} else {
 		if ln+sizeKeys+sizeContainers <= cp {
-			curNumKeys := ra.keys.numKeys()
-
 			// keys do not fit, containers do. just move containers to make room for keys
 			if curNumKeys > newKeys {
 				// make room for up to curNumKeys additional keys
@@ -1075,30 +1145,26 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 			}
 
 			// new containers will fit. just move containers to make room for keys
-			curSizeKeys := ra.keys.size()
 			newSizeKeys := curSizeKeys + sizeKeys
 
 			ra.data = ra.data[:ln+sizeKeys]
 			n := copy(ra.data[newSizeKeys:], ra.data[curSizeKeys:])
 			ra.memMoved += n
-			Memclr(ra.data[curSizeKeys:newSizeKeys]) // Zero out the space in the middle.
+			clear(ra.data[curSizeKeys:newSizeKeys]) // Zero out the space in the middle.
 
 			ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 			ra.keys.setNodeSize(newSizeKeys)
-			for i := 0; i < curNumKeys; i++ {
-				ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
-			}
+			ra.keys.addToAllVals(uint64(sizeKeys))
 			return
 		}
 		// neither keys nor containers fit. expand slice to make room for containers and more keys
-		sizeKeys = 8 * max(newKeys, ra.keys.numKeys()) // 2x uint64 (key+offset) = 8x uint16
+		sizeKeys = 8 * max(newKeys, curNumKeys) // 2x uint64 (key+offset) = 8x uint16
 	}
 
 	// expand 2x (or up to sizeKeys+sizeNewContainers if 2x is too little)
 	growBy := max(cp, sizeKeys+sizeContainers)
 	out := make([]uint16, ln+sizeKeys, cp+growBy)
 
-	curSizeKeys := ra.keys.size()
 	newSizeKeys := curSizeKeys + sizeKeys
 	copy(out, ra.data[:curSizeKeys])
 	copy(out[newSizeKeys:], ra.data[curSizeKeys:])
@@ -1108,7 +1174,5 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 	ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 	ra.keys.setNodeSize(newSizeKeys)
-	for i := 0; i < ra.keys.numKeys(); i++ {
-		ra.keys.setAt(valOffset(i), ra.keys.val(i)+uint64(sizeKeys))
-	}
+	ra.keys.addToAllVals(uint64(sizeKeys))
 }

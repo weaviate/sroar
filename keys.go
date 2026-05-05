@@ -33,6 +33,14 @@ func (n node) setAt(idx int, k uint64) { n[idx] = k }
 func (n node) setNumKeys(num int) { n[indexNumKeys] = uint64(num) }
 func (n node) setNodeSize(sz int) { n[indexNodeSize] = uint64(sz) }
 
+// addToAllVals adds delta to every container offset stored in the node.
+// It is used when the key region grows and all offsets must be shifted right.
+func (n node) addToAllVals(delta uint64) {
+	for i := valOffset(0); i < valOffset(n.numKeys()); i += 2 {
+		n[i] += delta
+	}
+}
+
 func (n node) maxKey() uint64 {
 	idx := n.numKeys()
 	// numKeys == index of the max key, because 0th index is being used for meta information.
@@ -58,6 +66,15 @@ func (n node) isFull() bool {
 // Search returns the index of a smallest key >= k in a node.
 func (n node) search(k uint64) int {
 	N := n.numKeys()
+	if N == 0 {
+		return 0
+	}
+	// n.key(0) is in the first cache line of the node and is always hot.
+	// This check handles k before the first key or an exact match at position
+	// 0 without entering the binary search.
+	if k <= n.key(0) {
+		return 0
+	}
 	lo, hi := 0, N-1
 	for lo+8 <= hi {
 		mid := lo + (hi-lo)/2
@@ -87,6 +104,44 @@ func (n node) search(k uint64) int {
 	// 9.
 	// }
 	// return int(simd.Search(n[keyOffset(0):keyOffset(N)], k))
+}
+
+// searchFrom returns the index of the smallest key >= k starting the search
+// at position from. Uses exponential search to bracket the target then binary
+// search to pinpoint it — O(log gap) where gap is the distance from from to
+// the result. Equivalent to bi++ for gap=1, but much faster for large gaps.
+func (n node) searchFrom(from int, k uint64) int {
+	N := n.numKeys()
+	lower := from + 1
+	if lower >= N || n.key(lower) >= k {
+		return lower
+	}
+	// Exponential expansion to bracket k.
+	span := 1
+	for lower+span < N && n.key(lower+span) < k {
+		span *= 2
+	}
+	upper := lower + span
+	if upper >= N {
+		upper = N - 1
+	}
+	if n.key(upper) < k {
+		return N
+	}
+	// Binary search within [lower + span/2, upper].
+	lower += span >> 1
+	for lower+1 < upper {
+		mid := (lower + upper) >> 1
+		ki := n.key(mid)
+		if ki < k {
+			lower = mid
+		} else if ki > k {
+			upper = mid
+		} else {
+			return mid
+		}
+	}
+	return upper
 }
 
 // Search returns the index of a smallest key >= k in a node.

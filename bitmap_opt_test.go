@@ -2667,3 +2667,52 @@ func TestExpandConditionally(t *testing.T) {
 		})
 	})
 }
+
+func TestCalcConcurrency(t *testing.T) {
+	t.Run("fewer containers than minimum returns 1", func(t *testing.T) {
+		require.Equal(t, 1, calcConcurrency(10, 24, 0))
+		require.Equal(t, 1, calcConcurrency(0, 24, 0))
+		require.Equal(t, 1, calcConcurrency(23, 24, 0))
+	})
+
+	t.Run("exactly minimum containers returns 1", func(t *testing.T) {
+		require.Equal(t, 1, calcConcurrency(24, 24, 0))
+	})
+
+	t.Run("multiple of minimum returns correct concurrency", func(t *testing.T) {
+		require.Equal(t, 2, calcConcurrency(48, 24, 0))
+		require.Equal(t, 4, calcConcurrency(96, 24, 0))
+		require.Equal(t, 10, calcConcurrency(240, 24, 0))
+	})
+
+	t.Run("non-multiple truncates to floor", func(t *testing.T) {
+		require.Equal(t, 2, calcConcurrency(50, 24, 0)) // 50/24 = 2
+		require.Equal(t, 4, calcConcurrency(99, 24, 0)) // 99/24 = 4
+		require.Equal(t, 3, calcConcurrency(72, 24, 0)) // 72/24 = 3 exactly
+		require.Equal(t, 3, calcConcurrency(95, 24, 0)) // 95/24 = 3
+	})
+
+	t.Run("maxConcurrency=1 forces single goroutine", func(t *testing.T) {
+		require.Equal(t, 1, calcConcurrency(240, 24, 1))
+		require.Equal(t, 1, calcConcurrency(1000, 24, 1))
+	})
+
+	t.Run("maxConcurrency=0 means unlimited", func(t *testing.T) {
+		require.Equal(t, 4, calcConcurrency(96, 24, 0))
+		require.Equal(t, 10, calcConcurrency(240, 24, 0))
+	})
+
+	t.Run("maxConcurrency caps concurrency when lower than calculated", func(t *testing.T) {
+		require.Equal(t, 2, calcConcurrency(96, 24, 2))
+		require.Equal(t, 3, calcConcurrency(240, 24, 3))
+	})
+
+	t.Run("maxConcurrency has no effect when higher than calculated", func(t *testing.T) {
+		require.Equal(t, 4, calcConcurrency(96, 24, 6))
+		require.Equal(t, 4, calcConcurrency(96, 24, 100))
+	})
+
+	t.Run("maxConcurrency equal to calculated returns calculated", func(t *testing.T) {
+		require.Equal(t, 4, calcConcurrency(96, 24, 4))
+	})
+}

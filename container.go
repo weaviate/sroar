@@ -66,6 +66,10 @@ func getCardinality(data []uint16) int {
 	return int(data[indexCardinality]) + int(data[indexCardinality+1])
 }
 
+func isEmpty(data []uint16) bool {
+	return data[indexCardinality]|data[indexCardinality+1] == 0
+}
+
 func setCardinality(data []uint16, c int) {
 	if c > math.MaxUint16 {
 		data[indexCardinality] = math.MaxUint16
@@ -77,11 +81,10 @@ func setCardinality(data []uint16, c int) {
 }
 
 func zeroOutContainer(c []uint16) {
-	switch c[indexType] {
-	case typeArray:
-		array(c).zeroOut()
-	case typeBitmap:
-		bitmap(c).zeroOut()
+	c[indexCardinality] = 0
+	c[indexCardinality+1] = 0
+	if c[indexType] == typeBitmap {
+		clear(c[startIdx:c[indexSize]])
 	}
 }
 
@@ -304,7 +307,7 @@ func (c array) andBitmap(other bitmap) []uint16 {
 func (c array) andNotBitmap(other bitmap, buf []uint16) []uint16 {
 	assert(len(buf) == maxContainerSize)
 	res := array(buf)
-	Memclr(res)
+	clear(res)
 	res[indexSize] = 4
 	for _, e := range c.all() {
 		if !other.has(e) {
@@ -347,7 +350,7 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 		buf = make([]uint16, maxContainerSize)
 	} else {
 		assert(len(buf) == maxContainerSize)
-		assert(len(buf) == copy(buf, zeroContainer))
+		clear(buf[startIdx:])
 	}
 
 	b := bitmap(buf)
@@ -681,11 +684,9 @@ func (b bitmap) cardinality() int {
 	return num
 }
 
-var zeroContainer = make([]uint16, maxContainerSize)
-
 func (b bitmap) zeroOut() {
 	setCardinality(b, 0)
-	copy(b[startIdx:], zeroContainer[startIdx:])
+	clear(b[startIdx:b[indexSize]])
 }
 
 var (
