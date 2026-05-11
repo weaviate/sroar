@@ -1493,6 +1493,498 @@ func (ra *Bitmap) AndMaskedConc(b *Bitmap, mask uint64, maxConcurrency int) *Bit
 	return ra
 }
 
+// CopresenceByMask returns a new bitmap containing every value v in the
+// union of bms whose masked value (v & mask) is present in bms[i].Masked(mask)
+// for every i. Original (unmasked) values are preserved. Equivalent in
+// result to the (much more expensive) fold:
+//
+//	out := bms[0].Masked(mask)
+//	for i := 1; i < len(bms); i++ {
+//	    out = out.And(bms[i].Masked(mask))
+//	}
+//	// then map each masked value back to every original v in any bms[i]
+//	// whose v & mask matches.
+//
+// but processes all inputs in one pass — avoiding intermediate bitmap
+// allocations and walking each input only once. None of the bms are
+// modified.
+//
+// Mask shape requirement: mask & 0xFFFF == 0xFFFF. Other mask shapes are
+// not supported and will yield incorrect results.
+//
+// Edge cases:
+//   - len(bms) == 0: empty result.
+//   - len(bms) == 1: result is a clone of bms[0] (single-input co-presence
+//     is trivially the input).
+//   - any input empty: empty result.
+//
+// Algorithm: with mask_high = mask & 0xFFFFFFFFFFFF0000, group each input's
+// containers by K & mask_high. Walk the masked-key entry slices of all N
+// inputs in lockstep (multi-pointer max-key advance) to find groups present
+// on every side. For each such group:
+//  1. compute pos_i = OR of positions across input i's containers in the group
+//  2. common_pos = AND_i (pos_i) — positions co-present in every side
+//  3. for each unique original key K appearing in any input's group, emit
+//     OR_i(bms[i][K]) AND common_pos at K (omitting empty results)
+//
+// Step 2 short-circuits as soon as common_pos becomes empty.
+func CopresenceByMask(bms []*Bitmap, mask uint64) *Bitmap {
+	if len(bms) == 0 {
+		return NewBitmap()
+	}
+	if len(bms) == 1 {
+		return bms[0].Clone()
+	}
+	return copresenceByMaskInto(bms, mask, NewBitmap())
+}
+
+// CopresenceByMaskToBuf is like [CopresenceByMask] but uses the provided
+// byte slice as the underlying buffer for the result bitmap, avoiding the
+// result's heap allocation when the buffer is large enough. If the buffer
+// is too small the bitmap grows internally (and allocates), so correctness
+// is unaffected — only the allocation-elision is.
+//
+// Sizing guidance: a safe upper bound is the sum of input byte sizes
+// (sum_i bms[i].LenInBytes()). The result's keys area is bounded by the
+// sum of input keys areas, and each result container is bounded by the
+// sum of its contributing inputs' containers (the per-key OR can't exceed
+// it; the subsequent AND with commonPos can only shrink). In practice
+// results are often much smaller — callers that know their workload's
+// typical density can pass a smaller buffer and accept occasional growth.
+//
+// Same mask shape requirement as [CopresenceByMask]: mask & 0xFFFF == 0xFFFF.
+func CopresenceByMaskToBuf(bms []*Bitmap, mask uint64, buf []byte) *Bitmap {
+	if len(bms) == 0 {
+		return NewBitmapToBuf(buf)
+	}
+	if len(bms) == 1 {
+		return bms[0].CloneToBuf(buf)
+	}
+	return copresenceByMaskInto(bms, mask, NewBitmapToBuf(buf))
+}
+
+// copresenceByMaskInto is the shared body of [CopresenceByMask] and
+// [CopresenceByMaskToBuf]. Caller must ensure len(bms) >= 2; the N=0 and
+// N=1 short-circuits are handled at the public entry points because they
+// differ in how `res` is constructed (NewBitmap vs Clone[ToBuf]).
+func copresenceByMaskInto(bms []*Bitmap, mask uint64, res *Bitmap) *Bitmap {
+	n := len(bms)
+	for _, bm := range bms {
+		if bm.IsEmpty() {
+			return res
+		}
+	}
+
+	maskHigh := mask & 0xFFFFFFFFFFFF0000
+
+	allEntries := make([][]keyedMaskedEntry, n)
+	totalEntries := 0
+	for i, bm := range bms {
+		allEntries[i] = buildKeyedMaskedEntries(bm, maskHigh)
+		if len(allEntries[i]) == 0 {
+			return res
+		}
+		totalEntries += len(allEntries[i])
+	}
+
+	// Pre-size res's keys area for an estimated result-key count to avoid
+	// expandKeys-driven shifts during emission. The result has at most one
+	// emitted key per non-empty container across all inputs (sum of
+	// totalEntries), so sum/N (the average per input) is a middle-ground
+	// estimate: under-estimates only when distinct keys-per-masked-group
+	// exceed the per-input average. Under-allocation is recoverable
+	// (expandKeys still fires); the goal is to skip it in the common case.
+	res.expandConditionally(totalEntries/n, 0)
+
+	// Three scratch buffers carry the full algorithm:
+	//   - posBufA / posFallbackA back the OR over the seed group. The result
+	//     becomes commonPos (mutated via AND-in-place across the AND-fold);
+	//     the unused half is returned as `spare` and reused below.
+	//   - posBufB is the third buffer. Paired with `spare`, it backs the
+	//     OR over each non-seed group during the AND-fold.
+	// Once the AND-fold completes, `spare` and `posBufB` are free (their
+	// last contents are the last iPos's OR-result, already folded into
+	// commonPos). Emit reuses them as its mergeBuf and mergeFallback —
+	// emit needs no third buffer because its final AND target is also
+	// mergeFallback (mergeBuf/mergeFallback always point to different
+	// underlying buffers, so writing to mergeFallback never aliases merged).
+	posBufA := make([]uint16, maxContainerSize)
+	posFallbackA := make([]uint16, maxContainerSize)
+	posBufB := make([]uint16, maxContainerSize)
+
+	entryCursors := make([]int, n)
+	emitCursors := make([]int, n)
+	groups := make([][]keyedMaskedEntry, n)
+	// foldOrder[k] is the index of the input to fold at position k of the
+	// AND-fold. Sorted by ascending estimated |pos_i| so the smallest pos_i
+	// seeds commonPos — minimizing intermediate sizes and maximizing the
+	// chance of early break-on-empty. cardEst[i] holds the cardinality
+	// upper bound (sum of container cardinalities) for input i in the
+	// current masked group. Both reused across iterations.
+	foldOrder := make([]int, n)
+	cardEst := make([]int, n)
+
+	for nextCommonGroup(allEntries, entryCursors, groups) {
+		buildFoldOrder(bms, groups, foldOrder, cardEst)
+
+		// commonPos lives in a buffer we mutate via AND-in-place; spare
+		// is the other of posBufA/posFallbackA, reused as one of the two
+		// buffers for every subsequent iPos OR (and again for emit).
+		seed := foldOrder[0]
+		commonPos, spare := orPositionsInGroup(bms[seed], groups[seed], posBufA, posFallbackA)
+		for k := 1; k < n; k++ {
+			i := foldOrder[k]
+			iPos := orPositionsInGroupReadOnly(bms[i], groups[i], spare, posBufB)
+			if c := containerAndAlt(commonPos, iPos, nil, runInline); len(c) > 0 {
+				panic("CopresenceByMask: AND inline returned a new container")
+			}
+			if getCardinality(commonPos) == 0 {
+				break
+			}
+		}
+		if getCardinality(commonPos) == 0 {
+			continue
+		}
+
+		clear(emitCursors)
+		// spare and posBufB held the last iPos's data, which has already
+		// been AND-folded into commonPos. Free to reuse as emit's merge
+		// pair.
+		emitGroupFilteredN(bms, groups, emitCursors, commonPos, spare, posBufB, res)
+	}
+	return res
+}
+
+// buildFoldOrder writes input indices into foldOrder, sorted ascending by
+// estimated |pos_i| (the OR of positions across input i's containers in
+// the current masked group). The estimate is the sum of those containers'
+// cardinalities — exact for single-container groups, an upper bound when
+// containers' positions can overlap.
+//
+// Sorting smallest-first seeds the AND-fold with the smallest pos_i,
+// minimizing intermediate sizes and maximizing the chance of early
+// break-on-empty.
+//
+// cardEst is caller-provided scratch the same length as foldOrder; its
+// contents are overwritten on each call.
+//
+// Small-N fast paths matter: this is called once per masked-group
+// iteration on the hot path. slices.SortFunc has enough per-call overhead
+// that it would dominate per-iteration cost for N=2 (the most common case
+// via the binary entry point).
+func buildFoldOrder(
+	bms []*Bitmap, groups [][]keyedMaskedEntry,
+	foldOrder, cardEst []int,
+) {
+	n := len(groups)
+	for i := 0; i < n; i++ {
+		sum := 0
+		for _, e := range groups[i] {
+			sum += getCardinality(bms[i].data[e.offset:])
+		}
+		cardEst[i] = sum
+		foldOrder[i] = i
+	}
+
+	switch n {
+	case 0, 1:
+		return
+	case 2:
+		// foldOrder is [0, 1] (identity); swap if cardEst[1] < cardEst[0].
+		if cardEst[1] < cardEst[0] {
+			foldOrder[0], foldOrder[1] = 1, 0
+		}
+	default:
+		slices.SortFunc(foldOrder, func(a, b int) int {
+			return cardEst[a] - cardEst[b]
+		})
+	}
+}
+
+// nextCommonGroup advances entryCursors to the next masked-key value that
+// is present in all inputs, then writes the per-input slice of entries
+// sharing that key into groups. Returns false when no further common key
+// exists (i.e. at least one cursor has been exhausted).
+//
+// Both entryCursors and groups are mutated in place so the caller can reuse
+// them across iterations without per-call allocation. groups must already
+// have length len(allEntries); its slice headers are overwritten.
+//
+// Algorithm: multi-pointer max-key walk. At each step, find the largest
+// masked-key value under any cursor and gallop every cursor below it
+// forward to the first entry with maskedKey >= that target. Repeat until
+// either all cursors agree on the same key (a common group is found) or
+// some cursor runs off the end (no more common groups possible). Galloping
+// is repeated rather than done in a single pass because cursors that
+// advance past their previous key may land on a value higher than the
+// previous max — forcing a new round of alignment.
+func nextCommonGroup(
+	allEntries [][]keyedMaskedEntry, entryCursors []int, groups [][]keyedMaskedEntry,
+) bool {
+	n := len(allEntries)
+	for {
+		// Exhaustion check: any cursor at end → no more common groups possible.
+		for i := 0; i < n; i++ {
+			if entryCursors[i] >= len(allEntries[i]) {
+				return false
+			}
+		}
+
+		// Find max masked-key under current cursors.
+		maxKey := allEntries[0][entryCursors[0]].maskedKey
+		for i := 1; i < n; i++ {
+			if k := allEntries[i][entryCursors[i]].maskedKey; k > maxKey {
+				maxKey = k
+			}
+		}
+
+		// Gallop any cursor below maxKey forward to the first entry >= maxKey.
+		advanced := false
+		for i := 0; i < n; i++ {
+			if entryCursors[i] < len(allEntries[i]) && allEntries[i][entryCursors[i]].maskedKey < maxKey {
+				entryCursors[i] = searchKeyedMaskedFrom(allEntries[i], entryCursors[i], maxKey)
+				advanced = true
+			}
+		}
+		if advanced {
+			continue
+		}
+
+		// All cursors agree on maxKey: collect each input's group of entries
+		// sharing that masked key, advance cursors past them, return.
+		for i := 0; i < n; i++ {
+			start := entryCursors[i]
+			for entryCursors[i] < len(allEntries[i]) && allEntries[i][entryCursors[i]].maskedKey == maxKey {
+				entryCursors[i]++
+			}
+			groups[i] = allEntries[i][start:entryCursors[i]]
+		}
+		return true
+	}
+}
+
+// keyedMaskedEntry pairs a container's offset and original key with the
+// masked-key value used for grouping. Sorted slices of these support
+// two-pointer walks over masked-key groups while preserving access to the
+// original (unmasked) key for emission.
+type keyedMaskedEntry struct {
+	maskedKey   uint64
+	originalKey uint64
+	offset      uint64
+}
+
+// buildKeyedMaskedEntries returns a slice of entries for bm, one per
+// non-empty container, sorted by (maskedKey, originalKey). Sorting by
+// originalKey within a masked group lets the per-group emission walk both
+// sides in parallel by original key.
+func buildKeyedMaskedEntries(bm *Bitmap, mask uint64) []keyedMaskedEntry {
+	n := bm.keys.numKeys()
+	entries := make([]keyedMaskedEntry, 0, n)
+	for i := 0; i < n; i++ {
+		offset := bm.keys.val(i)
+		if getCardinality(bm.data[offset:]) == 0 {
+			continue
+		}
+		key := bm.keys.key(i)
+		entries = append(entries, keyedMaskedEntry{
+			maskedKey:   key & mask,
+			originalKey: key,
+			offset:      offset,
+		})
+	}
+	slices.SortFunc(entries, func(a, b keyedMaskedEntry) int {
+		if a.maskedKey != b.maskedKey {
+			if a.maskedKey < b.maskedKey {
+				return -1
+			}
+			return 1
+		}
+		if a.originalKey < b.originalKey {
+			return -1
+		}
+		if a.originalKey > b.originalKey {
+			return 1
+		}
+		return 0
+	})
+	return entries
+}
+
+// searchKeyedMaskedFrom returns the index of the smallest entry whose
+// maskedKey >= target, starting the search at from+1. The caller must
+// guarantee entries[from].maskedKey < target (i.e. that an advance is
+// actually needed). Returns len(entries) if no such entry exists.
+//
+// Uses exponential search to bracket the target then binary search to
+// pinpoint it — O(log gap) where gap is the distance from `from` to the
+// result. Mirrors keys.searchFrom for []keyedMaskedEntry. Equivalent in
+// outcome to a linear `for cursor++` advance but logarithmically faster
+// when one input has a long stretch of masked keys absent from another.
+func searchKeyedMaskedFrom(entries []keyedMaskedEntry, from int, target uint64) int {
+	N := len(entries)
+	lower := from + 1
+	if lower >= N || entries[lower].maskedKey >= target {
+		return lower
+	}
+	// Exponential expansion to bracket target.
+	span := 1
+	for lower+span < N && entries[lower+span].maskedKey < target {
+		span *= 2
+	}
+	upper := lower + span
+	if upper >= N {
+		upper = N - 1
+	}
+	if entries[upper].maskedKey < target {
+		return N
+	}
+	// Binary search within [lower + span/2, upper].
+	lower += span >> 1
+	for lower+1 < upper {
+		mid := (lower + upper) >> 1
+		k := entries[mid].maskedKey
+		if k < target {
+			lower = mid
+		} else if k > target {
+			upper = mid
+		} else {
+			return mid
+		}
+	}
+	return upper
+}
+
+// orPositionsInGroupReadOnly is the no-copy variant of orPositionsInGroup
+// for callers that will treat the result as read-only. For a single-container
+// group it returns the source container slice directly (no buffer write);
+// otherwise it falls through to orPositionsInGroup. The returned slice MUST
+// NOT be mutated by the caller — use only as an input to operations that
+// do not modify their arguments (e.g. AND into a separate accumulator
+// buffer, never AND-in-place into this slice). The spare return from the
+// underlying orPositionsInGroup is dropped since this variant's callers
+// don't track it.
+func orPositionsInGroupReadOnly(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB []uint16) []uint16 {
+	if len(group) == 1 {
+		return bm.getContainer(group[0].offset)
+	}
+	result, _ := orPositionsInGroup(bm, group, bufA, bufB)
+	return result
+}
+
+// orPositionsInGroup returns a slice holding the OR of all containers
+// referenced by group (using bm for data). bufA and bufB are scratch.
+//
+// Returns (result, spare):
+//   - result points to the buffer holding the OR.
+//   - spare points to the OTHER of {bufA, bufB} and is available to the
+//     caller for any unrelated use — its contents are stale OR-intermediate
+//     data but no live references remain.
+//
+// The first container is copied into bufA so the source containers are
+// never mutated; subsequent ORs use the runInline + fallback swap pattern.
+func orPositionsInGroup(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB []uint16) (result, spare []uint16) {
+	first := bm.getContainer(group[0].offset)
+	copy(bufA, first)
+	result, spare = bufA, bufB
+
+	for i := 1; i < len(group); i++ {
+		c := containerOrAlt(result, bm.getContainer(group[i].offset), spare, runInline)
+		if len(c) > 0 {
+			// Inline failed (array→bitmap conversion): result is now in spare.
+			result, spare = spare, result
+		}
+	}
+	return result, spare
+}
+
+// emitGroupFilteredN walks all N groups in lockstep by originalKey. For
+// each unique original key K appearing in any of the groups, it emits
+// OR_i(bms[i][K]) AND commonPos at K in res when non-empty.
+//
+// Buffer protocol for the per-key OR over up to N source containers:
+//   - First source contributing to K: `merged` aliases the source slice
+//     directly (no copy).
+//   - Second source: OR via mode-0 into mergeBuf, `merged` now points to
+//     mergeBuf.
+//   - Third+ source: OR via runInline into mergeFallback, swapping
+//     mergeBuf/mergeFallback when inline grows the container.
+//
+// The final AND with commonPos writes into mergeFallback (mode 0). After
+// the per-key OR, mergeBuf and mergeFallback always point to different
+// underlying buffers (any swaps stay paired), and `merged` is either a
+// source slice or sits in mergeBuf — never in mergeFallback. So writing
+// to mergeFallback never aliases merged. No third buffer needed.
+//
+// cursors must be zeroed by the caller.
+func emitGroupFilteredN(
+	bms []*Bitmap, groups [][]keyedMaskedEntry, cursors []int,
+	commonPos, mergeBuf, mergeFallback []uint16, res *Bitmap,
+) {
+	n := len(bms)
+	for {
+		minKey, ok := nextEmitKey(groups, cursors)
+		if !ok {
+			return
+		}
+
+		// Build merged = OR of all containers at minKey across inputs.
+		var merged []uint16
+		mergedCount := 0
+		for i := 0; i < n; i++ {
+			if cursors[i] >= len(groups[i]) {
+				continue
+			}
+			if groups[i][cursors[i]].originalKey != minKey {
+				continue
+			}
+			c := bms[i].getContainer(groups[i][cursors[i]].offset)
+			cursors[i]++
+
+			switch mergedCount {
+			case 0:
+				merged = c
+			case 1:
+				merged = containerOrAlt(merged, c, mergeBuf, 0)
+			default:
+				if r := containerOrAlt(merged, c, mergeFallback, runInline); len(r) > 0 {
+					mergeBuf, mergeFallback = mergeFallback, mergeBuf
+					merged = r
+				}
+			}
+			mergedCount++
+		}
+
+		filtered := containerAndAlt(merged, commonPos, mergeFallback, 0)
+		if len(filtered) > 0 && getCardinality(filtered) > 0 {
+			offset := res.newContainerNoClr(uint16(len(filtered)))
+			copy(res.data[offset:], filtered)
+			res.setKey(minKey, offset)
+		}
+	}
+}
+
+// nextEmitKey returns the smallest originalKey under any active cursor in
+// groups, or (0, false) when every cursor has reached its group's end.
+// Mirrors nextCommonGroup's role for the per-group emission walk: drives
+// the N-way merge over per-input entry slices that share a common masked
+// key. Does not mutate cursors — the caller advances them while collecting
+// the containers at the returned key.
+func nextEmitKey(groups [][]keyedMaskedEntry, cursors []int) (uint64, bool) {
+	var minKey uint64
+	found := false
+	for i := 0; i < len(groups); i++ {
+		if cursors[i] >= len(groups[i]) {
+			continue
+		}
+		k := groups[i][cursors[i]].originalKey
+		if !found || k < minKey {
+			minKey = k
+			found = true
+		}
+	}
+	return minKey, found
+}
+
 func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int) {
 	// orBuf holds the accumulated OR result across the group.
 	// fallbackBuf is needed only when inline OR fails (array+array that must
