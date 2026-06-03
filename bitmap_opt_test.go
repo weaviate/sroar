@@ -963,6 +963,119 @@ func TestLenBytes(t *testing.T) {
 	})
 }
 
+func TestIntersects(t *testing.T) {
+	t.Run("nil bitmaps return false", func(t *testing.T) {
+		var a, b *Bitmap
+		require.False(t, a.Intersects(b))
+		require.False(t, NewBitmap().Intersects(b))
+		require.False(t, a.Intersects(NewBitmap()))
+	})
+
+	t.Run("empty bitmaps return false", func(t *testing.T) {
+		require.False(t, NewBitmap().Intersects(NewBitmap()))
+	})
+
+	t.Run("no overlap returns false", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(1)
+		a.Set(2)
+		b := NewBitmap()
+		b.Set(3)
+		b.Set(4)
+		require.False(t, a.Intersects(b))
+	})
+
+	t.Run("single common element returns true", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(1)
+		a.Set(2)
+		b := NewBitmap()
+		b.Set(2)
+		b.Set(3)
+		require.True(t, a.Intersects(b))
+	})
+
+	t.Run("matches !Clone().And().IsEmpty()", func(t *testing.T) {
+		cases := []struct{ aVals, bVals []uint64 }{
+			{[]uint64{1, 2, 3}, []uint64{4, 5, 6}},
+			{[]uint64{1, 2, 3}, []uint64{3, 4, 5}},
+			{[]uint64{1, 2, 3}, []uint64{1, 2, 3}},
+			// keys in different containers
+			{[]uint64{1, 1 + uint64(maxCardinality)}, []uint64{2, 1 + uint64(maxCardinality)*2}},
+			{[]uint64{1, 1 + uint64(maxCardinality)}, []uint64{1 + uint64(maxCardinality)}},
+		}
+		for _, tc := range cases {
+			a, b := NewBitmap(), NewBitmap()
+			for _, v := range tc.aVals {
+				a.Set(v)
+			}
+			for _, v := range tc.bVals {
+				b.Set(v)
+			}
+			expected := !a.Clone().And(b).IsEmpty()
+			require.Equal(t, expected, a.Intersects(b))
+		}
+	})
+
+	t.Run("skewed sizes — a much larger than b", func(t *testing.T) {
+		a := NewBitmap()
+		for i := uint64(0); i < 2000; i++ {
+			a.Set(i << 16)
+		}
+		b := NewBitmap()
+		b.Set(1500 << 16)
+		require.True(t, a.Intersects(b))
+		b2 := NewBitmap()
+		b2.Set(9999 << 16) // not in a
+		require.False(t, a.Intersects(b2))
+	})
+}
+
+func TestIntersectsMasked(t *testing.T) {
+	const mask = uint64(0x0000FFFFFFFFFFFF)
+
+	t.Run("empty inputs return false", func(t *testing.T) {
+		var a, b *Bitmap
+		require.False(t, a.IntersectsMasked(b, mask))
+		require.False(t, NewBitmap().IntersectsMasked(b, mask))
+		require.False(t, a.IntersectsMasked(NewBitmap(), mask))
+		require.False(t, NewBitmap().IntersectsMasked(NewBitmap(), mask))
+	})
+
+	t.Run("no overlap returns false", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(uint64(1)<<48 | 1)
+		b := NewBitmap()
+		b.Set(uint64(2)<<48 | 2)
+		require.False(t, a.IntersectsMasked(b, mask))
+	})
+
+	t.Run("match via mask collapse returns true", func(t *testing.T) {
+		a := NewBitmap()
+		a.Set(1) // key=0, value=1
+		// b has key 0x0001<<48|0, masked to key 0: contains value 1
+		b := NewBitmap()
+		b.Set(uint64(1)<<48 | 1)
+		require.True(t, a.IntersectsMasked(b, mask))
+	})
+
+	t.Run("matches !Clone().And(bm.Masked(mask)).IsEmpty()", func(t *testing.T) {
+		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
+		a := NewBitmap()
+		b := NewBitmap()
+		for pos := uint64(0); pos < 4; pos++ {
+			for v := uint64(0); v < 50; v++ {
+				a.Set(pos<<48 | v)
+				b.Set((pos+1)<<48 | v)
+			}
+		}
+		for _, m := range masks {
+			expected := !a.Clone().And(b.Masked(m)).IsEmpty()
+			require.Equal(t, expected, a.IntersectsMasked(b, m), "mask %#x", m)
+		}
+	})
+}
+
 func TestCapBytes(t *testing.T) {
 	t.Run("non-nil bitmap", func(t *testing.T) {
 		bm := NewBitmap()

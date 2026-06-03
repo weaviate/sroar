@@ -1,6 +1,9 @@
 package sroar
 
-import "math/bits"
+import (
+	"math/bits"
+	"slices"
+)
 
 var emptyArrayContainer []uint16
 
@@ -286,6 +289,55 @@ func (b bitmap) andBitmapAlt(other bitmap, optBuf []uint16, runMode int) []uint1
 		return out
 	}
 	return nil
+}
+
+func containerIntersects(ac, bc []uint16) bool {
+	at := ac[indexType]
+	bt := bc[indexType]
+	if at == typeArray && bt == typeArray {
+		return array(ac).intersectsArray(array(bc))
+	}
+	if at == typeArray && bt == typeBitmap {
+		return array(ac).intersectsBitmap(bitmap(bc))
+	}
+	if at == typeBitmap && bt == typeArray {
+		return array(bc).intersectsBitmap(bitmap(ac))
+	}
+	if at == typeBitmap && bt == typeBitmap {
+		return bitmap(ac).intersectsBitmap(bitmap(bc))
+	}
+	panic("containerIntersects: We should not reach here")
+}
+
+func (c array) intersectsArray(other array) bool {
+	cs := c.all()
+	os := other.all()
+	ci, oi := 0, 0
+	for ci < len(cs) && oi < len(os) {
+		if cs[ci] == os[oi] {
+			return true
+		} else if cs[ci] < os[oi] {
+			ci++
+		} else {
+			oi++
+		}
+	}
+	return false
+}
+
+func (c array) intersectsBitmap(other bitmap) bool {
+	return slices.ContainsFunc(c.all(), other.has)
+}
+
+func (b bitmap) intersectsBitmap(other bitmap) bool {
+	bs := uint16To64SliceUnsafe(b[startIdx:])
+	os := uint16To64SliceUnsafe(other[startIdx:])
+	for i := range bs {
+		if bs[i]&os[i] != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func containerAndNotAlt(ac, bc []uint16, optBuf []uint16, runMode int) []uint16 {
