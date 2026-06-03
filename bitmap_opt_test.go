@@ -885,56 +885,48 @@ func TestIssue_Or_NotMergeContainers(t *testing.T) {
 	})
 }
 
-func TestCompareNumKeys(t *testing.T) {
-	var bmNil *Bitmap
+func TestNumContainers(t *testing.T) {
+	t.Run("nil bitmap", func(t *testing.T) {
+		var bm *Bitmap
+		require.Equal(t, 0, bm.NumContainers())
+	})
 
-	bm1Key := NewBitmap()
-	bm1Key.Set(1)
+	t.Run("empty bitmap", func(t *testing.T) {
+		// NewBitmap always pre-allocates the zero-key container, which Cleanup
+		// also never removes, so an empty bitmap has 1 container.
+		bm := NewBitmap()
+		require.Equal(t, 1, bm.NumContainers())
+	})
 
-	bm2Keys := NewBitmap()
-	bm2Keys.Set(1)
-	bm2Keys.Set(1 + uint64(maxCardinality))
+	t.Run("single container", func(t *testing.T) {
+		bm := NewBitmap()
+		bm.Set(1)
+		require.Equal(t, 1, bm.NumContainers())
+	})
 
-	bm3Keys := NewBitmap()
-	bm3Keys.Set(1)
-	bm3Keys.Set(1 + uint64(maxCardinality))
-	bm3Keys.Set(1 + uint64(maxCardinality)*2)
-
-	t.Run("greater", func(t *testing.T) {
-		for _, bms := range [][2]*Bitmap{
-			{bm1Key, bmNil},
-			{bm2Keys, bmNil},
-			{bm2Keys, bm1Key},
-			{bm3Keys, bmNil},
-			{bm3Keys, bm1Key},
-			{bm3Keys, bm2Keys},
-		} {
-			require.Equal(t, 1, bms[0].CompareNumKeys(bms[1]))
+	t.Run("grows with each new container", func(t *testing.T) {
+		bm := NewBitmap()
+		for i, x := range []uint64{1, 1 + uint64(maxCardinality), 1 + uint64(maxCardinality)*2} {
+			bm.Set(x)
+			require.Equal(t, i+1, bm.NumContainers())
 		}
 	})
 
-	t.Run("equal", func(t *testing.T) {
-		for _, bms := range [][2]*Bitmap{
-			{bmNil, bmNil},
-			{bm1Key, bm1Key},
-			{bm2Keys, bm2Keys},
-			{bm3Keys, bm3Keys},
-		} {
-			require.Equal(t, 0, bms[0].CompareNumKeys(bms[1]))
+	t.Run("values in same container don't increase count", func(t *testing.T) {
+		bm := NewBitmap()
+		for x := uint64(0); x < uint64(maxCardinality); x++ {
+			bm.Set(x)
 		}
+		require.Equal(t, 1, bm.NumContainers())
 	})
 
-	t.Run("less", func(t *testing.T) {
-		for _, bms := range [][2]*Bitmap{
-			{bmNil, bm1Key},
-			{bmNil, bm2Keys},
-			{bmNil, bm3Keys},
-			{bm1Key, bm2Keys},
-			{bm1Key, bm3Keys},
-			{bm2Keys, bm3Keys},
-		} {
-			require.Equal(t, -1, bms[0].CompareNumKeys(bms[1]))
-		}
+	t.Run("setting maxCardinality+1 yields 2 containers", func(t *testing.T) {
+		// The zero-key container covers [0, maxCardinality) and is always
+		// pre-allocated, so adding a value just beyond that boundary must
+		// create a second container.
+		bm := NewBitmap()
+		bm.Set(uint64(maxCardinality) + 1)
+		require.Equal(t, 2, bm.NumContainers())
 	})
 }
 
