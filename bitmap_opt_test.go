@@ -3223,7 +3223,7 @@ func TestAndMasked(t *testing.T) {
 		for v := uint64(half); v < 2*half; v++ {
 			b.Set(0x00020000 | v) // key 2 → masked 0, triggers swap with key 1
 		}
-		for v := uint64(2*half); v < 3*half; v++ {
+		for v := uint64(2 * half); v < 3*half; v++ {
 			b.Set(0x00030000 | v) // key 3 → masked 0, OR'd into bitmap inline
 		}
 
@@ -3399,7 +3399,7 @@ func TestAndMaskedConc(t *testing.T) {
 			for v := uint64(half); v < 2*half; v++ {
 				b.Set(uint64(2)<<32 | k<<16 | v)
 			}
-			for v := uint64(2*half); v < 3*half; v++ {
+			for v := uint64(2 * half); v < 3*half; v++ {
 				b.Set(uint64(3)<<32 | k<<16 | v)
 			}
 		}
@@ -3425,5 +3425,474 @@ func TestAndMaskedConc(t *testing.T) {
 		for _, v := range bValues {
 			require.True(t, b.Contains(v))
 		}
+	})
+}
+
+func TestCopresenceByMask(t *testing.T) {
+	// pos packs three fields into a uint64 to give readable test data:
+	//   bits 63-50: hi  (14 bits) — preserved by maskZeroMid
+	//   bits 49-36: mid (14 bits) — zeroed by maskZeroMid
+	//   bits 35-0:  lo  (36 bits) — preserved by maskZeroMid
+	pos := func(hi, mid, lo uint64) uint64 {
+		return (hi << 50) | (mid << 36) | lo
+	}
+	// maskZeroMid keeps hi and lo, zeroes mid. mask & 0xFFFF == 0xFFFF —
+	// satisfies CopresenceByMask's mask-shape requirement.
+	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
+
+	bm := func(values ...uint64) *Bitmap {
+		b := NewBitmap()
+		b.SetMany(values)
+		return b
+	}
+
+	// safeBufSize implements the documented upper bound for CopresenceByMaskToBuf:
+	// sum of input byte sizes. Sized this way, the buf is guaranteed to fit the
+	// result without internal growth.
+	safeBufSize := func(bms []*Bitmap) int {
+		total := 0
+		for _, b := range bms {
+			total += b.LenInBytes()
+		}
+		return total
+	}
+
+	// runBoth exercises a test case through both call paths and asserts the
+	// same result via `check`. CopresenceByMaskToBuf is sized using
+	// safeBufSize so it never needs to grow internally.
+	runBoth := func(t *testing.T, inputs []*Bitmap, mask uint64, check func(t *testing.T, got *Bitmap)) {
+		t.Helper()
+		t.Run("plain", func(t *testing.T) {
+			check(t, CopresenceByMask(inputs, mask))
+		})
+		t.Run("ToBuf", func(t *testing.T) {
+			check(t, CopresenceByMaskToBuf(inputs, mask, make([]byte, safeBufSize(inputs))))
+		})
+	}
+
+	tests := []struct {
+		name   string
+		inputs []*Bitmap
+		mask   uint64
+		want   []uint64
+	}{
+		// --- Edge cases ----------------------------------------------------
+		{
+			name:   "empty slice returns empty",
+			inputs: []*Bitmap{},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			name:   "single input is preserved as-is",
+			inputs: []*Bitmap{bm(pos(1, 1, 5), pos(2, 7, 9))},
+			mask:   maskZeroMid,
+			want:   []uint64{pos(1, 1, 5), pos(2, 7, 9)},
+		},
+		{
+			name:   "all inputs empty returns empty",
+			inputs: []*Bitmap{bm(), bm()},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			name:   "first input empty returns empty",
+			inputs: []*Bitmap{bm(), bm(pos(1, 1, 1))},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			name:   "second input empty returns empty",
+			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm()},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			name: "any empty input among many short-circuits to empty",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5)),
+				NewBitmap(),
+				bm(pos(1, 2, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{},
+		},
+
+		// --- Binary cases --------------------------------------------------
+		{
+			// a={(1,1,1)}, b={(1,2,1),(1,3,1)}. After masking mid=0 each
+			// side maps to {(1,0,1)}. Common = {(1,0,1)} → all originals
+			// emit (different mid values are kept distinct in the result).
+			name:   "shared masked group: union of contributing mid values",
+			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm(pos(1, 2, 1), pos(1, 3, 1))},
+			mask:   maskZeroMid,
+			want:   []uint64{pos(1, 1, 1), pos(1, 2, 1), pos(1, 3, 1)},
+		},
+		{
+			// a→{(1,0,8)}, b→{(2,0,8)}. Different masked groups — no co-presence.
+			name:   "different hi yields disjoint masked groups",
+			inputs: []*Bitmap{bm(pos(1, 1, 8)), bm(pos(2, 1, 8))},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			// Same hi, but lo differs: a→{(1,0,1)}, b→{(1,0,2)}. Common = ∅.
+			name:   "same hi different lo: no co-presence on lo",
+			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm(pos(1, 2, 2))},
+			mask:   maskZeroMid,
+			want:   []uint64{},
+		},
+		{
+			// a's lo set = {1,2,3}, b's lo = {2}. Only lo=2 is shared.
+			// Result emits both originals whose lo is 2.
+			name: "lo intersection: only shared lo values survive",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 1, 3)),
+				bm(pos(1, 2, 2)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(1, 1, 2), pos(1, 2, 2)},
+		},
+		{
+			// Two distinct masked groups (hi=1 and hi=2) are each co-present
+			// on their respective sides; both contribute fully.
+			name: "two distinct shared groups both contribute",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 1), pos(2, 1, 1)),
+				bm(pos(1, 2, 1), pos(2, 2, 1)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{
+				pos(1, 1, 1), pos(1, 2, 1),
+				pos(2, 1, 1), pos(2, 2, 1),
+			},
+		},
+		{
+			// hi=1 only in a, hi=2 in both. Only hi=2 group contributes.
+			name: "one shared group, the other only in a is filtered out",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 9), pos(2, 1, 9)),
+				bm(pos(2, 2, 9)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(2, 1, 9), pos(2, 2, 9)},
+		},
+		{
+			// a→{(3,0,100)}; b→{(1,0,100),(3,0,100)}. Common = {(3,0,100)}.
+			// b's pos(1,5,100) is filtered out — its masked value is unique to b.
+			name: "extra container in b filtered out by partial overlap",
+			inputs: []*Bitmap{
+				bm(pos(3, 3, 100)),
+				bm(pos(1, 5, 100), pos(3, 4, 100)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(3, 3, 100), pos(3, 4, 100)},
+		},
+		{
+			// a has 5 lo values at mid=1; b has 2 of them at mid=2.
+			// Only the 2 shared lo values survive on both sides — interleaved
+			// in the want slice in numerical order (which is also ToArray
+			// order): (mid=1, lo=2), (mid=1, lo=4), (mid=2, lo=2), (mid=2, lo=4).
+			name: "many lo values: only co-present lo values survive",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 1, 3), pos(1, 1, 4), pos(1, 1, 5)),
+				bm(pos(1, 2, 2), pos(1, 2, 4)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{
+				pos(1, 1, 2), pos(1, 1, 4),
+				pos(1, 2, 2), pos(1, 2, 4),
+			},
+		},
+		{
+			// mask = ^0 → every value masks to itself → masked AND ≡ exact
+			// set intersection of the input bitmaps.
+			name:   "mask=^0 emits intersection of overlapping containers",
+			inputs: []*Bitmap{bm(10, 20, 30), bm(20, 30, 40)},
+			mask:   ^uint64(0),
+			want:   []uint64{20, 30},
+		},
+		{
+			// doc spans into the container key: doc=65537 sets bit 16 in v,
+			// which lives in the container key (bits 16-63). pos(1,1,65537)
+			// and pos(1,1,1) thus sit in DIFFERENT containers, and under
+			// maskZeroMid (which preserves the doc-high portion) they land in
+			// DIFFERENT masked groups despite sharing hi and mid.
+			name: "doc-high contributes to masked container key",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 65537), pos(1, 1, 1)),
+				bm(pos(1, 2, 65537)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(1, 1, 65537), pos(1, 2, 65537)},
+		},
+		{
+			// One masked group ((hi=1, mid=0)) but each side has multiple
+			// distinct exact keys in it, with partial overlap: K(1,1) is in
+			// both, K(1,2) only in a, K(1,3) only in b.
+			//   a positions: K(1,1)→{1,2}, K(1,2)→{3,4}.
+			//   b positions: K(1,1)→{2,5}, K(1,3)→{1,6}.
+			//   A_pos = {1,2,3,4}; B_pos = {1,2,5,6}; common_pos = {1,2}.
+			// Per key:
+			//   K(1,1) (both): (a OR b) AND common_pos = {1,2,5} AND {1,2} = {1,2}.
+			//   K(1,2) (a-only): {3,4} AND {1,2} = ∅ → skip.
+			//   K(1,3) (b-only): {1,6} AND {1,2} = {1} → emit.
+			name: "multiple containers per group, partial exact-key overlap",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 2, 3), pos(1, 2, 4)),
+				bm(pos(1, 1, 2), pos(1, 1, 5), pos(1, 3, 1), pos(1, 3, 6)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(1, 1, 1), pos(1, 1, 2), pos(1, 3, 1)},
+		},
+
+		// --- N-ary cases (ported from the old chained tests, now direct
+		// CopresenceByMask calls). -----------------------------------------
+		{
+			name: "three-way: all inputs share single co-present group",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5)),
+				bm(pos(1, 2, 5)),
+				bm(pos(1, 3, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5)},
+		},
+		{
+			name: "three-way: one input misses the group → empty",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5)),
+				bm(pos(1, 2, 5)),
+				bm(pos(2, 3, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{},
+		},
+		{
+			name: "three-way: two distinct groups, all inputs contribute",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5), pos(2, 1, 5)),
+				bm(pos(1, 2, 5), pos(2, 2, 5)),
+				bm(pos(1, 3, 5), pos(2, 3, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{
+				pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5),
+				pos(2, 1, 5), pos(2, 2, 5), pos(2, 3, 5),
+			},
+		},
+		{
+			// Group (hi=1) is in all 3; group (hi=2) is in inputs 1+2 but
+			// missing from input 3 → drops out during the AND fold.
+			name: "three-way: only the fully co-present group survives",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5), pos(2, 1, 5)),
+				bm(pos(1, 2, 5), pos(2, 2, 5)),
+				bm(pos(1, 3, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5)},
+		},
+		{
+			// Five-way intersection. Group (hi=1) is in all five → emits;
+			// group (hi=2) is only in the first four → drops out at the fifth.
+			name: "five-way: only fully co-present group survives",
+			inputs: []*Bitmap{
+				bm(pos(1, 1, 5), pos(2, 1, 5)),
+				bm(pos(1, 2, 5), pos(2, 2, 5)),
+				bm(pos(1, 3, 5), pos(2, 3, 5)),
+				bm(pos(1, 4, 5), pos(2, 4, 5)),
+				bm(pos(1, 5, 5)),
+			},
+			mask: maskZeroMid,
+			want: []uint64{
+				pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5),
+				pos(1, 4, 5), pos(1, 5, 5),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runBoth(t, tt.inputs, tt.mask, func(t *testing.T, got *Bitmap) {
+				require.Equal(t, tt.want, got.ToArray())
+			})
+		})
+	}
+
+	t.Run("mixed array and bitmap containers in same group", func(t *testing.T) {
+		// Force a bitmap container in input 0 by populating one container
+		// with thousands of positions; input 1 uses a small array container
+		// for the same masked group. Exercises array/bitmap interop in the
+		// OR/AND container ops triggered by the algorithm.
+		aVals := make([]uint64, 3000)
+		for i := range aVals {
+			aVals[i] = pos(1, 1, uint64(i))
+		}
+		inputs := []*Bitmap{bm(aVals...), bm(pos(1, 2, 100), pos(1, 2, 2000), pos(1, 2, 9999))}
+
+		// A_pos = {0..2999}; B_pos = {100, 2000, 9999}; common_pos = {100, 2000}.
+		// 9999 is outside A's range, so it doesn't survive.
+		want := []uint64{
+			pos(1, 1, 100), pos(1, 1, 2000),
+			pos(1, 2, 100), pos(1, 2, 2000),
+		}
+		runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
+			require.Equal(t, want, got.ToArray())
+		})
+	})
+
+	t.Run("wide gap between common masked keys exercises galloping", func(t *testing.T) {
+		// inputs[0] has 200 distinct masked groups (hi=1..200); inputs[1]
+		// has just the last one. The entry-walk's max-key advance must
+		// skip past 199 of inputs[0]'s entries — linear advance would step
+		// 199 times, while galloping reaches the target in O(log 199) ≈ 8
+		// steps. Correctness is what's checked here; the gallop path is
+		// exercised regardless.
+		aVals := make([]uint64, 200)
+		for i := range aVals {
+			hi := uint64(i + 1)
+			aVals[i] = pos(hi, 1, hi)
+		}
+		inputs := []*Bitmap{bm(aVals...), bm(pos(200, 1, 200))}
+
+		want := []uint64{pos(200, 1, 200)}
+		runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
+			require.Equal(t, want, got.ToArray())
+		})
+	})
+}
+
+func TestCopresenceByMaskProperties(t *testing.T) {
+	pos := func(hi, mid, lo uint64) uint64 {
+		return (hi << 50) | (mid << 36) | lo
+	}
+	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
+
+	bm := func(values ...uint64) *Bitmap {
+		b := NewBitmap()
+		b.SetMany(values)
+		return b
+	}
+
+	t.Run("commutative across argument order (N=2)", func(t *testing.T) {
+		a := bm(pos(1, 1, 1), pos(2, 1, 1))
+		b := bm(pos(1, 2, 1), pos(2, 2, 1))
+
+		ab := CopresenceByMask([]*Bitmap{a, b}, maskZeroMid).ToArray()
+		ba := CopresenceByMask([]*Bitmap{b, a}, maskZeroMid).ToArray()
+		require.Equal(t, ab, ba)
+	})
+
+	t.Run("permutation-invariant across argument order (N=3)", func(t *testing.T) {
+		// For inputs with non-empty n-way co-presence, every permutation of
+		// the slice must yield the same value set. The algorithm's cursor
+		// initialization is order-sensitive but the result is not.
+		a := bm(pos(1, 1, 5), pos(2, 1, 5))
+		b := bm(pos(1, 2, 5), pos(3, 2, 5))
+		c := bm(pos(1, 3, 5), pos(2, 3, 5))
+
+		perms := [][]*Bitmap{
+			{a, b, c}, {a, c, b}, {b, a, c}, {b, c, a}, {c, a, b}, {c, b, a},
+		}
+		var first []uint64
+		for i, p := range perms {
+			got := CopresenceByMask(p, maskZeroMid).ToArray()
+			if i == 0 {
+				first = got
+				continue
+			}
+			require.Equal(t, first, got, "permutation %d differed", i)
+		}
+	})
+
+	t.Run("idempotent: CopresenceByMask([a, a], m) preserves a", func(t *testing.T) {
+		a := bm(pos(1, 1, 1), pos(2, 5, 1), pos(3, 9, 2))
+
+		got := CopresenceByMask([]*Bitmap{a, a}, maskZeroMid).ToArray()
+		require.Equal(t, a.ToArray(), got)
+	})
+
+	t.Run("matches A.Masked(m).And(B.Masked(m)) on co-presence", func(t *testing.T) {
+		// The result's masked image must equal the explicit
+		// A.Masked(m).And(B.Masked(m)) reference.
+		a := bm(
+			pos(1, 1, 1), pos(1, 1, 2), pos(2, 1, 1),
+			pos(1, 1, 100), pos(3, 9, 100),
+		)
+		b := bm(
+			pos(1, 2, 1), pos(1, 3, 2), pos(2, 7, 1),
+			pos(1, 4, 200), pos(5, 0, 100),
+		)
+
+		want := a.Masked(maskZeroMid).And(b.Masked(maskZeroMid))
+		got := CopresenceByMask([]*Bitmap{a, b}, maskZeroMid).Masked(maskZeroMid)
+
+		require.Equal(t, want.ToArray(), got.ToArray())
+	})
+
+	t.Run("mask=^0 reduces to set intersection", func(t *testing.T) {
+		a := bm(10, 20, 30, 40)
+		b := bm(20, 30, 50)
+
+		got := CopresenceByMask([]*Bitmap{a, b}, ^uint64(0)).ToArray()
+		require.Equal(t, []uint64{20, 30}, got)
+	})
+}
+
+func TestCopresenceByMaskToBuf(t *testing.T) {
+	// TestCopresenceByMask runs every table case through both
+	// CopresenceByMask and CopresenceByMaskToBuf, so result-correctness is
+	// covered there. The subtests below verify ToBuf-specific behaviour
+	// that the unified table can't observe.
+	pos := func(hi, mid, lo uint64) uint64 {
+		return (hi << 50) | (mid << 36) | lo
+	}
+	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
+
+	bm := func(values ...uint64) *Bitmap {
+		b := NewBitmap()
+		b.SetMany(values)
+		return b
+	}
+
+	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
+		// With a generously-sized buffer, the result bitmap's data slice
+		// should never need to grow — capInBytes stays at the input buffer's
+		// original capacity.
+		inputs := []*Bitmap{
+			bm(pos(1, 1, 5), pos(2, 1, 5), pos(3, 1, 5)),
+			bm(pos(1, 2, 5), pos(2, 2, 5)),
+			bm(pos(1, 3, 5)),
+		}
+		bufBytes := 64 * 1024
+		buf := make([]byte, bufBytes)
+		got := CopresenceByMaskToBuf(inputs, maskZeroMid, buf)
+
+		require.Greater(t, got.GetCardinality(), 0)
+		require.Equal(t, bufBytes, got.capInBytes(),
+			"result cap should match the input buffer cap when no growth occurred")
+	})
+
+	t.Run("single input is cloned into buf, not aliased", func(t *testing.T) {
+		// Single-input short-circuit returns a Clone-backed-by-buf. Verify
+		// the result is independent of the source.
+		a := bm(pos(1, 1, 5), pos(2, 7, 9))
+		got := CopresenceByMaskToBuf([]*Bitmap{a}, maskZeroMid, make([]byte, 4096))
+		require.Equal(t, a.ToArray(), got.ToArray())
+		got.Set(pos(99, 0, 0))
+		require.False(t, a.Contains(pos(99, 0, 0)), "result must be a clone, not aliased")
+	})
+
+	t.Run("undersized buf still produces correct result (auto-grows)", func(t *testing.T) {
+		// Pass a tiny buffer; the bitmap internally allocates more space.
+		// Result correctness is preserved.
+		inputs := []*Bitmap{
+			bm(pos(1, 1, 1), pos(1, 1, 2)),
+			bm(pos(1, 2, 1), pos(1, 2, 2)),
+		}
+		got := CopresenceByMaskToBuf(inputs, maskZeroMid, make([]byte, 8))
+		expected := CopresenceByMask(inputs, maskZeroMid)
+		require.Equal(t, expected.ToArray(), got.ToArray())
 	})
 }
