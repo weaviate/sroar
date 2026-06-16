@@ -17,6 +17,7 @@
 package sroar
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"sort"
@@ -26,7 +27,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-const mask = uint64(0xFFFFFFFFFFFF0000)
+const (
+	mask                    = uint64(0xFFFFFFFFFFFF0000)
+	serializeAsIntThreshold = 16
+)
 
 type Bitmap struct {
 	data []uint16
@@ -49,6 +53,14 @@ func FromBuffer(data []byte) *Bitmap {
 	if len(data) < 8 {
 		return NewBitmap()
 	}
+	if len(data) < 8*serializeAsIntThreshold {
+		bm := NewBitmapWith(len(data) / 8)
+		for i := 0; i < len(data); i += 8 {
+			val := binary.LittleEndian.Uint64(data[i:])
+			bm.Set(val)
+		}
+		return bm
+	}
 	du := byteTo16SliceUnsafe(data)
 	x := toUint64Slice(du[:4])[indexNodeSize]
 	return &Bitmap{
@@ -65,6 +77,15 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	if len(src) < 8 {
 		return NewBitmap()
 	}
+	if len(src) <= 8*serializeAsIntThreshold {
+		// For small bitmaps, it's more efficient to convert to array representation.
+		bm := NewBitmapWith(len(src) / 8)
+		for i := 0; i < len(src); i += 8 {
+			val := binary.LittleEndian.Uint64(src[i:])
+			bm.Set(val)
+		}
+		return bm
+	}
 	src16 := byteTo16SliceUnsafe(src)
 	dst16 := make([]uint16, len(src16))
 	copy(dst16, src16)
@@ -76,9 +97,22 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	}
 }
 
+func uint64SliceToByteSlice(src []uint64, dst []byte) {
+	for i, v := range src {
+		binary.LittleEndian.PutUint64(dst[i*8:], v)
+	}
+}
+
 func (ra *Bitmap) ToBuffer() []byte {
 	if ra.IsEmpty() {
 		return nil
+	}
+	if ra.GetCardinality() <= serializeAsIntThreshold {
+		// For small bitmaps, it's more efficient to convert to array representation.
+		arr := ra.ToArray()
+		dst := make([]byte, len(arr)*8)
+		uint64SliceToByteSlice(arr, dst)
+		return dst
 	}
 	return toByteSlice(ra.data)
 }
@@ -86,6 +120,13 @@ func (ra *Bitmap) ToBuffer() []byte {
 func (ra *Bitmap) ToBufferWithCopy() []byte {
 	if ra.IsEmpty() {
 		return nil
+	}
+	if ra.GetCardinality() <= serializeAsIntThreshold {
+		// For small bitmaps, it's more efficient to convert to array representation.
+		arr := ra.ToArray()
+		dst := make([]byte, len(arr)*8)
+		uint64SliceToByteSlice(arr, dst)
+		return dst
 	}
 	buf := make([]uint16, len(ra.data))
 	copy(buf, ra.data)
