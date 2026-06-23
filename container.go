@@ -47,6 +47,16 @@ const (
 	// it would be divided by 16.
 	// 4 for header and 4096 for storing bitmap container. In Uint16.
 	maxContainerSize = 4 + (1<<16)/16
+
+	// bitmapDataWords is the number of uint16 words in a bitmap container's
+	// data area (= maxContainerSize minus the 4-word header). 4096 in
+	// current layout. Left as an untyped int constant so callers can use it
+	// in any numeric context (array sizes, uint16 arithmetic, int loops).
+	bitmapDataWords = maxContainerSize - 4
+
+	// bitmapDataUint64s is bitmapDataWords reinterpreted as uint64 words
+	// (used in `uint16To64SliceUnsafe`-style cast loops). 1024 in current layout.
+	bitmapDataUint64s = bitmapDataWords / 4
 )
 
 func incrCardinality(data []uint16) {
@@ -59,7 +69,11 @@ func incrCardinality(data []uint16) {
 }
 
 var invalidCardinality int = math.MaxUint16 + 10
-var maxCardinality int = math.MaxUint16 + 1
+
+// maxCardinality is the number of bit positions a bitmap container can hold
+// — equivalently, the cardinality of the value space within one container.
+// 65536 = math.MaxUint16 + 1 = bitmapDataWords * 16.
+const maxCardinality = math.MaxUint16 + 1
 
 func getCardinality(data []uint16) int {
 	// This sum has to be done using two ints to avoid overflow.
