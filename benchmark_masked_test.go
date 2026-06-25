@@ -73,7 +73,7 @@ func BenchmarkMasked(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				bm.Masked(mask)
+				Masked(bm, mask)
 			}
 		})
 	}
@@ -82,13 +82,13 @@ func BenchmarkMasked(b *testing.B) {
 func BenchmarkMaskedToBuf(b *testing.B) {
 	for _, tc := range maskedBenchCases {
 		bm, mask := buildMaskedBitmap(tc.numKeys, tc.valsPerKey, tc.numUniqueAfterMask)
-		warm := bm.Masked(mask)
+		warm := Masked(bm, mask)
 		buf := make([]byte, len(warm.data)*2+4096)
 
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				bm.MaskedToBuf(mask, buf)
+				MaskedToBuf(bm, mask, buf)
 			}
 		})
 	}
