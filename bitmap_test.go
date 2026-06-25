@@ -752,13 +752,13 @@ func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap
 
 func TestMasked(t *testing.T) {
 	testMaskedCommon(t, func(bm *Bitmap, mask uint64) *Bitmap {
-		return bm.Masked(mask)
+		return Masked(bm, mask)
 	})
 }
 
 func TestMaskedToBuf(t *testing.T) {
 	testMaskedCommon(t, func(bm *Bitmap, mask uint64) *Bitmap {
-		return bm.MaskedToBuf(mask, make([]byte, 1<<20))
+		return MaskedToBuf(bm, mask, make([]byte, 1<<20))
 	})
 
 	t.Run("matches Masked results", func(t *testing.T) {
@@ -771,8 +771,8 @@ func TestMaskedToBuf(t *testing.T) {
 
 		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
 		for _, m := range masks {
-			expected := bm.Masked(m)
-			got := bm.MaskedToBuf(m, make([]byte, 1<<20))
+			expected := Masked(bm, m)
+			got := MaskedToBuf(bm, m, make([]byte, 1<<20))
 
 			require.Equal(t, expected.GetCardinality(), got.GetCardinality())
 			for _, v := range expected.ToArray() {
@@ -793,7 +793,7 @@ func TestMaskedToBuf(t *testing.T) {
 		}
 
 		bufSize := 1 << 20 // 1MB
-		result := bm.MaskedToBuf(0x0000FFFFFFFFFFFF, make([]byte, bufSize))
+		result := MaskedToBuf(bm, 0x0000FFFFFFFFFFFF, make([]byte, bufSize))
 
 		require.Equal(t, int(numValues), result.GetCardinality())
 		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
@@ -806,7 +806,7 @@ func TestMaskedToBuf(t *testing.T) {
 		}
 
 		bufSize := 1 << 20 // 1MB
-		result := bm.MaskedToBuf(math.MaxUint64, make([]byte, bufSize))
+		result := MaskedToBuf(bm, math.MaxUint64, make([]byte, bufSize))
 
 		require.Equal(t, 50, result.GetCardinality())
 		require.Greater(t, result.LenInBytes(), 0)
