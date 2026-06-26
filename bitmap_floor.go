@@ -394,7 +394,7 @@ func emitFloorsBucketed(c []uint16, cacheLo, cacheHi *[floorCacheHalf]uint32, bu
 func floorSetBucketBit(bucketBufs []uint16, bucketStates []floorBucketState, bIdx int, low uint16) {
 	wordIdx := low >> 4
 	bufIdx := bIdx*maxContainerSize + int(startIdx) + int(wordIdx)
-	bit := bitmapMask[low&0xF]
+	bit := bitMask(low&0xF)
 	if bucketBufs[bufIdx]&bit != 0 {
 		return
 	}
