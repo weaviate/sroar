@@ -167,9 +167,7 @@ func (ra *Bitmap) initSpaceForKeys(N int) {
 	assert(1 == ra.keys.numKeys()) // This initialization assumes that the number of keys are 1.
 
 	// The containers have moved to the right bySize. So, update their offsets.
-	// Currently, there's only one container.
-	val := ra.keys.val(0)
-	ra.keys.setAt(valOffset(0), val+uint64(bySize))
+	ra.keys.updateAllOffsets(bySize)
 }
 
 // setKey sets a key and container offset.
@@ -202,11 +200,7 @@ func (ra *Bitmap) expandKeys(bySize uint64) uint64 {
 	ra.keys.setNodeSize(int(curSize + bySize))
 
 	// All containers have moved to the right by bySize bytes.
-	// Update their offsets.
-	n := ra.keys
-	for i := 0; i < n.numKeys(); i++ {
-		n.setAt(valOffset(i), n.val(i)+uint64(bySize))
-	}
+	ra.keys.updateAllOffsets(bySize)
 	return bySize
 }
 

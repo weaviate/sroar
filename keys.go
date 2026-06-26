@@ -33,14 +33,6 @@ func (n node) setAt(idx int, k uint64) { n[idx] = k }
 func (n node) setNumKeys(num int) { n[indexNumKeys] = uint64(num) }
 func (n node) setNodeSize(sz int) { n[indexNodeSize] = uint64(sz) }
 
-// addToAllVals adds delta to every container offset stored in the node.
-// It is used when the key region grows and all offsets must be shifted right.
-func (n node) addToAllVals(delta uint64) {
-	for i := valOffset(0); i < valOffset(n.numKeys()); i += 2 {
-		n[i] += delta
-	}
-}
-
 func (n node) maxKey() uint64 {
 	idx := n.numKeys()
 	// numKeys == index of the max key, because 0th index is being used for meta information.
@@ -241,16 +233,38 @@ func (n node) set(k, v uint64) bool {
 	// panic("shouldn't reach here")
 }
 
+// updateOffsets shifts every container offset greater than beyond by `by`
+// (added when add is true, subtracted otherwise). It is used when a container
+// is expanded or removed in place and all containers physically after it move.
+//
+// The offset column is interleaved with keys (stride 2) and sorted by key, not
+// by offset, so every key must be visited — the scan is inherently O(numKeys).
+// The loop is hoisted to a single bounds-checked slice with the add/sub branch
+// lifted out of the loop body.
 func (n node) updateOffsets(beyond, by uint64, add bool) {
-	for i := 0; i < n.numKeys(); i++ {
-		if offset := n.val(i); offset > beyond {
-			if add {
-				n.setAt(valOffset(i), offset+by)
-			} else {
-				assert(offset >= by)
-				n.setAt(valOffset(i), offset-by)
+	vals := n[indexNodeStart : indexNodeStart+2*n.numKeys()]
+	if add {
+		for i := 1; i < len(vals); i += 2 {
+			if o := vals[i]; o > beyond {
+				vals[i] = o + by
 			}
 		}
+	} else {
+		for i := 1; i < len(vals); i += 2 {
+			if o := vals[i]; o > beyond {
+				assert(o >= by)
+				vals[i] = o - by
+			}
+		}
+	}
+}
+
+// updateAllOffsets adds delta to every container offset stored in the node.
+// It is used when the key region grows and all offsets must be shifted right.
+func (n node) updateAllOffsets(delta uint64) {
+	vals := n[indexNodeStart : indexNodeStart+2*n.numKeys()]
+	for i := 1; i < len(vals); i += 2 {
+		vals[i] += delta
 	}
 }
 
