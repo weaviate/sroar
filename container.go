@@ -172,11 +172,23 @@ func (c array) has(x uint16) bool {
 }
 
 func (c array) add(x uint16) bool {
-	idx := c.find(x)
 	N := getCardinality(c)
-	offset := int(startIdx) + idx
+	si := int(startIdx)
 
-	if int(idx) < N {
+	// Fast path: in-order (ascending) insertion appends past the current max
+	// without a binary search or a shift. Callers guarantee room for one more
+	// element (Set checks isFull and expands first; andNotBitmap sizes the
+	// buffer to maxContainerSize). This is the common case for sorted ingestion.
+	if N == 0 || x > c[si+N-1] {
+		c[si+N] = x
+		incrCardinality(c)
+		return true
+	}
+
+	idx := c.find(x)
+	offset := si + idx
+
+	if idx < N {
 		if c[offset] == x {
 			return false
 		}
