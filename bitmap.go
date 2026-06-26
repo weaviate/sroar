@@ -45,8 +45,8 @@ type Bitmap struct {
 	// key to its container offset, skipping the key binary search on
 	// repeated/clustered Set/Remove calls (e.g. ascending ingestion or deletion).
 	// cacheValid is cleared wherever a key's offset can change: a container
-	// moving (scootRight, scootLeft, expandConditionally) or a key being
-	// repointed without a move (setKey). Remove never changes an offset (it
+	// moving (scootRight when it moves, scootLeft, expandConditionally) or a key
+	// being repointed without a move (setKey). Remove never changes an offset (it
 	// edits the container in place), so it reads and primes the cache but adds
 	// no invalidation. So a stale offset can never be read.
 	cacheKey   uint64
@@ -252,16 +252,24 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 // scootRight isn't aware of containers. It's going to create empty space of
 // bySize at the given offset in ra.data. The offset doesn't need to line up
 // with a container.
-func (ra *Bitmap) scootRight(offset uint64, bySize uint64) {
-	ra.cacheValid = false
+// It reports whether existing data was moved to the right. That is false when
+// offset is at the end of data (no tail to shift) — in which case no container
+// offset changes, so the caller can skip updating offsets and the Set cache
+// stays valid.
+func (ra *Bitmap) scootRight(offset uint64, bySize uint64) (moved bool) {
 	left := ra.data[offset:]
 
 	ra.fastExpand(bySize) // Expand the buffer.
-	right := ra.data[len(ra.data)-len(left):]
-	n := copy(right, left) // Move data right.
-	ra.memMoved += n
+	if len(left) > 0 {
+		ra.cacheValid = false
+		right := ra.data[len(ra.data)-len(left):]
+		n := copy(right, left) // Move data right.
+		ra.memMoved += n
+		moved = true
+	}
 
 	clear(ra.data[offset : offset+uint64(bySize)]) // Zero out the space in the middle.
+	return moved
 }
 
 // scootLeft removes size number of uint16s starting from the given offset.
@@ -304,9 +312,12 @@ func (ra *Bitmap) expandContainer(offset uint64) {
 		bySize = maxContainerSize - sz
 	}
 
-	// Select the portion to the right of the container, beyond its right boundary.
-	ra.scootRight(offset+uint64(sz), uint64(bySize))
-	ra.keys.updateOffsets(offset, uint64(bySize), true)
+	// Select the portion to the right of the container, beyond its right
+	// boundary. When the container is at the end of data nothing moves, so the
+	// later offsets need no update.
+	if ra.scootRight(offset+uint64(sz), uint64(bySize)) {
+		ra.keys.updateOffsets(offset, uint64(bySize), true)
+	}
 
 	if sz < 2048 {
 		ra.data[offset] = sz + bySize
@@ -356,8 +367,9 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 		assert(src[indexSize] == maxContainerSize)
 		bySize := uint16(maxContainerSize) - dstSize
 		// Select the portion to the right of the container, beyond its right boundary.
-		ra.scootRight(offset+uint64(dstSize), uint64(bySize))
-		ra.keys.updateOffsets(offset, uint64(bySize), true)
+		if ra.scootRight(offset+uint64(dstSize), uint64(bySize)) {
+			ra.keys.updateOffsets(offset, uint64(bySize), true)
+		}
 		assert(copy(ra.data[offset:], src) == len(src))
 		return
 	}
@@ -382,8 +394,9 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 
 		bySize := uint16(maxContainerSize) - dstSize
 		// Select the portion to the right of the container, beyond its right boundary.
-		ra.scootRight(offset+uint64(dstSize), uint64(bySize))
-		ra.keys.updateOffsets(offset, uint64(bySize), true)
+		if ra.scootRight(offset+uint64(dstSize), uint64(bySize)) {
+			ra.keys.updateOffsets(offset, uint64(bySize), true)
+		}
 
 		// Update the space of the container, so getContainer would work correctly.
 		ra.data[offset] = maxContainerSize
@@ -397,8 +410,9 @@ func (ra *Bitmap) copyAt(offset uint64, src []uint16) {
 
 	// targetSize is not maxSize. Let's expand to targetSize and copy array.
 	bySize := targetSz - dstSize
-	ra.scootRight(offset+uint64(dstSize), uint64(bySize))
-	ra.keys.updateOffsets(offset, uint64(bySize), true)
+	if ra.scootRight(offset+uint64(dstSize), uint64(bySize)) {
+		ra.keys.updateOffsets(offset, uint64(bySize), true)
+	}
 	assert(copy(ra.data[offset:], src) == len(src))
 	ra.data[offset] = targetSz
 }
@@ -408,8 +422,9 @@ func (ra *Bitmap) insertAt(offset uint64, src []uint16) {
 	targetSz := src[indexSize]
 	bySize := targetSz - dstSize
 
-	ra.scootRight(offset+uint64(dstSize), uint64(bySize))
-	ra.keys.updateOffsets(offset, uint64(bySize), true)
+	if ra.scootRight(offset+uint64(dstSize), uint64(bySize)) {
+		ra.keys.updateOffsets(offset, uint64(bySize), true)
+	}
 	assert(copy(ra.data[offset:], src) == len(src))
 	ra.data[offset] = targetSz
 }
@@ -450,8 +465,9 @@ func (ra *Bitmap) Set(x uint64) bool {
 	var has bool
 	if ra.cacheValid && ra.cacheKey == key {
 		// Repeated/clustered Set on the same key: skip the key binary search.
-		// cacheValid is cleared by any offset-shifting operation, so cacheOff
-		// is guaranteed to still point at this key's container.
+		// cacheValid is cleared by every operation that can change a key's
+		// offset (scootRight, scootLeft, expandConditionally, newContainerNoClr),
+		// so cacheOff is guaranteed to still point at this key's container.
 		offset, has = ra.cacheOff, true
 	} else {
 		offset, has = ra.keys.getValue(key)
