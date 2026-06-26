@@ -128,26 +128,25 @@ type array []uint16
 // container.
 func (c array) find(x uint16) int {
 	N := getCardinality(c)
-	si := int(startIdx)
-	lo, hi := si, si+N-1
+	// Search the data region as a slice with indices relative to startIdx
+	// (matching the returned value): cheaper midpoint and a single load per
+	// step.
+	data := c[startIdx : int(startIdx)+N]
+	lo, hi := 0, N-1
 	for lo+8 <= hi {
-		mid := lo + (hi-lo)/2
-		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, c[mid], x)
-
-		if c[mid] < x {
+		mid := int(uint(lo+hi) / 2)
+		v := data[mid]
+		if v < x {
 			lo = mid + 1
-		} else if c[mid] > x {
-			// We should keep it equal, and not -1, because we'll take the first greater entry.
+		} else if v > x {
 			hi = mid
 		} else {
-			// fmt.Printf("returning mid: %d\n", mid)
-			return mid - si
+			return mid
 		}
 	}
 	for ; lo <= hi; lo++ {
-		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, c[lo], x)
-		if c[lo] >= x {
-			return lo - si
+		if data[lo] >= x {
+			return lo
 		}
 	}
 	return N

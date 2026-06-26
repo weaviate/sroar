@@ -61,41 +61,32 @@ func (n node) search(k uint64) int {
 	if N == 0 {
 		return 0
 	}
-	// n.key(0) is in the first cache line of the node and is always hot.
-	// This check handles k before the first key or an exact match at position
-	// 0 without entering the binary search.
-	if k <= n.key(0) {
+	// keys and offsets are interleaved (keys at even indices). Slice the key
+	// region so indexing is keys[2*i]; cheaper midpoint and a single load per
+	// step. The first key is in the first cache line and always hot: this also
+	// handles k before the first key / an exact match at position 0.
+	keys := n[indexNodeStart : indexNodeStart+2*N]
+	if k <= keys[0] {
 		return 0
 	}
 	lo, hi := 0, N-1
 	for lo+8 <= hi {
-		mid := lo + (hi-lo)/2
-		ki := n.key(mid)
-		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, ki, k)
-
+		mid := int(uint(lo+hi) / 2)
+		ki := keys[2*mid]
 		if ki < k {
 			lo = mid + 1
 		} else if ki > k {
 			hi = mid
-			// We should keep it equal, and not -1, because we'll take the first greater entry.
 		} else {
-			// fmt.Printf("returning mid: %d\n", mid)
 			return mid
 		}
 	}
 	for ; lo <= hi; lo++ {
-		ki := n.key(lo)
-		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, ki, k)
-		if ki >= k {
+		if keys[2*lo] >= k {
 			return lo
 		}
 	}
 	return N
-	// if N < 4 {
-	// simd.Search has a bug which causes this to return index 11 when it should be returning index
-	// 9.
-	// }
-	// return int(simd.Search(n[keyOffset(0):keyOffset(N)], k))
 }
 
 // searchFrom returns the index of the smallest key >= k starting the search
