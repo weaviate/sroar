@@ -69,6 +69,13 @@ func (n node) search(k uint64) int {
 	if k <= keys[0] {
 		return 0
 	}
+	// Symmetric to the first-key check: a key past the current max inserts at
+	// the end. Common case for ascending key creation (Set builds containers
+	// 0..N; Or/And append unmatched keys in merge order), and it fires for both
+	// the getValue presence check and the node.set insert of the same key.
+	if k > keys[2*N-2] {
+		return N
+	}
 	lo, hi := 0, N-1
 	for lo+8 <= hi {
 		mid := int(uint(lo+hi) / 2)
