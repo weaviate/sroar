@@ -40,6 +40,18 @@ type Bitmap struct {
 	// memMoved keeps track of how many uint16 moves we had to do. The smaller
 	// this number, the more efficient we have been.
 	memMoved int
+
+	// Last-container cache for Set and Remove: maps the most recently accessed
+	// key to its container offset, skipping the key binary search on
+	// repeated/clustered Set/Remove calls (e.g. ascending ingestion or deletion).
+	// cacheValid is cleared wherever a key's offset can change: a container
+	// moving (scootRight, scootLeft, expandConditionally) or a key being
+	// repointed without a move (setKey). Remove never changes an offset (it
+	// edits the container in place), so it reads and primes the cache but adds
+	// no invalidation. So a stale offset can never be read.
+	cacheKey   uint64
+	cacheOff   uint64
+	cacheValid bool
 }
 
 // FromBuffer returns a pointer to bitmap corresponding to the given buffer. This bitmap shouldn't
@@ -173,7 +185,13 @@ func (ra *Bitmap) initSpaceForKeys(N int) {
 // setKey sets a key and container offset.
 func (ra *Bitmap) setKey(k uint64, offset uint64) uint64 {
 	if added := ra.keys.set(k, offset); !added {
-		// No new key was added. So, we can just return.
+		// An existing key was repointed to a different container without moving
+		// data (Or/And append-and-forget). This is the one offset change that
+		// doesn't go through a scoot, so invalidate the Set cache here if it
+		// held this key.
+		if ra.cacheValid && ra.cacheKey == k && ra.cacheOff != offset {
+			ra.cacheValid = false
+		}
 		return offset
 	}
 	// A new key was added. Let's ensure that ra.keys is not full.
@@ -235,6 +253,7 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 // bySize at the given offset in ra.data. The offset doesn't need to line up
 // with a container.
 func (ra *Bitmap) scootRight(offset uint64, bySize uint64) {
+	ra.cacheValid = false
 	left := ra.data[offset:]
 
 	ra.fastExpand(bySize) // Expand the buffer.
@@ -247,6 +266,7 @@ func (ra *Bitmap) scootRight(offset uint64, bySize uint64) {
 
 // scootLeft removes size number of uint16s starting from the given offset.
 func (ra *Bitmap) scootLeft(offset uint64, size uint64) {
+	ra.cacheValid = false
 	n := uint64(len(ra.data))
 	right := ra.data[offset+size:]
 	ra.memMoved += copy(ra.data[offset:], right)
@@ -426,7 +446,16 @@ func (ra *Bitmap) IsEmpty() bool {
 
 func (ra *Bitmap) Set(x uint64) bool {
 	key := x & mask
-	offset, has := ra.keys.getValue(key)
+	var offset uint64
+	var has bool
+	if ra.cacheValid && ra.cacheKey == key {
+		// Repeated/clustered Set on the same key: skip the key binary search.
+		// cacheValid is cleared by any offset-shifting operation, so cacheOff
+		// is guaranteed to still point at this key's container.
+		offset, has = ra.cacheOff, true
+	} else {
+		offset, has = ra.keys.getValue(key)
+	}
 	if !has {
 		ra.expandConditionally(1, minContainerSize)
 		// We need to add a container.
@@ -441,6 +470,12 @@ func (ra *Bitmap) Set(x uint64) bool {
 		ra.expandContainer(offset)
 		c = ra.getContainer(offset)
 	}
+
+	// expandContainer keeps offset (space is added after it); any operation that
+	// would move this container cleared cacheValid, so caching offset here is safe.
+	ra.cacheKey = key
+	ra.cacheOff = offset
+	ra.cacheValid = true
 
 	switch c[indexType] {
 	case typeArray:
@@ -580,10 +615,26 @@ func (ra *Bitmap) Remove(x uint64) bool {
 		return false
 	}
 	key := x & mask
-	offset, has := ra.keys.getValue(key)
+	var offset uint64
+	var has bool
+	if ra.cacheValid && ra.cacheKey == key {
+		// Repeated/clustered Remove on the same key: skip the key binary search.
+		// cacheValid is cleared by every offset-changing operation, so cacheOff
+		// still points at this key's container.
+		offset, has = ra.cacheOff, true
+	} else {
+		offset, has = ra.keys.getValue(key)
+	}
 	if !has {
 		return false
 	}
+	// Remove edits the container in place (no scoot, no key repoint, no
+	// Cleanup), so offset stays valid; cache it to prime a following Set/Remove
+	// on the same key.
+	ra.cacheKey = key
+	ra.cacheOff = offset
+	ra.cacheValid = true
+
 	c := ra.getContainer(offset)
 	switch c[indexType] {
 	case typeArray:

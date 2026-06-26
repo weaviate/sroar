@@ -1106,6 +1106,7 @@ func (b bitmap) fillWithOnes() {
 }
 
 func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
+	ra.cacheValid = false
 	cp := cap(ra.data)
 	ln := len(ra.data)
 	curNumKeys := ra.keys.numKeys()
