@@ -167,9 +167,9 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 		// Two-pointer scan: process each uint64 word of b against sorted
 		// elements of other — no scratch buffer or allocation needed.
 		// For each word, the uint64 mask is built on the fly from other's elements.
-		// Bit of value x in dst64[x>>6]: bitmapMask reverses bit order within
-		// each uint16 (bitmapMask[p]=1<<(15-p)), so the mapping is
-		// uint64(bitmapMask[pos]) << (idx*16) where idx=(x>>4)&3, pos=x&0xF.
+		// Bit of value x in dst64[x>>6]: bitMask reverses bit order within
+		// each uint16 (bitMask(p)=1<<(15-p)), so the mapping is
+		// uint64(bitMask(pos)) << (idx*16) where idx=(x>>4)&3, pos=x&0xF.
 		// Benchmarks show this is faster than the previous 1KB batch approach
 		// and avoids any allocation.
 		dst64 := uint16To64SliceUnsafe(b[startIdx:])
@@ -193,7 +193,7 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 				x := src[j]
 				idx := (x >> 4) & 3 // which uint16 within the uint64 (0-3)
 				pos := x & 0xF      // bit within that uint16
-				mask |= uint64(bitmapMask[pos]) << (idx * 16)
+				mask |= uint64(bitMask(pos)) << (idx * 16)
 				j++
 			}
 			dst64[i] &= mask
@@ -207,7 +207,7 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 	for _, x := range other.all() {
 		idx := x >> 4
 		pos := x & 0xF
-		optBuf[startIdx+idx] |= bitmapMask[pos]
+		optBuf[startIdx+idx] |= bitMask(pos)
 	}
 
 	dst64 := uint16To64SliceUnsafe(b[startIdx:])
@@ -478,8 +478,8 @@ func (b bitmap) andNotArrayAlt(other array, optBuf []uint16, runMode int) []uint
 	for _, x := range other.all() {
 		idx := x >> 4
 		pos := x & 0xF
-		if has := out[startIdx+idx]&bitmapMask[pos] > 0; has {
-			out[startIdx+idx] ^= bitmapMask[pos]
+		if has := out[startIdx+idx]&bitMask(pos) > 0; has {
+			out[startIdx+idx] ^= bitMask(pos)
 			delnum++
 		}
 	}
@@ -604,14 +604,14 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		for _, x := range larger.all() {
 			idx := x >> 4
 			pos := x & 0xF
-			out[startIdx+idx] |= bitmapMask[pos]
+			out[startIdx+idx] |= bitMask(pos)
 		}
 		// smaller may overlap with larger so check each bit before counting.
 		for _, x := range smaller.all() {
 			idx := x >> 4
 			pos := x & 0xF
-			if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-				out[startIdx+idx] |= bitmapMask[pos]
+			if has := out[startIdx+idx]&bitMask(pos) > 0; !has {
+				out[startIdx+idx] |= bitMask(pos)
 				num++
 			}
 		}
@@ -673,8 +673,8 @@ func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	for _, x := range c.all() {
 		idx := x >> 4
 		pos := x & 0xF
-		if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-			out[startIdx+idx] |= bitmapMask[pos]
+		if has := out[startIdx+idx]&bitMask(pos) > 0; !has {
+			out[startIdx+idx] |= bitMask(pos)
 			addnum++
 		}
 	}
@@ -721,7 +721,7 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		// A full POPCNT sweep to recompute cardinality would cost ~500ns
 		// fixed overhead; since all bits are new, addnum == onum.
 		for _, x := range other.all() {
-			out[startIdx+x>>4] |= bitmapMask[x&0xF]
+			out[startIdx+x>>4] |= bitMask(x&0xF)
 		}
 		addnum = onum
 	} else {
@@ -730,8 +730,8 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		for _, x := range other.all() {
 			idx := x >> 4
 			pos := x & 0xF
-			if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-				out[startIdx+idx] |= bitmapMask[pos]
+			if has := out[startIdx+idx]&bitMask(pos) > 0; !has {
+				out[startIdx+idx] |= bitMask(pos)
 				addnum++
 			}
 		}
@@ -828,14 +828,15 @@ func bufAsArray(buf []uint16, lastIdx uint16) []uint16 {
 }
 
 func roundSize(size uint16) uint16 {
-	// <=64 -> 64
+	// <=X -> X	// X = minContainerSize
+	// ...
 	// <=128 -> 128
 	// <=256 -> 256
 	// <=512 -> 512
 	// <=1024 -> 1024
 	// <=2048 -> 2048
 	//  >2048 -> maxSize
-	for i := uint16(64); i <= 2048; i *= 2 {
+	for i := uint16(minContainerSize); i <= 2048; i *= 2 {
 		if size <= i {
 			return i
 		}

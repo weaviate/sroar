@@ -41,12 +41,22 @@ const (
 	// 2^16 will not fit in uint16.
 	startIdx uint16 = 4
 
-	minContainerSize = 64 // In Uint16.
+	minContainerSize = 16 // In Uint16.
 	// Bitmap container can contain 2^16 integers. Each integer would use one bit to represent.
 	// Given that our data is represented in []uint16s, that'd mean the size of container to store
 	// it would be divided by 16.
 	// 4 for header and 4096 for storing bitmap container. In Uint16.
 	maxContainerSize = 4 + (1<<16)/16
+
+	// bitmapDataWords is the number of uint16 words in a bitmap container's
+	// data area (= maxContainerSize minus the 4-word header). 4096 in
+	// current layout. Left as an untyped int constant so callers can use it
+	// in any numeric context (array sizes, uint16 arithmetic, int loops).
+	bitmapDataWords = maxContainerSize - 4
+
+	// bitmapDataUint64s is bitmapDataWords reinterpreted as uint64 words
+	// (used in `uint16To64SliceUnsafe`-style cast loops). 1024 in current layout.
+	bitmapDataUint64s = bitmapDataWords / 4
 )
 
 func incrCardinality(data []uint16) {
@@ -59,7 +69,11 @@ func incrCardinality(data []uint16) {
 }
 
 var invalidCardinality int = math.MaxUint16 + 10
-var maxCardinality int = math.MaxUint16 + 1
+
+// maxCardinality is the number of bit positions a bitmap container can hold
+// — equivalently, the cardinality of the value space within one container.
+// 65536 = math.MaxUint16 + 1 = bitmapDataWords * 16.
+const maxCardinality = math.MaxUint16 + 1
 
 func getCardinality(data []uint16) int {
 	// This sum has to be done using two ints to avoid overflow.
@@ -114,26 +128,25 @@ type array []uint16
 // container.
 func (c array) find(x uint16) int {
 	N := getCardinality(c)
-	si := int(startIdx)
-	lo, hi := si, si+N-1
+	// Search the data region as a slice with indices relative to startIdx
+	// (matching the returned value): cheaper midpoint and a single load per
+	// step.
+	data := c[startIdx : int(startIdx)+N]
+	lo, hi := 0, N-1
 	for lo+8 <= hi {
-		mid := lo + (hi-lo)/2
-		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, c[mid], x)
-
-		if c[mid] < x {
+		mid := int(uint(lo+hi) / 2)
+		v := data[mid]
+		if v < x {
 			lo = mid + 1
-		} else if c[mid] > x {
-			// We should keep it equal, and not -1, because we'll take the first greater entry.
+		} else if v > x {
 			hi = mid
 		} else {
-			// fmt.Printf("returning mid: %d\n", mid)
-			return mid - si
+			return mid
 		}
 	}
 	for ; lo <= hi; lo++ {
-		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, c[lo], x)
-		if c[lo] >= x {
-			return lo - si
+		if data[lo] >= x {
+			return lo
 		}
 	}
 	return N
@@ -158,11 +171,23 @@ func (c array) has(x uint16) bool {
 }
 
 func (c array) add(x uint16) bool {
-	idx := c.find(x)
 	N := getCardinality(c)
-	offset := int(startIdx) + idx
+	si := int(startIdx)
 
-	if int(idx) < N {
+	// Fast path: in-order (ascending) insertion appends past the current max
+	// without a binary search or a shift. Callers guarantee room for one more
+	// element (Set checks isFull and expands first; andNotBitmap sizes the
+	// buffer to maxContainerSize). This is the common case for sorted ingestion.
+	if N == 0 || x > c[si+N-1] {
+		c[si+N] = x
+		incrCardinality(c)
+		return true
+	}
+
+	idx := c.find(x)
+	offset := si + idx
+
+	if idx < N {
 		if c[offset] == x {
 			return false
 		}
@@ -194,17 +219,23 @@ func (c array) removeRange(lo, hi uint16) {
 	if hi < lo {
 		panic(fmt.Sprintf("args must satisfy lo <= hi, got lo: %d, hi: %d\n", lo, hi))
 	}
-	loIdx := c.find(lo)
-	hiIdx := c.find(hi)
-
-	st := int(startIdx)
-	loVal := c[st+loIdx]
 	N := getCardinality(c)
+	loIdx := c.find(lo)
 
-	// remove range doesn't intersect with any element in the array.
-	if hi < loVal || loIdx == N {
+	// remove range doesn't intersect with any element in the array. Check
+	// loIdx == N (lo is past the last element) before dereferencing c[st+loIdx]
+	// (a full container would read one past its end) and before searching for
+	// hi (no need when there's nothing to remove).
+	if loIdx == N {
 		return
 	}
+	st := int(startIdx)
+	loVal := c[st+loIdx]
+	if hi < loVal {
+		return
+	}
+
+	hiIdx := c.find(hi)
 	if hiIdx == N {
 		if loIdx > 0 {
 			c = c[:int(startIdx)+loIdx-1]
@@ -345,6 +376,11 @@ func (c array) maximum() uint16 {
 	return c[int(startIdx)+N-1]
 }
 
+// bitMask returns the bitmap-container bit for bit position pos (0..15) within
+// a uint16 word: 1<<(15-pos), i.e. MSB-first order. Small enough to inline to a
+// single shift, avoiding a per-element lookup-table load.
+func bitMask(pos uint16) uint16 { return 1 << (15 - pos) }
+
 func (c array) toBitmapContainer(buf []uint16) []uint16 {
 	if len(buf) == 0 {
 		buf = make([]uint16, maxContainerSize)
@@ -358,11 +394,14 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 	b[indexType] = typeBitmap
 	setCardinality(b, getCardinality(c))
 
-	data := b[startIdx:]
+	// Slice to the container's full size so the length is a compile-time
+	// constant; with x a uint16, x>>4 is provably < len(data), dropping the
+	// per-element bounds check.
+	data := b[startIdx:maxContainerSize]
 	for _, x := range c.all() {
 		idx := x >> 4
 		pos := x & 0xF
-		data[idx] |= bitmapMask[pos]
+		data[idx] |= bitMask(pos)
 	}
 	return b
 }
@@ -378,24 +417,15 @@ func (c array) String() string {
 
 type bitmap []uint16
 
-var bitmapMask []uint16
-
-func init() {
-	bitmapMask = make([]uint16, 16)
-	for i := 0; i < 16; i++ {
-		bitmapMask[i] = 1 << (15 - i)
-	}
-}
-
 func (b bitmap) add(x uint16) bool {
 	idx := x >> 4
 	pos := x & 0xF
 
-	if has := b[startIdx+idx] & bitmapMask[pos]; has > 0 {
+	if has := b[startIdx+idx] & bitMask(pos); has > 0 {
 		return false
 	}
 
-	b[startIdx+idx] |= bitmapMask[pos]
+	b[startIdx+idx] |= bitMask(pos)
 	incrCardinality(b)
 	return true
 }
@@ -405,8 +435,8 @@ func (b bitmap) remove(x uint16) bool {
 	pos := x & 0xF
 
 	c := getCardinality(b)
-	if has := b[startIdx+idx] & bitmapMask[pos]; has > 0 {
-		b[startIdx+idx] ^= bitmapMask[pos]
+	if has := b[startIdx+idx] & bitMask(pos); has > 0 {
+		b[startIdx+idx] ^= bitMask(pos)
 		setCardinality(b, c-1)
 		return true
 	}
@@ -429,25 +459,25 @@ func (b bitmap) removeRange(lo, hi uint16) {
 
 	if loIdx == hiIdx {
 		for p := loPos; p <= hiPos; p++ {
-			if b[startIdx+loIdx]&bitmapMask[p] > 0 {
+			if b[startIdx+loIdx]&bitMask(p) > 0 {
 				removed++
 			}
-			b[startIdx+loIdx] &= ^bitmapMask[p]
+			b[startIdx+loIdx] &= ^bitMask(p)
 		}
 		setCardinality(b, N-removed)
 		return
 	}
 	for p := loPos; p < 1<<4; p++ {
-		if b[startIdx+loIdx]&bitmapMask[p] > 0 {
+		if b[startIdx+loIdx]&bitMask(p) > 0 {
 			removed++
 		}
-		b[startIdx+loIdx] &= ^bitmapMask[p]
+		b[startIdx+loIdx] &= ^bitMask(p)
 	}
 	for p := uint16(0); p <= hiPos; p++ {
-		if b[startIdx+hiIdx]&bitmapMask[p] > 0 {
+		if b[startIdx+hiIdx]&bitMask(p) > 0 {
 			removed++
 		}
-		b[startIdx+hiIdx] &= ^bitmapMask[p]
+		b[startIdx+hiIdx] &= ^bitMask(p)
 	}
 	setCardinality(b, N-removed)
 }
@@ -455,14 +485,14 @@ func (b bitmap) removeRange(lo, hi uint16) {
 func (b bitmap) has(x uint16) bool {
 	idx := x >> 4
 	pos := x & 0xF
-	has := b[startIdx+idx] & bitmapMask[pos]
+	has := b[startIdx+idx] & bitMask(pos)
 	return has > 0
 }
 
 func (b bitmap) rank(x uint16) int {
 	idx := x >> 4
 	pos := x & 0xF
-	if b[startIdx+idx]&bitmapMask[pos] == 0 {
+	if b[startIdx+idx]&bitMask(pos) == 0 {
 		return -1
 	}
 
@@ -471,7 +501,7 @@ func (b bitmap) rank(x uint16) int {
 		rank += bits.OnesCount16(b[int(startIdx)+i])
 	}
 	for p := uint16(0); p <= pos; p++ {
-		if b[startIdx+idx]&bitmapMask[p] > 0 {
+		if b[startIdx+idx]&bitMask(p) > 0 {
 			rank++
 		}
 	}
@@ -562,7 +592,7 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 			idx := x / 16
 			pos := x % 16
 
-			buf[startIdx+idx] |= bitmapMask[pos]
+			buf[startIdx+idx] |= bitMask(pos)
 		}
 		setCardinality(buf, invalidCardinality)
 
@@ -574,7 +604,7 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 
 			val := &buf[4+idx]
 			before := bits.OnesCount16(*val)
-			*val |= bitmapMask[pos]
+			*val |= bitMask(pos)
 			after := bits.OnesCount16(*val)
 			num += after - before
 		}
@@ -594,7 +624,7 @@ func (b bitmap) all() []uint16 {
 		x := data[idx]
 		// TODO: This could potentially be optimized.
 		for pos := uint16(0); pos < 16; pos++ {
-			if x&bitmapMask[pos] > 0 {
+			if x&bitMask(pos) > 0 {
 				res = append(res, (idx<<4)|pos)
 			}
 		}
@@ -611,10 +641,10 @@ func (b bitmap) selectAt(idx int) uint16 {
 		c := bits.OnesCount16(x)
 		if idx < c {
 			for pos := uint16(0); pos < 16; pos++ {
-				if idx == 0 && x&bitmapMask[pos] > 0 {
+				if idx == 0 && x&bitMask(pos) > 0 {
 					return i*16 + pos
 				}
-				if x&bitmapMask[pos] > 0 {
+				if x&bitMask(pos) > 0 {
 					idx--
 				}
 			}

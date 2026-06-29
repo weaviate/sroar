@@ -5,4 +5,7 @@ vendor/
 .idea/
 .vscode/
 
+.claude/
+sroar.test
+
 testdata/bitmaps/**/

@@ -33,14 +33,6 @@ func (n node) setAt(idx int, k uint64) { n[idx] = k }
 func (n node) setNumKeys(num int) { n[indexNumKeys] = uint64(num) }
 func (n node) setNodeSize(sz int) { n[indexNodeSize] = uint64(sz) }
 
-// addToAllVals adds delta to every container offset stored in the node.
-// It is used when the key region grows and all offsets must be shifted right.
-func (n node) addToAllVals(delta uint64) {
-	for i := valOffset(0); i < valOffset(n.numKeys()); i += 2 {
-		n[i] += delta
-	}
-}
-
 func (n node) maxKey() uint64 {
 	idx := n.numKeys()
 	// numKeys == index of the max key, because 0th index is being used for meta information.
@@ -69,41 +61,39 @@ func (n node) search(k uint64) int {
 	if N == 0 {
 		return 0
 	}
-	// n.key(0) is in the first cache line of the node and is always hot.
-	// This check handles k before the first key or an exact match at position
-	// 0 without entering the binary search.
-	if k <= n.key(0) {
+	// keys and offsets are interleaved (keys at even indices). Slice the key
+	// region so indexing is keys[2*i]; cheaper midpoint and a single load per
+	// step. The first key is in the first cache line and always hot: this also
+	// handles k before the first key / an exact match at position 0.
+	keys := n[indexNodeStart : indexNodeStart+2*N]
+	if k <= keys[0] {
 		return 0
+	}
+	// Symmetric to the first-key check: a key past the current max inserts at
+	// the end. Common case for ascending key creation (Set builds containers
+	// 0..N; Or/And append unmatched keys in merge order), and it fires for both
+	// the getValue presence check and the node.set insert of the same key.
+	if k > keys[2*N-2] {
+		return N
 	}
 	lo, hi := 0, N-1
 	for lo+8 <= hi {
-		mid := lo + (hi-lo)/2
-		ki := n.key(mid)
-		// fmt.Printf("lo: %d mid: %d hi: %d. ki: %#x k: %#x\n", lo, mid, hi, ki, k)
-
+		mid := int(uint(lo+hi) / 2)
+		ki := keys[2*mid]
 		if ki < k {
 			lo = mid + 1
 		} else if ki > k {
 			hi = mid
-			// We should keep it equal, and not -1, because we'll take the first greater entry.
 		} else {
-			// fmt.Printf("returning mid: %d\n", mid)
 			return mid
 		}
 	}
 	for ; lo <= hi; lo++ {
-		ki := n.key(lo)
-		// fmt.Printf("itr. lo: %d hi: %d. ki: %#x k: %#x\n", lo, hi, ki, k)
-		if ki >= k {
+		if keys[2*lo] >= k {
 			return lo
 		}
 	}
 	return N
-	// if N < 4 {
-	// simd.Search has a bug which causes this to return index 11 when it should be returning index
-	// 9.
-	// }
-	// return int(simd.Search(n[keyOffset(0):keyOffset(N)], k))
 }
 
 // searchFrom returns the index of the smallest key >= k starting the search
@@ -241,16 +231,38 @@ func (n node) set(k, v uint64) bool {
 	// panic("shouldn't reach here")
 }
 
+// updateOffsets shifts every container offset greater than beyond by `by`
+// (added when add is true, subtracted otherwise). It is used when a container
+// is expanded or removed in place and all containers physically after it move.
+//
+// The offset column is interleaved with keys (stride 2) and sorted by key, not
+// by offset, so every key must be visited — the scan is inherently O(numKeys).
+// The loop is hoisted to a single bounds-checked slice with the add/sub branch
+// lifted out of the loop body.
 func (n node) updateOffsets(beyond, by uint64, add bool) {
-	for i := 0; i < n.numKeys(); i++ {
-		if offset := n.val(i); offset > beyond {
-			if add {
-				n.setAt(valOffset(i), offset+by)
-			} else {
-				assert(offset >= by)
-				n.setAt(valOffset(i), offset-by)
+	vals := n[indexNodeStart : indexNodeStart+2*n.numKeys()]
+	if add {
+		for i := 1; i < len(vals); i += 2 {
+			if o := vals[i]; o > beyond {
+				vals[i] = o + by
 			}
 		}
+	} else {
+		for i := 1; i < len(vals); i += 2 {
+			if o := vals[i]; o > beyond {
+				assert(o >= by)
+				vals[i] = o - by
+			}
+		}
+	}
+}
+
+// updateAllOffsets adds delta to every container offset stored in the node.
+// It is used when the key region grows and all offsets must be shifted right.
+func (n node) updateAllOffsets(delta uint64) {
+	vals := n[indexNodeStart : indexNodeStart+2*n.numKeys()]
+	for i := 1; i < len(vals); i += 2 {
+		vals[i] += delta
 	}
 }
 

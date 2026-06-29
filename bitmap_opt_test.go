@@ -2,7 +2,6 @@ package sroar
 
 import (
 	"fmt"
-	"math"
 	"math/bits"
 	"math/rand"
 	"slices"
@@ -958,13 +957,13 @@ func TestLenBytes(t *testing.T) {
 func TestIntersects(t *testing.T) {
 	t.Run("nil bitmaps return false", func(t *testing.T) {
 		var a, b *Bitmap
-		require.False(t, a.Intersects(b))
-		require.False(t, NewBitmap().Intersects(b))
-		require.False(t, a.Intersects(NewBitmap()))
+		require.False(t, Intersects(a, b))
+		require.False(t, Intersects(NewBitmap(), b))
+		require.False(t, Intersects(a, NewBitmap()))
 	})
 
 	t.Run("empty bitmaps return false", func(t *testing.T) {
-		require.False(t, NewBitmap().Intersects(NewBitmap()))
+		require.False(t, Intersects(NewBitmap(), NewBitmap()))
 	})
 
 	t.Run("no overlap returns false", func(t *testing.T) {
@@ -974,7 +973,7 @@ func TestIntersects(t *testing.T) {
 		b := NewBitmap()
 		b.Set(3)
 		b.Set(4)
-		require.False(t, a.Intersects(b))
+		require.False(t, Intersects(a, b))
 	})
 
 	t.Run("single common element returns true", func(t *testing.T) {
@@ -984,7 +983,7 @@ func TestIntersects(t *testing.T) {
 		b := NewBitmap()
 		b.Set(2)
 		b.Set(3)
-		require.True(t, a.Intersects(b))
+		require.True(t, Intersects(a, b))
 	})
 
 	t.Run("matches !Clone().And().IsEmpty()", func(t *testing.T) {
@@ -1005,7 +1004,7 @@ func TestIntersects(t *testing.T) {
 				b.Set(v)
 			}
 			expected := !a.Clone().And(b).IsEmpty()
-			require.Equal(t, expected, a.Intersects(b))
+			require.Equal(t, expected, Intersects(a, b))
 		}
 	})
 
@@ -1016,55 +1015,10 @@ func TestIntersects(t *testing.T) {
 		}
 		b := NewBitmap()
 		b.Set(1500 << 16)
-		require.True(t, a.Intersects(b))
+		require.True(t, Intersects(a, b))
 		b2 := NewBitmap()
 		b2.Set(9999 << 16) // not in a
-		require.False(t, a.Intersects(b2))
-	})
-}
-
-func TestIntersectsMasked(t *testing.T) {
-	const mask = uint64(0x0000FFFFFFFFFFFF)
-
-	t.Run("empty inputs return false", func(t *testing.T) {
-		var a, b *Bitmap
-		require.False(t, a.IntersectsMasked(b, mask))
-		require.False(t, NewBitmap().IntersectsMasked(b, mask))
-		require.False(t, a.IntersectsMasked(NewBitmap(), mask))
-		require.False(t, NewBitmap().IntersectsMasked(NewBitmap(), mask))
-	})
-
-	t.Run("no overlap returns false", func(t *testing.T) {
-		a := NewBitmap()
-		a.Set(uint64(1)<<48 | 1)
-		b := NewBitmap()
-		b.Set(uint64(2)<<48 | 2)
-		require.False(t, a.IntersectsMasked(b, mask))
-	})
-
-	t.Run("match via mask collapse returns true", func(t *testing.T) {
-		a := NewBitmap()
-		a.Set(1) // key=0, value=1
-		// b has key 0x0001<<48|0, masked to key 0: contains value 1
-		b := NewBitmap()
-		b.Set(uint64(1)<<48 | 1)
-		require.True(t, a.IntersectsMasked(b, mask))
-	})
-
-	t.Run("matches !Clone().And(bm.Masked(mask)).IsEmpty()", func(t *testing.T) {
-		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
-		a := NewBitmap()
-		b := NewBitmap()
-		for pos := uint64(0); pos < 4; pos++ {
-			for v := uint64(0); v < 50; v++ {
-				a.Set(pos<<48 | v)
-				b.Set((pos+1)<<48 | v)
-			}
-		}
-		for _, m := range masks {
-			expected := !a.Clone().And(b.Masked(m)).IsEmpty()
-			require.Equal(t, expected, a.IntersectsMasked(b, m), "mask %#x", m)
-		}
+		require.False(t, Intersects(a, b2))
 	})
 }
 
@@ -1356,7 +1310,7 @@ func TestFillUp(t *testing.T) {
 		require.Less(t, lenBytes, bmSmall.LenInBytes())
 		require.Less(t, capBytes, bmSmall.capInBytes())
 
-		// + 8 (key) + 2x 4100 container - 64 container
+		// + 8 (key) + 2x 4100 container - minContainerSize container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
 		require.Equal(t, lenBytes+addLen, bmSmall.LenInBytes())
 		require.Equal(t, capBytes+addLen, bmSmall.capInBytes())
@@ -1375,7 +1329,7 @@ func TestFillUp(t *testing.T) {
 		require.Less(t, lenBytes, bmBig.LenInBytes())
 		require.Equal(t, capBytes, bmBig.capInBytes())
 
-		// + 8 (key) + 2x 4100 container - 64 container
+		// + 8 (key) + 2x 4100 container - minContainerSize container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
 		require.Equal(t, lenBytes+addLen, bmBig.LenInBytes())
 
@@ -1453,12 +1407,19 @@ func TestFillUp(t *testing.T) {
 		})
 
 		t.Run("single elem array, no resize", func(t *testing.T) {
+			// maxFillUpOffset is the number of elements that can be added to the
+			// initial container without expanding it: minContainerSize minus the
+			// 4-word header minus the 1 element already present.
+			maxFillUpOffset := int(minContainerSize-startIdx) - 1
+
 			for _, currentMaxX := range []int{
 				1023, 1024, 1025, 1039, 1040, 1041,
 			} {
-				for _, fillUpX := range []int{
-					1055, 1056, 1057, 1082,
+				for _, fillUpOffset := range []int{
+					3, maxFillUpOffset/2 + 1, maxFillUpOffset - 1, maxFillUpOffset,
 				} {
+					fillUpX := currentMaxX + fillUpOffset
+
 					t.Run(fmt.Sprintf("filled 1x %d to %d", currentMaxX, fillUpX), func(t *testing.T) {
 						singleElem := NewBitmap()
 						singleElem.Set(uint64(currentMaxX))
@@ -1478,8 +1439,8 @@ func TestFillUp(t *testing.T) {
 						lenBytes := singleElem.LenInBytes()
 						capBytes := singleElem.capInBytes()
 
-						singleElem.FillUp(uint64(fillUpX) - 10)
-						singleElem.FillUp(uint64(fillUpX) - 5)
+						singleElem.FillUp(uint64(currentMaxX) + uint64(fillUpOffset)/3)
+						singleElem.FillUp(uint64(currentMaxX) + uint64(fillUpOffset)*2/3)
 						singleElem.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, singleElem.LenInBytes())
 						require.Equal(t, capBytes, singleElem.capInBytes())
@@ -1785,7 +1746,7 @@ func TestFillUp(t *testing.T) {
 				fnExp3xAddCap func(prevCap int) (newCap int)
 			}{
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1793,7 +1754,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1022,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1801,7 +1762,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1023,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1809,7 +1770,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       maxCardinality + 1024,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1817,7 +1778,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3*maxCardinality - 1,
 					fnExpAddLen:   plusKeysAndContainers(2, 2),
 					fnExpAddCap:   plusKeysAndContainers(2, 2),
@@ -1825,7 +1786,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3 * maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1835,7 +1796,7 @@ func TestFillUp(t *testing.T) {
 					},
 				},
 				{
-					currentMaxX:   maxCardinality - 20,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1),
 					fillUpX:       3*maxCardinality + 1,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1846,7 +1807,7 @@ func TestFillUp(t *testing.T) {
 				},
 
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1854,7 +1815,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1022,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1862,7 +1823,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1023,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1870,7 +1831,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       maxCardinality + 1024,
 					fnExpAddLen:   plusKeysAndContainers(1, 1),
 					fnExpAddCap:   plusKeysAndContainers(1, 1),
@@ -1878,7 +1839,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(1, 1),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3*maxCardinality - 1,
 					fnExpAddLen:   plusKeysAndContainers(2, 2),
 					fnExpAddCap:   plusKeysAndContainers(2, 2),
@@ -1886,7 +1847,7 @@ func TestFillUp(t *testing.T) {
 					fnExp3xAddCap: plusKeysAndContainers(2, 2),
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3 * maxCardinality,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -1896,7 +1857,7 @@ func TestFillUp(t *testing.T) {
 					},
 				},
 				{
-					currentMaxX:   maxCardinality - 10,
+					currentMaxX:   maxCardinality - int(minContainerSize-startIdx-1)/2,
 					fillUpX:       3*maxCardinality + 1,
 					fnExpAddLen:   plusKeysAndContainers(3, 3),
 					fnExpAddCap:   plusKeysAndContainers(3, 3),
@@ -2825,1074 +2786,5 @@ func TestCalcConcurrency(t *testing.T) {
 
 	t.Run("maxConcurrency equal to calculated returns calculated", func(t *testing.T) {
 		require.Equal(t, 4, calcConcurrency(96, 24, 4))
-	})
-}
-
-func TestMaskedAnd(t *testing.T) {
-	t.Run("nil inputs", func(t *testing.T) {
-		var a, b *Bitmap
-		require.Equal(t, 0, MaskedAnd(a, b, math.MaxUint64).GetCardinality())
-		require.Equal(t, 0, MaskedAnd(NewBitmap(), b, math.MaxUint64).GetCardinality())
-		require.Equal(t, 0, MaskedAnd(a, NewBitmap(), math.MaxUint64).GetCardinality())
-	})
-
-	t.Run("empty inputs", func(t *testing.T) {
-		require.Equal(t, 0, MaskedAnd(NewBitmap(), NewBitmap(), math.MaxUint64).GetCardinality())
-	})
-
-	t.Run("no overlap produces empty result", func(t *testing.T) {
-		a := NewBitmap()
-		a.Set(0x00010000)
-		a.Set(0x00010001)
-
-		b := NewBitmap()
-		b.Set(0x00020000)
-		b.Set(0x00020001)
-
-		result := MaskedAnd(a, b, math.MaxUint64)
-		require.Equal(t, 0, result.GetCardinality())
-	})
-
-	t.Run("matches Masked(And(a,b))", func(t *testing.T) {
-		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
-
-		a := NewBitmap()
-		b := NewBitmap()
-		for pos := uint64(0); pos < 5; pos++ {
-			for v := uint64(0); v < 100; v++ {
-				a.Set(pos<<48 | v)
-				// b overlaps on even positions only
-				if pos%2 == 0 {
-					b.Set(pos<<48 | v)
-				}
-			}
-		}
-
-		for _, m := range masks {
-			expected := And(a, b).Masked(m)
-			got := MaskedAnd(a, b, m)
-
-			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "mask %#x", m)
-			for _, v := range expected.ToArray() {
-				require.True(t, got.Contains(v), "mask %#x missing %d", m, v)
-			}
-		}
-	})
-
-	t.Run("key collision after masking merges via OR", func(t *testing.T) {
-		// Two key pairs that AND to non-empty, both mapping to same masked key.
-		a := NewBitmap()
-		b := NewBitmap()
-
-		// pos=1: a has {0,1}, b has {0,1} → AND = {0,1}
-		a.Set(0x0001_0000_0000 | 0)
-		a.Set(0x0001_0000_0000 | 1)
-		b.Set(0x0001_0000_0000 | 0)
-		b.Set(0x0001_0000_0000 | 1)
-
-		// pos=2: a has {2,3}, b has {2,3} → AND = {2,3}
-		a.Set(0x0002_0000_0000 | 2)
-		a.Set(0x0002_0000_0000 | 3)
-		b.Set(0x0002_0000_0000 | 2)
-		b.Set(0x0002_0000_0000 | 3)
-
-		// mask zeroes bits 32-63 → both key pairs collapse to masked key 0
-		result := MaskedAnd(a, b, 0x00000000FFFF0000)
-
-		require.Equal(t, 4, result.GetCardinality())
-		require.True(t, result.Contains(0))
-		require.True(t, result.Contains(1))
-		require.True(t, result.Contains(2))
-		require.True(t, result.Contains(3))
-	})
-
-	t.Run("does not modify either source", func(t *testing.T) {
-		a := NewBitmap()
-		a.Set(uint64(1)<<48 | 10)
-		a.Set(uint64(2)<<48 | 20)
-
-		b := NewBitmap()
-		b.Set(uint64(1)<<48 | 10)
-		b.Set(uint64(3)<<48 | 30)
-
-		aCard := a.GetCardinality()
-		bCard := b.GetCardinality()
-		_ = MaskedAnd(a, b, 0x0000FFFFFFFFFFFF)
-
-		require.Equal(t, aCard, a.GetCardinality())
-		require.Equal(t, bCard, b.GetCardinality())
-		require.True(t, a.Contains(uint64(1)<<48|10))
-		require.True(t, a.Contains(uint64(2)<<48|20))
-		require.True(t, b.Contains(uint64(1)<<48|10))
-		require.True(t, b.Contains(uint64(3)<<48|30))
-	})
-
-	t.Run("low 16 bits of mask are ignored", func(t *testing.T) {
-		a := NewBitmap()
-		b := NewBitmap()
-		a.Set(uint64(1)<<48 | 1)
-		b.Set(uint64(1)<<48 | 1)
-
-		r1 := MaskedAnd(a, b, 0x0000FFFFFFFFFFFF)
-		r2 := MaskedAnd(a, b, 0x0000FFFFFFFFFFFF|0xFFFF)
-
-		require.Equal(t, r1.GetCardinality(), r2.GetCardinality())
-		for _, v := range r1.ToArray() {
-			require.True(t, r2.Contains(v))
-		}
-	})
-}
-
-func TestMaskedAndToBuf(t *testing.T) {
-	t.Run("nil inputs", func(t *testing.T) {
-		var a, b *Bitmap
-		result := MaskedAndToBuf(a, b, math.MaxUint64, make([]byte, 4096))
-		require.Equal(t, 0, result.GetCardinality())
-	})
-
-	t.Run("matches MaskedAnd results", func(t *testing.T) {
-		a := NewBitmap()
-		b := NewBitmap()
-		for pos := uint64(0); pos < 5; pos++ {
-			for v := uint64(0); v < 100; v++ {
-				a.Set(pos<<48 | v)
-				b.Set(pos<<48 | v)
-			}
-		}
-
-		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
-		for _, m := range masks {
-			expected := MaskedAnd(a, b, m)
-			got := MaskedAndToBuf(a, b, m, make([]byte, 1<<20))
-
-			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "mask %#x", m)
-			for _, v := range expected.ToArray() {
-				require.True(t, got.Contains(v), "mask %#x missing %d", m, v)
-			}
-		}
-	})
-
-	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
-		a := NewBitmap()
-		b := NewBitmap()
-		for pos := uint64(0); pos < 5; pos++ {
-			for v := uint64(0); v < 100; v++ {
-				a.Set(pos<<48 | v)
-				b.Set(pos<<48 | v)
-			}
-		}
-
-		bufSize := 1 << 20
-		result := MaskedAndToBuf(a, b, 0x0000FFFFFFFFFFFF, make([]byte, bufSize))
-
-		require.Greater(t, result.GetCardinality(), 0)
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
-	})
-}
-
-func TestAndMasked(t *testing.T) {
-	t.Run("empty b zeroes ra", func(t *testing.T) {
-		ra := NewBitmap()
-		ra.Set(1)
-		ra.Set(2)
-		ra.AndMasked(NewBitmap(), math.MaxUint64)
-		require.Equal(t, 0, ra.GetCardinality())
-	})
-
-	t.Run("nil b zeroes ra", func(t *testing.T) {
-		ra := NewBitmap()
-		ra.Set(1)
-		var b *Bitmap
-		ra.AndMasked(b, math.MaxUint64)
-		require.Equal(t, 0, ra.GetCardinality())
-	})
-
-	t.Run("identity mask matches ra.And(b)", func(t *testing.T) {
-		for _, mask := range []uint64{math.MaxUint64, math.MaxUint64 | 0xFFFF} {
-			ra := NewBitmap()
-			b := NewBitmap()
-			for i := uint64(0); i < 200; i++ {
-				ra.Set(i)
-				if i%2 == 0 {
-					b.Set(i)
-				}
-			}
-
-			expected := ra.Clone()
-			expected.And(b)
-
-			ra.AndMasked(b, mask)
-
-			require.Equal(t, expected.GetCardinality(), ra.GetCardinality(), "mask %#x", mask)
-			for _, v := range expected.ToArray() {
-				require.True(t, ra.Contains(v), "mask %#x missing %d", mask, v)
-			}
-		}
-	})
-
-	t.Run("matches ra.Clone().And(b.Masked(mask))", func(t *testing.T) {
-		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
-
-		b := NewBitmap()
-		for pos := uint64(0); pos < 5; pos++ {
-			for v := uint64(0); v < 100; v++ {
-				b.Set(pos<<48 | v)
-			}
-		}
-
-		for _, mask := range masks {
-			ra := NewBitmap()
-			for pos := uint64(0); pos < 3; pos++ {
-				for v := uint64(0); v < 100; v++ {
-					ra.Set(pos<<48 | v)
-				}
-			}
-
-			expected := ra.Clone()
-			expected.And(b.Masked(mask))
-
-			ra.AndMasked(b, mask)
-
-			require.Equal(t, expected.GetCardinality(), ra.GetCardinality(), "mask %#x", mask)
-			for _, v := range expected.ToArray() {
-				require.True(t, ra.Contains(v), "mask %#x missing %d", mask, v)
-			}
-		}
-	})
-
-	t.Run("zero mask collapses all b keys to zero", func(t *testing.T) {
-		ra := NewBitmap()
-		ra.Set(0x00000000 | 1) // key 0, value 1
-		ra.Set(0x00000000 | 2) // key 0, value 2
-		ra.Set(0x00010000 | 3) // key 1, value 3 — no b key maps here under zero mask
-
-		b := NewBitmap()
-		b.Set(0x00010000 | 1) // key 1 → masked 0, value 1
-		b.Set(0x00020000 | 2) // key 2 → masked 0, value 2
-
-		// Masked(b) at key 0 = OR({1}, {2}) = {1, 2}
-		// ra[key 0] AND {1, 2} = {1, 2} AND {1, 2} = {1, 2}
-		// ra[key 1] has no match → zeroed
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 2, ra.GetCardinality())
-		require.True(t, ra.Contains(1))
-		require.True(t, ra.Contains(2))
-		require.False(t, ra.Contains(0x00010000|3))
-	})
-
-	t.Run("b not modified", func(t *testing.T) {
-		ra := NewBitmap()
-		b := NewBitmap()
-		for i := uint64(0); i < 100; i++ {
-			ra.Set(i)
-			b.Set(uint64(1)<<48 | i)
-		}
-		bCard := b.GetCardinality()
-		bValues := b.ToArray()
-
-		ra.AndMasked(b, 0x0000FFFFFFFFFFFF)
-
-		require.Equal(t, bCard, b.GetCardinality())
-		for _, v := range bValues {
-			require.True(t, b.Contains(v))
-		}
-	})
-
-	t.Run("multiple b keys OR before AND", func(t *testing.T) {
-		ra := NewBitmap()
-		// key 0: values {0, 1, 2, 3}
-		for v := uint64(0); v <= 3; v++ {
-			ra.Set(v)
-		}
-
-		b := NewBitmap()
-		// Two b keys both masked to 0: first has {1,2}, second has {3,4}
-		// OR = {1,2,3,4}; AND with ra[key 0]={0,1,2,3} = {1,2,3}
-		b.Set(0x00010000 | 1)
-		b.Set(0x00010000 | 2)
-		b.Set(0x00020000 | 3)
-		b.Set(0x00020000 | 4)
-
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 3, ra.GetCardinality())
-		require.True(t, ra.Contains(1))
-		require.True(t, ra.Contains(2))
-		require.True(t, ra.Contains(3))
-		require.False(t, ra.Contains(0))
-		require.False(t, ra.Contains(4))
-	})
-
-	// The next four tests target the buffer-swap logic in the OR accumulation loop.
-	// The source container (orBuf) is always exactly-sized after copying group[0],
-	// so any non-overlapping element OR'd in will not fit inline — the result
-	// lands in fallbackBuf and the two buffers are swapped.
-
-	t.Run("non-overlapping arrays: inline fails due to size, buffers swapped", func(t *testing.T) {
-		// group[0] has 50 elements → orBuf.indexSize = 54 (4 header + 50 values).
-		// group[1] adds 50 non-overlapping elements → result needs indexSize 104.
-		// 54 < 104 → inline fails, result is in fallbackBuf, swap occurs.
-		ra := NewBitmap()
-		for v := uint64(0); v < 100; v++ {
-			ra.Set(v)
-		}
-
-		b := NewBitmap()
-		for v := uint64(0); v < 50; v++ {
-			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-49
-		}
-		for v := uint64(50); v < 100; v++ {
-			b.Set(0x00020000 | v) // key 2 → masked 0, values 50-99
-		}
-
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 100, ra.GetCardinality())
-		for v := uint64(0); v < 100; v++ {
-			require.True(t, ra.Contains(v))
-		}
-	})
-
-	t.Run("overlapping arrays: inline succeeds, no swap", func(t *testing.T) {
-		// group[0] and group[1] have identical values → OR result cardinality
-		// equals group[0] cardinality → fits within orBuf.indexSize → no swap.
-		ra := NewBitmap()
-		for v := uint64(0); v < 50; v++ {
-			ra.Set(v)
-		}
-
-		b := NewBitmap()
-		for v := uint64(0); v < 50; v++ {
-			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-49
-		}
-		for v := uint64(0); v < 50; v++ {
-			b.Set(0x00020000 | v) // key 2 → masked 0, same values 0-49
-		}
-
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 50, ra.GetCardinality())
-		for v := uint64(0); v < 50; v++ {
-			require.True(t, ra.Contains(v))
-		}
-	})
-
-	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
-		// cnum + onum = 1228 + 1228 = 2456 >= 2456 → array-to-bitmap conversion.
-		// Source container has indexSize = 1232 < maxContainerSize → inline fails,
-		// result (bitmap) lands in fallbackBuf, buffers are swapped.
-		const half = 1228 // cnum + onum == 2456 == maxContainerSize/5*3 - startIdx
-
-		ra := NewBitmap()
-		for v := uint64(0); v < 2*half; v++ {
-			ra.Set(v)
-		}
-
-		b := NewBitmap()
-		for v := uint64(0); v < half; v++ {
-			b.Set(0x00010000 | v) // key 1 → masked 0, values 0-1227
-		}
-		for v := uint64(half); v < 2*half; v++ {
-			b.Set(0x00020000 | v) // key 2 → masked 0, values 1228-2455
-		}
-
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 2*half, ra.GetCardinality())
-		for v := uint64(0); v < 2*half; v++ {
-			require.True(t, ra.Contains(v))
-		}
-	})
-
-	t.Run("three containers: swap on first pair, then OR into bitmap succeeds inline", func(t *testing.T) {
-		// First OR triggers bitmap conversion and swap (result now in orBuf as bitmap).
-		// Second OR is bitmap+array: inline always succeeds, fallbackBuf unused.
-		// Verifies that orResult correctly points into orBuf after the swap.
-		const half = 1228
-
-		ra := NewBitmap()
-		for v := uint64(0); v < 3*half; v++ {
-			ra.Set(v)
-		}
-
-		b := NewBitmap()
-		for v := uint64(0); v < half; v++ {
-			b.Set(0x00010000 | v) // key 1 → masked 0
-		}
-		for v := uint64(half); v < 2*half; v++ {
-			b.Set(0x00020000 | v) // key 2 → masked 0, triggers swap with key 1
-		}
-		for v := uint64(2 * half); v < 3*half; v++ {
-			b.Set(0x00030000 | v) // key 3 → masked 0, OR'd into bitmap inline
-		}
-
-		ra.AndMasked(b, 0)
-
-		require.Equal(t, 3*half, ra.GetCardinality())
-		for v := uint64(0); v < 3*half; v++ {
-			require.True(t, ra.Contains(v))
-		}
-	})
-}
-
-func TestAndMaskedConc(t *testing.T) {
-	// n is large enough to guarantee at least 2 goroutines:
-	// calcConcurrency uses minContainersPerRoutine=24, so n >= 48 gives concurrency >= 2.
-	const n = minContainersPerRoutine * 3 // 72 keys
-
-	// mask keeps bits 16-31 and zeroes bits 32-63.
-	// b keys at (g<<32 | k<<16) all map to ra key (k<<16) under this mask.
-	const mask uint64 = 0x00000000FFFF0000
-
-	// assertMatchesSeq verifies that AndMaskedConc produces the same result as
-	// AndMasked at several concurrency levels, including one that forces
-	// actual goroutine spawning (maxConc=0 means unlimited).
-	assertMatchesSeq := func(t *testing.T, ra, b *Bitmap, m uint64) {
-		t.Helper()
-		expected := ra.Clone()
-		expected.AndMasked(b, m)
-		for _, maxConc := range []int{1, 2, 4, 0} {
-			got := ra.Clone()
-			got.AndMaskedConc(b, m, maxConc)
-			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "maxConc=%d", maxConc)
-			for _, v := range expected.ToArray() {
-				require.True(t, got.Contains(v), "maxConc=%d missing %d", maxConc, v)
-			}
-		}
-	}
-
-	t.Run("empty b zeroes ra", func(t *testing.T) {
-		ra := NewBitmap()
-		ra.Set(1)
-		ra.AndMaskedConc(NewBitmap(), math.MaxUint64, 0)
-		require.Equal(t, 0, ra.GetCardinality())
-	})
-
-	t.Run("nil b zeroes ra", func(t *testing.T) {
-		ra := NewBitmap()
-		ra.Set(1)
-		var b *Bitmap
-		ra.AndMaskedConc(b, math.MaxUint64, 0)
-		require.Equal(t, 0, ra.GetCardinality())
-	})
-
-	t.Run("identity mask", func(t *testing.T) {
-		// Mirror of TestAndMasked/identity_mask_matches_ra.And(b).
-		// n ra keys, b has same keys with even-valued elements only.
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 200; v++ {
-				ra.Set(k<<16 | v)
-				if v%2 == 0 {
-					b.Set(k<<16 | v)
-				}
-			}
-		}
-		assertMatchesSeq(t, ra, b, math.MaxUint64)
-	})
-
-	t.Run("matches AndMasked across masks", func(t *testing.T) {
-		// Mirror of TestAndMasked/matches_ra.Clone().And(b.Masked(mask)).
-		// n ra keys; b spreads the same keys across 5 high-bit positions.
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 100; v++ {
-				ra.Set(k<<16 | v)
-			}
-			for pos := uint64(0); pos < 5; pos++ {
-				for v := uint64(0); v < 100; v++ {
-					b.Set(pos<<32 | k<<16 | v)
-				}
-			}
-		}
-		for _, m := range []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, mask} {
-			assertMatchesSeq(t, ra, b, m)
-		}
-	})
-
-	t.Run("zero mask: most ra containers zeroed out", func(t *testing.T) {
-		// Mirror of TestAndMasked/zero_mask_collapses_all_b_keys_to_zero.
-		// Under mask=0 only ra key 0 has a match; all others are zeroed.
-		// This exercises the zero-out path across n-1 containers concurrently.
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			ra.Set(k<<16 | 1)
-			ra.Set(k<<16 | 2)
-		}
-		b.Set(0x00010000 | 1) // maps to masked key 0
-		b.Set(0x00020000 | 2) // maps to masked key 0
-		assertMatchesSeq(t, ra, b, 0)
-	})
-
-	t.Run("multiple b keys OR before AND", func(t *testing.T) {
-		// Mirror of TestAndMasked/multiple_b_keys_OR_before_AND.
-		// Each ra key has 2 b keys mapping to it; OR triggers buffer swap
-		// (non-overlapping arrays, result doesn't fit in source container).
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v <= 3; v++ {
-				ra.Set(k<<16 | v)
-			}
-			b.Set(uint64(1)<<32 | k<<16 | 1)
-			b.Set(uint64(1)<<32 | k<<16 | 2)
-			b.Set(uint64(2)<<32 | k<<16 | 3)
-			b.Set(uint64(2)<<32 | k<<16 | 4)
-		}
-		assertMatchesSeq(t, ra, b, mask)
-	})
-
-	t.Run("overlapping arrays: inline OR succeeds without swap", func(t *testing.T) {
-		// Mirror of TestAndMasked/overlapping_arrays:_inline_succeeds,_no_swap.
-		// Two b keys per ra key with identical values — OR result fits in source.
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 50; v++ {
-				ra.Set(k<<16 | v)
-				b.Set(uint64(1)<<32 | k<<16 | v)
-				b.Set(uint64(2)<<32 | k<<16 | v)
-			}
-		}
-		assertMatchesSeq(t, ra, b, mask)
-	})
-
-	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
-		// Mirror of TestAndMasked/large_non-overlapping_arrays.
-		// Per ra key: two b keys with 1228 non-overlapping values each →
-		// cnum+onum=2456 triggers array-to-bitmap conversion and buffer swap.
-		const half = 1228
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 2*half; v++ {
-				ra.Set(k<<16 | v)
-			}
-			for v := uint64(0); v < half; v++ {
-				b.Set(uint64(1)<<32 | k<<16 | v)
-			}
-			for v := uint64(half); v < 2*half; v++ {
-				b.Set(uint64(2)<<32 | k<<16 | v)
-			}
-		}
-		assertMatchesSeq(t, ra, b, mask)
-	})
-
-	t.Run("three containers: swap then OR into bitmap", func(t *testing.T) {
-		// Mirror of TestAndMasked/three_containers:_swap_on_first_pair.
-		// Per ra key: first pair triggers bitmap conversion and swap;
-		// third container is OR'd inline into the resulting bitmap.
-		const half = 1228
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 3*half; v++ {
-				ra.Set(k<<16 | v)
-			}
-			for v := uint64(0); v < half; v++ {
-				b.Set(uint64(1)<<32 | k<<16 | v)
-			}
-			for v := uint64(half); v < 2*half; v++ {
-				b.Set(uint64(2)<<32 | k<<16 | v)
-			}
-			for v := uint64(2 * half); v < 3*half; v++ {
-				b.Set(uint64(3)<<32 | k<<16 | v)
-			}
-		}
-		assertMatchesSeq(t, ra, b, mask)
-	})
-
-	t.Run("b not modified", func(t *testing.T) {
-		ra := NewBitmap()
-		b := NewBitmap()
-		for k := uint64(0); k < n; k++ {
-			for v := uint64(0); v < 50; v++ {
-				ra.Set(k<<16 | v)
-				b.Set(uint64(1)<<32 | k<<16 | v)
-				b.Set(uint64(2)<<32 | k<<16 | v)
-			}
-		}
-		bCard := b.GetCardinality()
-		bValues := b.ToArray()
-
-		ra.AndMaskedConc(b, mask, 0)
-
-		require.Equal(t, bCard, b.GetCardinality())
-		for _, v := range bValues {
-			require.True(t, b.Contains(v))
-		}
-	})
-}
-
-func TestCopresenceByMask(t *testing.T) {
-	// pos packs three fields into a uint64 to give readable test data:
-	//   bits 63-50: hi  (14 bits) — preserved by maskZeroMid
-	//   bits 49-36: mid (14 bits) — zeroed by maskZeroMid
-	//   bits 35-0:  lo  (36 bits) — preserved by maskZeroMid
-	pos := func(hi, mid, lo uint64) uint64 {
-		return (hi << 50) | (mid << 36) | lo
-	}
-	// maskZeroMid keeps hi and lo, zeroes mid. mask & 0xFFFF == 0xFFFF —
-	// satisfies CopresenceByMask's mask-shape requirement.
-	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
-
-	bm := func(values ...uint64) *Bitmap {
-		b := NewBitmap()
-		b.SetMany(values)
-		return b
-	}
-
-	// safeBufSize implements the documented upper bound for CopresenceByMaskToBuf:
-	// sum of input byte sizes. Sized this way, the buf is guaranteed to fit the
-	// result without internal growth.
-	safeBufSize := func(bms []*Bitmap) int {
-		total := 0
-		for _, b := range bms {
-			total += b.LenInBytes()
-		}
-		return total
-	}
-
-	// runBoth exercises a test case through both call paths and asserts the
-	// same result via `check`. CopresenceByMaskToBuf is sized using
-	// safeBufSize so it never needs to grow internally.
-	runBoth := func(t *testing.T, inputs []*Bitmap, mask uint64, check func(t *testing.T, got *Bitmap)) {
-		t.Helper()
-		t.Run("plain", func(t *testing.T) {
-			check(t, CopresenceByMask(inputs, mask))
-		})
-		t.Run("ToBuf", func(t *testing.T) {
-			check(t, CopresenceByMaskToBuf(inputs, mask, make([]byte, safeBufSize(inputs))))
-		})
-	}
-
-	tests := []struct {
-		name   string
-		inputs []*Bitmap
-		mask   uint64
-		want   []uint64
-	}{
-		// --- Edge cases ----------------------------------------------------
-		{
-			name:   "empty slice returns empty",
-			inputs: []*Bitmap{},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			name:   "single input is preserved as-is",
-			inputs: []*Bitmap{bm(pos(1, 1, 5), pos(2, 7, 9))},
-			mask:   maskZeroMid,
-			want:   []uint64{pos(1, 1, 5), pos(2, 7, 9)},
-		},
-		{
-			name:   "all inputs empty returns empty",
-			inputs: []*Bitmap{bm(), bm()},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			name:   "first input empty returns empty",
-			inputs: []*Bitmap{bm(), bm(pos(1, 1, 1))},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			name:   "second input empty returns empty",
-			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm()},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			name: "any empty input among many short-circuits to empty",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5)),
-				NewBitmap(),
-				bm(pos(1, 2, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{},
-		},
-
-		// --- Binary cases --------------------------------------------------
-		{
-			// a={(1,1,1)}, b={(1,2,1),(1,3,1)}. After masking mid=0 each
-			// side maps to {(1,0,1)}. Common = {(1,0,1)} → all originals
-			// emit (different mid values are kept distinct in the result).
-			name:   "shared masked group: union of contributing mid values",
-			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm(pos(1, 2, 1), pos(1, 3, 1))},
-			mask:   maskZeroMid,
-			want:   []uint64{pos(1, 1, 1), pos(1, 2, 1), pos(1, 3, 1)},
-		},
-		{
-			// a→{(1,0,8)}, b→{(2,0,8)}. Different masked groups — no co-presence.
-			name:   "different hi yields disjoint masked groups",
-			inputs: []*Bitmap{bm(pos(1, 1, 8)), bm(pos(2, 1, 8))},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			// Same hi, but lo differs: a→{(1,0,1)}, b→{(1,0,2)}. Common = ∅.
-			name:   "same hi different lo: no co-presence on lo",
-			inputs: []*Bitmap{bm(pos(1, 1, 1)), bm(pos(1, 2, 2))},
-			mask:   maskZeroMid,
-			want:   []uint64{},
-		},
-		{
-			// a's lo set = {1,2,3}, b's lo = {2}. Only lo=2 is shared.
-			// Result emits both originals whose lo is 2.
-			name: "lo intersection: only shared lo values survive",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 1, 3)),
-				bm(pos(1, 2, 2)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(1, 1, 2), pos(1, 2, 2)},
-		},
-		{
-			// Two distinct masked groups (hi=1 and hi=2) are each co-present
-			// on their respective sides; both contribute fully.
-			name: "two distinct shared groups both contribute",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 1), pos(2, 1, 1)),
-				bm(pos(1, 2, 1), pos(2, 2, 1)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{
-				pos(1, 1, 1), pos(1, 2, 1),
-				pos(2, 1, 1), pos(2, 2, 1),
-			},
-		},
-		{
-			// hi=1 only in a, hi=2 in both. Only hi=2 group contributes.
-			name: "one shared group, the other only in a is filtered out",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 9), pos(2, 1, 9)),
-				bm(pos(2, 2, 9)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(2, 1, 9), pos(2, 2, 9)},
-		},
-		{
-			// a→{(3,0,100)}; b→{(1,0,100),(3,0,100)}. Common = {(3,0,100)}.
-			// b's pos(1,5,100) is filtered out — its masked value is unique to b.
-			name: "extra container in b filtered out by partial overlap",
-			inputs: []*Bitmap{
-				bm(pos(3, 3, 100)),
-				bm(pos(1, 5, 100), pos(3, 4, 100)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(3, 3, 100), pos(3, 4, 100)},
-		},
-		{
-			// a has 5 lo values at mid=1; b has 2 of them at mid=2.
-			// Only the 2 shared lo values survive on both sides — interleaved
-			// in the want slice in numerical order (which is also ToArray
-			// order): (mid=1, lo=2), (mid=1, lo=4), (mid=2, lo=2), (mid=2, lo=4).
-			name: "many lo values: only co-present lo values survive",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 1, 3), pos(1, 1, 4), pos(1, 1, 5)),
-				bm(pos(1, 2, 2), pos(1, 2, 4)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{
-				pos(1, 1, 2), pos(1, 1, 4),
-				pos(1, 2, 2), pos(1, 2, 4),
-			},
-		},
-		{
-			// mask = ^0 → every value masks to itself → masked AND ≡ exact
-			// set intersection of the input bitmaps.
-			name:   "mask=^0 emits intersection of overlapping containers",
-			inputs: []*Bitmap{bm(10, 20, 30), bm(20, 30, 40)},
-			mask:   ^uint64(0),
-			want:   []uint64{20, 30},
-		},
-		{
-			// doc spans into the container key: doc=65537 sets bit 16 in v,
-			// which lives in the container key (bits 16-63). pos(1,1,65537)
-			// and pos(1,1,1) thus sit in DIFFERENT containers, and under
-			// maskZeroMid (which preserves the doc-high portion) they land in
-			// DIFFERENT masked groups despite sharing hi and mid.
-			name: "doc-high contributes to masked container key",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 65537), pos(1, 1, 1)),
-				bm(pos(1, 2, 65537)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(1, 1, 65537), pos(1, 2, 65537)},
-		},
-		{
-			// One masked group ((hi=1, mid=0)) but each side has multiple
-			// distinct exact keys in it, with partial overlap: K(1,1) is in
-			// both, K(1,2) only in a, K(1,3) only in b.
-			//   a positions: K(1,1)→{1,2}, K(1,2)→{3,4}.
-			//   b positions: K(1,1)→{2,5}, K(1,3)→{1,6}.
-			//   A_pos = {1,2,3,4}; B_pos = {1,2,5,6}; common_pos = {1,2}.
-			// Per key:
-			//   K(1,1) (both): (a OR b) AND common_pos = {1,2,5} AND {1,2} = {1,2}.
-			//   K(1,2) (a-only): {3,4} AND {1,2} = ∅ → skip.
-			//   K(1,3) (b-only): {1,6} AND {1,2} = {1} → emit.
-			name: "multiple containers per group, partial exact-key overlap",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 1), pos(1, 1, 2), pos(1, 2, 3), pos(1, 2, 4)),
-				bm(pos(1, 1, 2), pos(1, 1, 5), pos(1, 3, 1), pos(1, 3, 6)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(1, 1, 1), pos(1, 1, 2), pos(1, 3, 1)},
-		},
-
-		// --- N-ary cases (ported from the old chained tests, now direct
-		// CopresenceByMask calls). -----------------------------------------
-		{
-			name: "three-way: all inputs share single co-present group",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5)),
-				bm(pos(1, 2, 5)),
-				bm(pos(1, 3, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5)},
-		},
-		{
-			name: "three-way: one input misses the group → empty",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5)),
-				bm(pos(1, 2, 5)),
-				bm(pos(2, 3, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{},
-		},
-		{
-			name: "three-way: two distinct groups, all inputs contribute",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5), pos(2, 1, 5)),
-				bm(pos(1, 2, 5), pos(2, 2, 5)),
-				bm(pos(1, 3, 5), pos(2, 3, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{
-				pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5),
-				pos(2, 1, 5), pos(2, 2, 5), pos(2, 3, 5),
-			},
-		},
-		{
-			// Group (hi=1) is in all 3; group (hi=2) is in inputs 1+2 but
-			// missing from input 3 → drops out during the AND fold.
-			name: "three-way: only the fully co-present group survives",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5), pos(2, 1, 5)),
-				bm(pos(1, 2, 5), pos(2, 2, 5)),
-				bm(pos(1, 3, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5)},
-		},
-		{
-			// Five-way intersection. Group (hi=1) is in all five → emits;
-			// group (hi=2) is only in the first four → drops out at the fifth.
-			name: "five-way: only fully co-present group survives",
-			inputs: []*Bitmap{
-				bm(pos(1, 1, 5), pos(2, 1, 5)),
-				bm(pos(1, 2, 5), pos(2, 2, 5)),
-				bm(pos(1, 3, 5), pos(2, 3, 5)),
-				bm(pos(1, 4, 5), pos(2, 4, 5)),
-				bm(pos(1, 5, 5)),
-			},
-			mask: maskZeroMid,
-			want: []uint64{
-				pos(1, 1, 5), pos(1, 2, 5), pos(1, 3, 5),
-				pos(1, 4, 5), pos(1, 5, 5),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runBoth(t, tt.inputs, tt.mask, func(t *testing.T, got *Bitmap) {
-				require.Equal(t, tt.want, got.ToArray())
-			})
-		})
-	}
-
-	t.Run("mixed array and bitmap containers in same group", func(t *testing.T) {
-		// Force a bitmap container in input 0 by populating one container
-		// with thousands of positions; input 1 uses a small array container
-		// for the same masked group. Exercises array/bitmap interop in the
-		// OR/AND container ops triggered by the algorithm.
-		aVals := make([]uint64, 3000)
-		for i := range aVals {
-			aVals[i] = pos(1, 1, uint64(i))
-		}
-		inputs := []*Bitmap{bm(aVals...), bm(pos(1, 2, 100), pos(1, 2, 2000), pos(1, 2, 9999))}
-
-		// A_pos = {0..2999}; B_pos = {100, 2000, 9999}; common_pos = {100, 2000}.
-		// 9999 is outside A's range, so it doesn't survive.
-		want := []uint64{
-			pos(1, 1, 100), pos(1, 1, 2000),
-			pos(1, 2, 100), pos(1, 2, 2000),
-		}
-		runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
-			require.Equal(t, want, got.ToArray())
-		})
-	})
-
-	t.Run("wide gap between common masked keys exercises galloping", func(t *testing.T) {
-		// inputs[0] has 200 distinct masked groups (hi=1..200); inputs[1]
-		// has just the last one. The entry-walk's max-key advance must
-		// skip past 199 of inputs[0]'s entries — linear advance would step
-		// 199 times, while galloping reaches the target in O(log 199) ≈ 8
-		// steps. Correctness is what's checked here; the gallop path is
-		// exercised regardless.
-		aVals := make([]uint64, 200)
-		for i := range aVals {
-			hi := uint64(i + 1)
-			aVals[i] = pos(hi, 1, hi)
-		}
-		inputs := []*Bitmap{bm(aVals...), bm(pos(200, 1, 200))}
-
-		want := []uint64{pos(200, 1, 200)}
-		runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
-			require.Equal(t, want, got.ToArray())
-		})
-	})
-}
-
-func TestCopresenceByMaskProperties(t *testing.T) {
-	pos := func(hi, mid, lo uint64) uint64 {
-		return (hi << 50) | (mid << 36) | lo
-	}
-	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
-
-	bm := func(values ...uint64) *Bitmap {
-		b := NewBitmap()
-		b.SetMany(values)
-		return b
-	}
-
-	t.Run("commutative across argument order (N=2)", func(t *testing.T) {
-		a := bm(pos(1, 1, 1), pos(2, 1, 1))
-		b := bm(pos(1, 2, 1), pos(2, 2, 1))
-
-		ab := CopresenceByMask([]*Bitmap{a, b}, maskZeroMid).ToArray()
-		ba := CopresenceByMask([]*Bitmap{b, a}, maskZeroMid).ToArray()
-		require.Equal(t, ab, ba)
-	})
-
-	t.Run("permutation-invariant across argument order (N=3)", func(t *testing.T) {
-		// For inputs with non-empty n-way co-presence, every permutation of
-		// the slice must yield the same value set. The algorithm's cursor
-		// initialization is order-sensitive but the result is not.
-		a := bm(pos(1, 1, 5), pos(2, 1, 5))
-		b := bm(pos(1, 2, 5), pos(3, 2, 5))
-		c := bm(pos(1, 3, 5), pos(2, 3, 5))
-
-		perms := [][]*Bitmap{
-			{a, b, c}, {a, c, b}, {b, a, c}, {b, c, a}, {c, a, b}, {c, b, a},
-		}
-		var first []uint64
-		for i, p := range perms {
-			got := CopresenceByMask(p, maskZeroMid).ToArray()
-			if i == 0 {
-				first = got
-				continue
-			}
-			require.Equal(t, first, got, "permutation %d differed", i)
-		}
-	})
-
-	t.Run("idempotent: CopresenceByMask([a, a], m) preserves a", func(t *testing.T) {
-		a := bm(pos(1, 1, 1), pos(2, 5, 1), pos(3, 9, 2))
-
-		got := CopresenceByMask([]*Bitmap{a, a}, maskZeroMid).ToArray()
-		require.Equal(t, a.ToArray(), got)
-	})
-
-	t.Run("matches A.Masked(m).And(B.Masked(m)) on co-presence", func(t *testing.T) {
-		// The result's masked image must equal the explicit
-		// A.Masked(m).And(B.Masked(m)) reference.
-		a := bm(
-			pos(1, 1, 1), pos(1, 1, 2), pos(2, 1, 1),
-			pos(1, 1, 100), pos(3, 9, 100),
-		)
-		b := bm(
-			pos(1, 2, 1), pos(1, 3, 2), pos(2, 7, 1),
-			pos(1, 4, 200), pos(5, 0, 100),
-		)
-
-		want := a.Masked(maskZeroMid).And(b.Masked(maskZeroMid))
-		got := CopresenceByMask([]*Bitmap{a, b}, maskZeroMid).Masked(maskZeroMid)
-
-		require.Equal(t, want.ToArray(), got.ToArray())
-	})
-
-	t.Run("mask=^0 reduces to set intersection", func(t *testing.T) {
-		a := bm(10, 20, 30, 40)
-		b := bm(20, 30, 50)
-
-		got := CopresenceByMask([]*Bitmap{a, b}, ^uint64(0)).ToArray()
-		require.Equal(t, []uint64{20, 30}, got)
-	})
-}
-
-func TestCopresenceByMaskToBuf(t *testing.T) {
-	// TestCopresenceByMask runs every table case through both
-	// CopresenceByMask and CopresenceByMaskToBuf, so result-correctness is
-	// covered there. The subtests below verify ToBuf-specific behaviour
-	// that the unified table can't observe.
-	pos := func(hi, mid, lo uint64) uint64 {
-		return (hi << 50) | (mid << 36) | lo
-	}
-	const maskZeroMid uint64 = ^(uint64(0x3FFF) << 36)
-
-	bm := func(values ...uint64) *Bitmap {
-		b := NewBitmap()
-		b.SetMany(values)
-		return b
-	}
-
-	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
-		// With a generously-sized buffer, the result bitmap's data slice
-		// should never need to grow — capInBytes stays at the input buffer's
-		// original capacity.
-		inputs := []*Bitmap{
-			bm(pos(1, 1, 5), pos(2, 1, 5), pos(3, 1, 5)),
-			bm(pos(1, 2, 5), pos(2, 2, 5)),
-			bm(pos(1, 3, 5)),
-		}
-		bufBytes := 64 * 1024
-		buf := make([]byte, bufBytes)
-		got := CopresenceByMaskToBuf(inputs, maskZeroMid, buf)
-
-		require.Greater(t, got.GetCardinality(), 0)
-		require.Equal(t, bufBytes, got.capInBytes(),
-			"result cap should match the input buffer cap when no growth occurred")
-	})
-
-	t.Run("single input is cloned into buf, not aliased", func(t *testing.T) {
-		// Single-input short-circuit returns a Clone-backed-by-buf. Verify
-		// the result is independent of the source.
-		a := bm(pos(1, 1, 5), pos(2, 7, 9))
-		got := CopresenceByMaskToBuf([]*Bitmap{a}, maskZeroMid, make([]byte, 4096))
-		require.Equal(t, a.ToArray(), got.ToArray())
-		got.Set(pos(99, 0, 0))
-		require.False(t, a.Contains(pos(99, 0, 0)), "result must be a clone, not aliased")
-	})
-
-	t.Run("undersized buf still produces correct result (auto-grows)", func(t *testing.T) {
-		// Pass a tiny buffer; the bitmap internally allocates more space.
-		// Result correctness is preserved.
-		inputs := []*Bitmap{
-			bm(pos(1, 1, 1), pos(1, 1, 2)),
-			bm(pos(1, 2, 1), pos(1, 2, 2)),
-		}
-		got := CopresenceByMaskToBuf(inputs, maskZeroMid, make([]byte, 8))
-		expected := CopresenceByMask(inputs, maskZeroMid)
-		require.Equal(t, expected.ToArray(), got.ToArray())
 	})
 }
