@@ -893,7 +893,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 				commonContainer = ra.fillUpBitmapContainerRange(minOffset, minY, maxY, card+newYs, nil)
 				for i := 0; i < card; i++ {
 					y := prevContainer[startIdx+uint16(i)]
-					commonContainer[startIdx+y/16] |= bitmapMask[y%16]
+					commonContainer[startIdx+y/16] |= bitMask(uint16(y%16))
 				}
 			}
 		default:
@@ -948,7 +948,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 					commonContainer = ra.fillUpBitmapContainerRange(offset, minY, maxCardinality-1, card+newYs, onesBitmap)
 					for i := 0; i < card; i++ {
 						y := prevContainer[startIdx+uint16(i)]
-						commonContainer[startIdx+y/16] |= bitmapMask[y%16]
+						commonContainer[startIdx+y/16] |= bitMask(uint16(y%16))
 					}
 				}
 			}
@@ -1090,11 +1090,11 @@ func (b bitmap) setRange(minY, maxY int, onesBitmap bitmap) {
 	}
 	for y, mx := minY, min(minY16, maxY+1); y < mx; y++ {
 		// fmt.Printf("    ==> b16L i=%d bit=%d\n", y/16, y%16)
-		b16[y/16] |= bitmapMask[y%16]
+		b16[y/16] |= bitMask(uint16(y%16))
 	}
 	for y, mx := max(minY, maxY16), maxY+1; y < mx; y++ {
 		// fmt.Printf("    ==> b16R i=%d bit=%d\n", y/16, y%16)
-		b16[y/16] |= bitmapMask[y%16]
+		b16[y/16] |= bitMask(uint16(y%16))
 	}
 }
 
@@ -1106,6 +1106,7 @@ func (b bitmap) fillWithOnes() {
 }
 
 func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
+	ra.cacheValid = false
 	cp := cap(ra.data)
 	ln := len(ra.data)
 	curNumKeys := ra.keys.numKeys()
@@ -1139,7 +1140,7 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 			ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 			ra.keys.setNodeSize(newSizeKeys)
-			ra.keys.addToAllVals(uint64(sizeKeys))
+			ra.keys.updateAllOffsets(uint64(sizeKeys))
 			return
 		}
 		// neither keys nor containers fit. expand slice to make room for containers and more keys
@@ -1159,7 +1160,7 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 
 	ra.keys = uint16To64SliceUnsafe(ra.data[:newSizeKeys])
 	ra.keys.setNodeSize(newSizeKeys)
-	ra.keys.addToAllVals(uint64(sizeKeys))
+	ra.keys.updateAllOffsets(uint64(sizeKeys))
 }
 
 // Masked applies the given mask to every key and returns a new bitmap.

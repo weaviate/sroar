@@ -6,5 +6,6 @@ vendor/
 .vscode/
 
 .claude/
+sroar.test
 
 testdata/bitmaps/**/
