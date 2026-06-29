@@ -220,17 +220,23 @@ func (c array) removeRange(lo, hi uint16) {
 	if hi < lo {
 		panic(fmt.Sprintf("args must satisfy lo <= hi, got lo: %d, hi: %d\n", lo, hi))
 	}
-	loIdx := c.find(lo)
-	hiIdx := c.find(hi)
-
-	st := int(startIdx)
-	loVal := c[st+loIdx]
 	N := getCardinality(c)
+	loIdx := c.find(lo)
 
-	// remove range doesn't intersect with any element in the array.
-	if hi < loVal || loIdx == N {
+	// remove range doesn't intersect with any element in the array. Check
+	// loIdx == N (lo is past the last element) before dereferencing c[st+loIdx]
+	// (a full container would read one past its end) and before searching for
+	// hi (no need when there's nothing to remove).
+	if loIdx == N {
 		return
 	}
+	st := int(startIdx)
+	loVal := c[st+loIdx]
+	if hi < loVal {
+		return
+	}
+
+	hiIdx := c.find(hi)
 	if hiIdx == N {
 		if loIdx > 0 {
 			c = c[:int(startIdx)+loIdx-1]
