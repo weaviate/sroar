@@ -602,6 +602,33 @@ func (b bitmap) all() []uint16 {
 	return res
 }
 
+// bitmapToArrayValues writes the set values of bitmap container b into out in
+// ascending order, without allocating, stopping when out is full (a corrupt
+// container whose cardinality header understates its popcount must degrade
+// deterministically rather than overrun). Returns the number written.
+func bitmapToArrayValues(b []uint16, out []uint16) int {
+	idx := 0
+	data := b[startIdx:]
+	for w, word := range data {
+		if word == 0 {
+			continue
+		}
+		base := uint16(w) << 4
+		// bitmapMask[pos] is 1<<(15-pos), so the smallest pos is the highest bit:
+		// LeadingZeros16 yields values in ascending order.
+		for word != 0 {
+			if idx == len(out) {
+				return idx
+			}
+			pos := uint16(bits.LeadingZeros16(word))
+			out[idx] = base | pos
+			idx++
+			word &^= 1 << (15 - pos)
+		}
+	}
+	return idx
+}
+
 // TODO: It can be optimized.
 func (b bitmap) selectAt(idx int) uint16 {
 	data := b[startIdx:]

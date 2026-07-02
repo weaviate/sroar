@@ -14,6 +14,65 @@ func init() {
 	setCardinality(emptyArrayContainer, 0)
 }
 
+// andNotDenseByHeaders reports, from cardinality headers alone, that (ac &^ bc)
+// keeps at least andNotCompactThreshold values: bc can remove at most its own
+// cardinality. Shared by the sizing pass and the materialization pass so both
+// take the same dense-path decision.
+func andNotDenseByHeaders(ac, bc []uint16) bool {
+	return getCardinality(ac)-getCardinality(bc) >= andNotCompactThreshold
+}
+
+// andNotResultCard returns the cardinality of (ac &^ bc) without materializing
+// the result and without allocating. bc == nil means no matching container.
+// For bitmap sources the value is exact only below andNotCompactThreshold;
+// results at least that large may be clamped to the threshold (their size in
+// the arena does not depend on the exact count).
+func andNotResultCard(ac, bc []uint16) int {
+	if bc == nil {
+		return getCardinality(ac)
+	}
+	at, bt := ac[indexType], bc[indexType]
+	switch {
+	case at == typeArray && bt == typeArray:
+		av := ac[startIdx : int(startIdx)+getCardinality(ac)]
+		bv := bc[startIdx : int(startIdx)+getCardinality(bc)]
+		return len(av) - intersection2by2Cardinality(av, bv)
+	case at == typeArray && bt == typeBitmap:
+		n := 0
+		for _, x := range ac[startIdx : int(startIdx)+getCardinality(ac)] {
+			if !bitmap(bc).has(x) {
+				n++
+			}
+		}
+		return n
+	case at == typeBitmap && bt == typeArray:
+		if andNotDenseByHeaders(ac, bc) {
+			return andNotCompactThreshold
+		}
+		n := getCardinality(ac)
+		for _, x := range bc[startIdx : int(startIdx)+getCardinality(bc)] {
+			if bitmap(ac).has(x) {
+				n--
+			}
+		}
+		return n
+	default: // bitmap, bitmap
+		if andNotDenseByHeaders(ac, bc) {
+			return andNotCompactThreshold
+		}
+		a64 := uint16To64SliceUnsafe(ac[startIdx:])
+		b64 := uint16To64SliceUnsafe(bc[startIdx:])
+		n := 0
+		for i := range a64 {
+			n += bits.OnesCount64(a64[i] &^ b64[i])
+			if n >= andNotCompactThreshold {
+				return andNotCompactThreshold // dense: exact count not needed
+			}
+		}
+		return n
+	}
+}
+
 func containerAndAlt(ac, bc []uint16, optBuf []uint16, runMode int) []uint16 {
 	at := ac[indexType]
 	bt := bc[indexType]
