@@ -191,28 +191,123 @@ func TestAndNotResultAlignment(t *testing.T) {
 	}
 }
 
-// A bitmap container whose cardinality header understates its popcount (corrupt
-// serialized input) must not panic: the compaction write clamps to the sized
-// slots and degrades deterministically.
-func TestAndNotCorruptCardinalityNoPanic(t *testing.T) {
-	a := NewBitmap()
-	for x := uint64(0); x < 3000; x++ {
-		a.Set(x) // one bitmap container, real popcount 3000
+// A bitmap container whose cardinality header misstates its real popcount
+// (corrupt serialized input) must neither panic nor lose membership. The
+// container lives under key 1 because NewBitmap pre-creates a key-0
+// container, which would turn the unmatched cases into matched-empty ones.
+func TestAndNotCorruptCardinalityHeaders(t *testing.T) {
+	const base = uint64(1) << 16
+	// newCorrupt returns a bitmap holding [base, base+real) in one bitmap
+	// container whose cardinality header is overwritten with header.
+	newCorrupt := func(t *testing.T, real uint64, header int) *Bitmap {
+		t.Helper()
+		a := NewBitmap()
+		for x := base; x < base+3000; x++ {
+			a.Set(x) // force a bitmap container
+		}
+		for x := base + real; x < base+3000; x++ {
+			a.Remove(x) // containers never down-convert: stays bitmap
+		}
+		off, found := a.keys.getValue(base)
+		if !found {
+			t.Fatal("missing container")
+		}
+		c := a.getContainer(off)
+		if c[indexType] != typeBitmap {
+			t.Fatal("fixture: container must be a bitmap container")
+		}
+		setCardinality(c, header)
+		return a
 	}
-	off, found := a.keys.getValue(0)
-	if !found {
-		t.Fatal("missing container")
-	}
-	setCardinality(a.getContainer(off), 100) // corrupt: header says 100
 
-	b := NewBitmap()
-	b.Set(1)
-	b.Remove(1) // matched key with an empty container: AndNot keeps a's verbatim
+	t.Run("matched array overlapping more than the header claims", func(t *testing.T) {
+		// the shape that drives a header-seeded count negative: pass-1 sizing
+		// must not panic and the result must keep the real survivors
+		a := newCorrupt(t, 3000, 100)
+		b := NewBitmap()
+		for x := base; x < base+500; x++ {
+			b.Set(x) // matched array container, 500 hits > header's 100
+		}
+		res := AndNot(a, b)
+		for _, x := range []uint64{0, 499, 500, 1234, 2999} {
+			if got, want := res.Contains(base+x), x >= 500; got != want {
+				t.Fatalf("Contains(base+%d) = %v, want %v", x, got, want)
+			}
+		}
+	})
 
-	res := AndNot(a, b) // must not panic
-	if got := res.GetCardinality(); got != 100 {
-		t.Fatalf("clamped cardinality: got %d want 100", got)
-	}
+	t.Run("matched empty array container", func(t *testing.T) {
+		a := newCorrupt(t, 3000, 100)
+		b := NewBitmap()
+		b.Set(base + 1)
+		b.Remove(base + 1) // matched key with an empty container
+		b.Set(5 << 16)     // keep b non-empty so AndNot doesn't Clone
+		res := AndNot(a, b)
+		for _, x := range []uint64{0, 100, 2999} {
+			if !res.Contains(base + x) {
+				t.Fatalf("membership lost at base+%d", x)
+			}
+		}
+	})
+
+	t.Run("unmatched container, dense real popcount", func(t *testing.T) {
+		a := newCorrupt(t, 3000, 100)
+		b := NewBitmap()
+		b.Set(5 << 16) // no key overlap with a's corrupt container
+		res := AndNot(a, b)
+		for _, x := range []uint64{0, 100, 2999} {
+			if !res.Contains(base + x) {
+				t.Fatalf("membership lost at base+%d", x)
+			}
+		}
+	})
+
+	t.Run("unmatched container, sparse real popcount", func(t *testing.T) {
+		a := newCorrupt(t, 500, 50)
+		b := NewBitmap()
+		b.Set(5 << 16)
+		res := AndNot(a, b)
+		off, found := res.keys.getValue(base)
+		if !found {
+			t.Fatal("container missing from result")
+		}
+		if c := res.getContainer(off); c[indexType] != typeArray {
+			t.Fatalf("sparse corrupt container not compacted (type %d)", c[indexType])
+		}
+		if got := res.GetCardinality(); got != 500 {
+			t.Fatalf("cardinality %d, want 500 (compaction repairs the header)", got)
+		}
+		for x := uint64(0); x < 500; x++ {
+			if !res.Contains(base + x) {
+				t.Fatalf("missing base+%d", x)
+			}
+		}
+		if res.Contains(base + 600) {
+			t.Fatal("false positive")
+		}
+	})
+
+	t.Run("overstated header routes to dense path", func(t *testing.T) {
+		a := newCorrupt(t, 100, 3000)
+		b := NewBitmap()
+		for x := base; x < base+5000; x++ {
+			b.Set(x) // >4096 values: bitmap container
+		}
+		for x := base + 50; x < base+5000; x++ {
+			b.Remove(x) // card 50 keeps a's header-dense check true
+		}
+		// header-dense (3000-50): the in-place build's bitmap-bc branch
+		// popcounts for real, repairing the header
+		res := AndNot(a, b)
+		if got := res.GetCardinality(); got != 50 {
+			t.Fatalf("cardinality %d, want 50", got)
+		}
+		for _, x := range []uint64{0, 49, 50, 99, 100} {
+			if got, want := res.Contains(base+x), x >= 50 && x < 100; got != want {
+				t.Fatalf("Contains(base+%d) = %v, want %v", x, got, want)
+			}
+		}
+	})
 }
 
 // Sparse bitmap containers of a with no matching key in b must be compacted

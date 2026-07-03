@@ -17,18 +17,39 @@ func init() {
 // andNotDenseByHeaders reports, from cardinality headers alone, that (ac &^ bc)
 // keeps at least andNotCompactThreshold values: bc can remove at most its own
 // cardinality. Shared by the sizing pass and the materialization pass so both
-// take the same dense-path decision.
+// take the same dense-path decision. A corrupt header can only misroute to the
+// dense path, which is sized maxContainerSize and preserves membership either
+// way.
 func andNotDenseByHeaders(ac, bc []uint16) bool {
 	return getCardinality(ac)-getCardinality(bc) >= andNotCompactThreshold
+}
+
+// bitmapCardClamped counts the set bits of bitmap container c, returning bound
+// as soon as the count reaches it.
+func bitmapCardClamped(c []uint16, bound int) int {
+	c64 := uint16To64SliceUnsafe(c[startIdx:])
+	n := 0
+	for i := range c64 {
+		n += bits.OnesCount64(c64[i])
+		if n >= bound {
+			return bound
+		}
+	}
+	return n
 }
 
 // andNotResultCard returns the cardinality of (ac &^ bc) without materializing
 // the result and without allocating. bc == nil means no matching container.
 // For bitmap sources the value is exact only below andNotCompactThreshold;
 // results at least that large may be clamped to the threshold (their size in
-// the arena does not depend on the exact count).
+// the arena does not depend on the exact count). Bitmap containers are counted
+// by their bits, never their cardinality header, so a corrupt header cannot
+// yield a negative or under-real count.
 func andNotResultCard(ac, bc []uint16) int {
 	if bc == nil {
+		if ac[indexType] == typeBitmap {
+			return bitmapCardClamped(ac, andNotCompactThreshold)
+		}
 		return getCardinality(ac)
 	}
 	at, bt := ac[indexType], bc[indexType]
@@ -49,8 +70,12 @@ func andNotResultCard(ac, bc []uint16) int {
 		if andNotDenseByHeaders(ac, bc) {
 			return andNotCompactThreshold
 		}
-		n := getCardinality(ac)
-		for _, x := range bc[startIdx : int(startIdx)+getCardinality(bc)] {
+		bn := getCardinality(bc)
+		n := bitmapCardClamped(ac, andNotCompactThreshold+bn)
+		if n >= andNotCompactThreshold+bn {
+			return andNotCompactThreshold // dense regardless of overlap
+		}
+		for _, x := range bc[startIdx : int(startIdx)+bn] {
 			if bitmap(ac).has(x) {
 				n--
 			}

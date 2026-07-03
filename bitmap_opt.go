@@ -285,7 +285,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	newKeys, sizeContainers := 0, 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
 		n := andNotResultCard(ac, bc)
-		if n == 0 {
+		if n <= 0 {
 			return
 		}
 		newKeys++
@@ -297,13 +297,14 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	res.expandConditionally(newKeys, sizeContainers)
 
 	// pass 2: materialize. Keys arrive in ascending order, so setKey always
-	// appends and never memmoves existing keys. The size/compaction decisions
-	// must land where pass 1 reserved: the header shortcut is shared via
-	// andNotDenseByHeaders, and a materialized result's cardinality header
-	// equals andNotResultCard's count (both compute |ac &^ bc|).
+	// appends and never memmoves existing keys. Both passes count bitmap
+	// containers by their bits and share the dense shortcut, so on well-formed
+	// input every size/compaction decision lands where pass 1 reserved; a
+	// corrupt cardinality header can at worst make pass 2 outgrow the
+	// reservation, which res absorbs by growing.
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
 		if bc == nil {
-			n := getCardinality(ac)
+			n := andNotResultCard(ac, nil)
 			if n == 0 {
 				return
 			}
@@ -331,6 +332,12 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			return
 		}
 		n := getCardinality(c)
+		if c[indexType] == typeBitmap && n < andNotCompactThreshold {
+			// c's header can derive from ac's (andNotArrayAlt seeds it, the
+			// ops' early-outs return ac verbatim), so count real bits before
+			// compaction sizes an array by it.
+			n = bitmapCardClamped(c, andNotCompactThreshold)
+		}
 		if n == 0 {
 			return
 		}
@@ -352,8 +359,8 @@ func writeCompactedArray(res *Bitmap, ak uint64, c []uint16, n int) {
 	dst := res.data[offset : offset+uint64(sz)]
 	dst[indexSize] = uint16(sz)
 	dst[indexType] = typeArray
-	// clamp enumeration to n slots: a corrupt container whose header
-	// understates its popcount must degrade deterministically, not overrun.
+	// clamp enumeration to n slots: if n and the container's bits ever
+	// disagree, degrade deterministically instead of overrunning.
 	written := bitmapToArrayValues(c, dst[startIdx:int(startIdx)+n])
 	setCardinality(dst, written)
 	for i := int(startIdx) + written; i < sz; i++ {
