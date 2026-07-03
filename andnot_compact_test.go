@@ -393,10 +393,10 @@ func BenchmarkAndNotHeavyShrink(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		s += AndNot(a, sub).GetCardinality()
 	}
-	sink = s
+	andNotSink = s
 }
 
-var sink int
+var andNotSink int
 
 // Dense AndNot: results stay bitmap containers — the regime where the sizing
 // pass short-circuits and pass 2 builds containers directly inside res.
@@ -415,5 +415,5 @@ func BenchmarkAndNotDense(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		s += AndNot(a, sub).GetCardinality()
 	}
-	sink = s
+	andNotSink = s
 }
