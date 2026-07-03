@@ -38,11 +38,9 @@ func bitmapCardClamped(c []uint16, bound int) int {
 
 // andNotResultCard returns the cardinality of (ac &^ bc) without materializing
 // the result and without allocating. bc == nil means no matching container.
-// For bitmap sources the value is exact only below andNotCompactThreshold;
-// results at least that large may be clamped to the threshold (their size in
-// the arena does not depend on the exact count). Bitmap containers are counted
-// by their bits, never their cardinality header, so a corrupt header cannot
-// yield a negative or under-real count.
+// Bitmap sources are counted by their bits — never the cardinality header, so
+// a corrupt header can't produce a negative or under-real count — and clamped
+// at andNotCompactThreshold, above which the exact count is unused.
 func andNotResultCard(ac, bc []uint16) int {
 	if bc == nil {
 		if ac[indexType] == typeBitmap {

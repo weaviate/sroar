@@ -256,19 +256,18 @@ func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 	}
 }
 
-// compactedArraySize is the arena footprint of a compacted array container of
-// cardinality n: header + values + one spare slot, padded to a multiple of 4
-// uint16s so every later container keeps the arena's 8-byte alignment (the
-// uint64 views built by uint16To64SliceUnsafe rely on it). Capped at
-// maxContainerSize: a full 4096-value array fits exactly, without the spare.
+// compactedArraySize is the arena footprint of an array container of
+// cardinality n: header, values, one spare slot, padded to a multiple of 4
+// uint16s so every later container keeps the 8-byte alignment the
+// uint16To64SliceUnsafe views rely on. A full 4096-value array drops the spare
+// rather than exceed maxContainerSize.
 func compactedArraySize(n int) int {
 	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
 }
 
-// andNotResultSize returns the exact number of uint16s the result container
-// for source container ac occupies in res, given the result cardinality n > 0
-// from andNotResultCard (bitmap-source counts clamp at andNotCompactThreshold,
-// exactly where the size stops depending on them).
+// andNotResultSize returns the uint16s the result for source ac occupies in
+// res at cardinality n. A bitmap source at/above the threshold stays a
+// maxContainerSize bitmap, so andNotResultCard's clamp there is harmless.
 func andNotResultSize(ac []uint16, n int) int {
 	if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
 		return maxContainerSize
@@ -277,11 +276,9 @@ func andNotResultSize(ac []uint16, n int) int {
 }
 
 func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
-	// pass 1: exact sizing — count each pair's result cardinality without
-	// materializing anything, so res is grown exactly once instead of doubling
-	// container by container (the dominant allocation churn). The counts are
-	// kept for pass 2; bitmap-source counts clamp at andNotCompactThreshold
-	// (where the size stops depending on them), all others are exact.
+	// pass 1: size res by counting each pair's result cardinality, so it grows
+	// once here instead of doubling container by container (the dominant
+	// allocation churn). counts is reused by pass 2.
 	counts := make([]uint16, 0, a.keys.numKeys())
 	newKeys, sizeContainers := 0, 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
@@ -298,11 +295,9 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	}
 	res.expandConditionally(newKeys, sizeContainers)
 
-	// pass 2: materialize, driven by pass 1's counts so both passes take
-	// identical size and type decisions. Keys arrive in ascending
-	// order, so setKey always appends and never memmoves existing keys. A
-	// corrupt cardinality header can at worst make pass 2 outgrow the
-	// reservation, which res absorbs by growing.
+	// pass 2: materialize. Reusing pass 1's counts keeps both passes' size and
+	// type decisions identical. a-keys arrive ascending, so setKey always
+	// appends and never memmoves existing keys.
 	idx := 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
 		n := int(counts[idx])
@@ -311,8 +306,7 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			return
 		}
 		if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
-			// the result stays a bitmap container: build it directly inside
-			// res, skipping the scratch round-trip
+			// subtract straight into res, no scratch round-trip
 			offset := res.newContainerNoClr(uint16(maxContainerSize))
 			dst := res.data[offset : offset+uint64(maxContainerSize)]
 			if bc == nil {
@@ -323,7 +317,6 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 			res.setKey(ak, offset)
 			return
 		}
-		// the result is an array container of n values
 		c := ac
 		if bc != nil {
 			c = containerAndNotAlt(ac, bc, optBuf, 0)
