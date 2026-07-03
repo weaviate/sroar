@@ -3,7 +3,6 @@ package sroar
 import (
 	"fmt"
 	"math"
-	"math/bits"
 	"slices"
 	"sync"
 )
@@ -233,8 +232,9 @@ func AndNot(a, b *Bitmap) *Bitmap {
 }
 
 // andNotWalk drives one ordered pass over a's keys, pairing each with b's
-// matching container (bc == nil for unmatched keys). Both andNotContainers
-// passes use it, so the sizing and materialization walks cannot disagree.
+// matching container (bc == nil for unmatched keys) and skipping containers
+// that are empty by their cardinality header. Both andNotContainers passes use
+// it, so the sizing and materialization walks cannot disagree.
 func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 	an := a.keys.numKeys()
 	bn := b.keys.numKeys()
@@ -244,6 +244,9 @@ func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 			bi++
 		}
 		ac := a.getContainer(a.keys.val(ai))
+		if getCardinality(ac) == 0 {
+			continue
+		}
 		var bc []uint16
 		if bi < bn && b.keys.key(bi) == ak {
 			bc = b.getContainer(b.keys.val(bi))
@@ -256,98 +259,80 @@ func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 // compactedArraySize is the arena footprint of a compacted array container of
 // cardinality n: header + values + one spare slot, padded to a multiple of 4
 // uint16s so every later container keeps the arena's 8-byte alignment (the
-// uint64 views built by uint16To64SliceUnsafe rely on it).
+// uint64 views built by uint16To64SliceUnsafe rely on it). Capped at
+// maxContainerSize: a full 4096-value array fits exactly, without the spare.
 func compactedArraySize(n int) int {
-	return (int(startIdx) + n + 1 + 3) &^ 3
+	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
 }
 
-// andNotResultSize returns the exact number of uint16s the result container for
-// (ac &^ bc) occupies in res, given its cardinality n > 0 (n may be clamped to
-// andNotCompactThreshold when at least that large; the size only depends on
-// exactness below the threshold).
-func andNotResultSize(ac, bc []uint16, n int) int {
-	if ac[indexType] == typeBitmap {
-		if n < andNotCompactThreshold {
-			return compactedArraySize(n)
-		}
+// andNotResultSize returns the exact number of uint16s the result container
+// for source container ac occupies in res, given the result cardinality n > 0
+// from andNotResultCard (bitmap-source counts clamp at andNotCompactThreshold,
+// exactly where the size stops depending on them).
+func andNotResultSize(ac []uint16, n int) int {
+	if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
 		return maxContainerSize
 	}
-	if bc == nil {
-		return len(ac) // copied verbatim
-	}
-	return int(roundSize(startIdx + uint16(n))) // bufAsArray's output size
+	return compactedArraySize(n)
 }
 
 func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
-	// pass 1: exact sizing — count result keys and container space without
+	// pass 1: exact sizing — count each pair's result cardinality without
 	// materializing anything, so res is grown exactly once instead of doubling
-	// container by container (the dominant allocation churn).
+	// container by container (the dominant allocation churn). The counts are
+	// kept for pass 2; bitmap-source counts clamp at andNotCompactThreshold
+	// (where the size stops depending on them), all others are exact.
+	counts := make([]uint16, 0, a.keys.numKeys())
 	newKeys, sizeContainers := 0, 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
 		n := andNotResultCard(ac, bc)
+		counts = append(counts, uint16(n))
 		if n <= 0 {
 			return
 		}
 		newKeys++
-		sizeContainers += andNotResultSize(ac, bc, n)
+		sizeContainers += andNotResultSize(ac, n)
 	})
 	if newKeys == 0 {
 		return
 	}
 	res.expandConditionally(newKeys, sizeContainers)
 
-	// pass 2: materialize. Keys arrive in ascending order, so setKey always
-	// appends and never memmoves existing keys. Both passes count bitmap
-	// containers by their bits and share the dense shortcut, so on well-formed
-	// input every size/compaction decision lands where pass 1 reserved; a
+	// pass 2: materialize, driven by pass 1's counts so both passes take
+	// identical size and type decisions. Keys arrive in ascending
+	// order, so setKey always appends and never memmoves existing keys. A
 	// corrupt cardinality header can at worst make pass 2 outgrow the
 	// reservation, which res absorbs by growing.
+	idx := 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
-		if bc == nil {
-			n := andNotResultCard(ac, nil)
-			if n == 0 {
-				return
-			}
-			if ac[indexType] == typeBitmap && n < andNotCompactThreshold {
-				writeCompactedArray(res, ak, ac, n)
-				return
-			}
-			offset := res.newContainerNoClr(uint16(len(ac)))
-			copy(res.data[offset:], ac)
-			res.setKey(ak, offset)
-			return
-		}
-		if ac[indexType] == typeBitmap && andNotDenseByHeaders(ac, bc) {
-			// provably dense result: build directly inside res — copy ac and
-			// subtract bc in place, skipping the scratch round-trip.
-			offset := res.newContainerNoClr(uint16(maxContainerSize))
-			dst := res.data[offset : offset+uint64(maxContainerSize)]
-			copy(dst, ac)
-			setCardinality(dst, bitmapAndNotInPlace(dst, bc))
-			res.setKey(ak, offset)
-			return
-		}
-		c := containerAndNotAlt(ac, bc, optBuf, 0)
-		if len(c) == 0 {
-			return
-		}
-		n := getCardinality(c)
-		if c[indexType] == typeBitmap && n < andNotCompactThreshold {
-			// c's header can derive from ac's (andNotArrayAlt seeds it, the
-			// ops' early-outs return ac verbatim), so count real bits before
-			// compaction sizes an array by it.
-			n = bitmapCardClamped(c, andNotCompactThreshold)
-		}
+		n := int(counts[idx])
+		idx++
 		if n == 0 {
 			return
 		}
-		if c[indexType] == typeBitmap && n < andNotCompactThreshold {
+		if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
+			// the result stays a bitmap container: build it directly inside
+			// res, skipping the scratch round-trip
+			offset := res.newContainerNoClr(uint16(maxContainerSize))
+			dst := res.data[offset : offset+uint64(maxContainerSize)]
+			if bc == nil {
+				copy(dst, ac)
+			} else if c := containerAndNotAlt(ac, bc, dst, 0); &c[0] != &dst[0] {
+				copy(dst, c) // the ops' early-outs return their input, not dst
+			}
+			res.setKey(ak, offset)
+			return
+		}
+		// the result is an array container of n values
+		c := ac
+		if bc != nil {
+			c = containerAndNotAlt(ac, bc, optBuf, 0)
+		}
+		if c[indexType] == typeBitmap {
 			writeCompactedArray(res, ak, c, n)
 			return
 		}
-		offset := res.newContainerNoClr(uint16(len(c)))
-		copy(res.data[offset:], c)
-		res.setKey(ak, offset)
+		writeArrayValues(res, ak, c[startIdx:int(startIdx)+n])
 	})
 }
 
@@ -356,41 +341,23 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 func writeCompactedArray(res *Bitmap, ak uint64, c []uint16, n int) {
 	sz := compactedArraySize(n)
 	offset := res.newContainerNoClr(uint16(sz))
-	dst := res.data[offset : offset+uint64(sz)]
-	dst[indexSize] = uint16(sz)
-	dst[indexType] = typeArray
-	// clamp enumeration to n slots: if n and the container's bits ever
-	// disagree, degrade deterministically instead of overrunning.
-	written := bitmapToArrayValues(c, dst[startIdx:int(startIdx)+n])
-	setCardinality(dst, written)
-	for i := int(startIdx) + written; i < sz; i++ {
-		dst[i] = 0 // NoClr: zero the padding and spare slots
-	}
+	bitmap(c).toArrayContainer(res.data[offset : offset+uint64(sz)])
 	res.setKey(ak, offset)
 }
 
-// bitmapAndNotInPlace subtracts container bc from the bitmap container dst in
-// place and returns the resulting cardinality.
-func bitmapAndNotInPlace(dst, bc []uint16) int {
-	if bc[indexType] == typeBitmap {
-		dst64 := uint16To64SliceUnsafe(dst[startIdx:])
-		src64 := uint16To64SliceUnsafe(bc[startIdx:])
-		num := 0
-		for i := range dst64 {
-			dst64[i] &^= src64[i]
-			num += bits.OnesCount64(dst64[i])
-		}
-		return num
-	}
-	num := getCardinality(dst)
-	for _, x := range bc[startIdx : int(startIdx)+getCardinality(bc)] {
-		idx, pos := x>>4, x&0xF
-		if dst[int(startIdx)+int(idx)]&bitmapMask[pos] != 0 {
-			dst[int(startIdx)+int(idx)] &^= bitmapMask[pos]
-			num--
-		}
-	}
-	return num
+// writeArrayValues appends vals (the sorted values of an array-container
+// result) to res as an array container under key ak, dropping any capacity
+// slack the source container carried.
+func writeArrayValues(res *Bitmap, ak uint64, vals []uint16) {
+	sz := compactedArraySize(len(vals))
+	offset := res.newContainerNoClr(uint16(sz))
+	dst := res.data[offset : offset+uint64(sz)]
+	dst[indexSize] = uint16(sz)
+	dst[indexType] = typeArray
+	n := copy(dst[startIdx:], vals)
+	setCardinality(dst, n)
+	clear(dst[int(startIdx)+n:])
+	res.setKey(ak, offset)
 }
 
 // AndNot performs in-place AND-NOT of ra and bm (ra &^= bm).

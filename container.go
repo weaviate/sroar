@@ -367,6 +367,20 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 	return b
 }
 
+// toArrayContainer writes b's set values into buf (sized by the caller; a
+// NoClr region is fine, the tail is zeroed) as an array container: the
+// counterpart of array.toBitmapContainer. Enumeration clamps to buf's value
+// space, so a count/bits disagreement degrades deterministically instead of
+// overrunning.
+func (b bitmap) toArrayContainer(buf []uint16) []uint16 {
+	buf[indexSize] = uint16(len(buf))
+	buf[indexType] = typeArray
+	written := bitmapToArrayValues(b, buf[startIdx:])
+	setCardinality(buf, written)
+	clear(buf[int(startIdx)+written:])
+	return buf
+}
+
 func (c array) String() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Size: %d\n", c[0]))
@@ -588,18 +602,8 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 }
 
 func (b bitmap) all() []uint16 {
-	var res []uint16
-	data := b[startIdx:]
-	for idx := uint16(0); idx < uint16(len(data)); idx++ {
-		x := data[idx]
-		// TODO: This could potentially be optimized.
-		for pos := uint16(0); pos < 16; pos++ {
-			if x&bitmapMask[pos] > 0 {
-				res = append(res, (idx<<4)|pos)
-			}
-		}
-	}
-	return res
+	res := make([]uint16, getCardinality(b))
+	return res[:bitmapToArrayValues(b, res)]
 }
 
 // bitmapToArrayValues writes the set values of bitmap container b into out in

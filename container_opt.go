@@ -16,10 +16,8 @@ func init() {
 
 // andNotDenseByHeaders reports, from cardinality headers alone, that (ac &^ bc)
 // keeps at least andNotCompactThreshold values: bc can remove at most its own
-// cardinality. Shared by the sizing pass and the materialization pass so both
-// take the same dense-path decision. A corrupt header can only misroute to the
-// dense path, which is sized maxContainerSize and preserves membership either
-// way.
+// cardinality. Lets andNotResultCard skip exact counting for provably dense
+// results.
 func andNotDenseByHeaders(ac, bc []uint16) bool {
 	return getCardinality(ac)-getCardinality(bc) >= andNotCompactThreshold
 }
@@ -50,7 +48,9 @@ func andNotResultCard(ac, bc []uint16) int {
 		if ac[indexType] == typeBitmap {
 			return bitmapCardClamped(ac, andNotCompactThreshold)
 		}
-		return getCardinality(ac)
+		// the header defines an array's content, but cap it to the container
+		// so a corrupt size/cardinality pair cannot slice past it
+		return min(getCardinality(ac), len(ac)-int(startIdx))
 	}
 	at, bt := ac[indexType], bc[indexType]
 	switch {

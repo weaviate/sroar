@@ -350,7 +350,8 @@ func TestAndNotCompactsUnmatchedContainers(t *testing.T) {
 
 // Two-pass sizing must grow res exactly once: allocations per AndNot call stay
 // constant regardless of container count (res struct + initial data + one
-// reservation + scratch), instead of one doubling per ~container.
+// reservation + scratch + pass-1 counts), instead of one doubling per
+// ~container.
 func TestAndNotAllocsBounded(t *testing.T) {
 	a := NewBitmap()
 	for x := uint64(0); x < 2_000_000; x++ {
@@ -366,10 +367,45 @@ func TestAndNotAllocsBounded(t *testing.T) {
 			t.Fatal("unexpected empty result")
 		}
 	})
-	// NewBitmap (struct+data), one exact reservation, one 8KB scratch, plus
-	// small constant slack.
+	// NewBitmap (struct+data), one exact reservation, one 8KB scratch, the
+	// pass-1 counts, plus small constant slack.
 	if allocs > 8 {
 		t.Fatalf("AndNot allocations not bounded: %.0f per call", allocs)
+	}
+}
+
+// Array-container results, matched and unmatched, are emitted at their exact
+// compacted size: capacity slack from the source container's doubling growth
+// must not survive into the result arena.
+func TestAndNotShrinksArrayContainers(t *testing.T) {
+	const base = uint64(1) << 16
+	for _, matched := range []bool{false, true} {
+		a := NewBitmap()
+		for x := base; x < base+2000; x++ {
+			a.Set(x) // array container grown by doubling
+		}
+		for x := base + 10; x < base+2000; x++ {
+			a.Remove(x) // 10 values remain in an oversized container
+		}
+		b := NewBitmap()
+		b.Set(5 << 16)
+		want := 10
+		if matched {
+			b.Set(base + 5)
+			want = 9
+		}
+		res := AndNot(a, b)
+		off, found := res.keys.getValue(base)
+		if !found {
+			t.Fatal("container missing")
+		}
+		c := res.getContainer(off)
+		if c[indexType] != typeArray || getCardinality(c) != want {
+			t.Fatalf("matched=%v: type %d cardinality %d", matched, c[indexType], getCardinality(c))
+		}
+		if len(c) != compactedArraySize(want) {
+			t.Fatalf("matched=%v: container size %d, want %d", matched, len(c), compactedArraySize(want))
+		}
 	}
 }
 
