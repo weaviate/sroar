@@ -788,3 +788,24 @@ func containerAndNot(ac, bc, buf []uint16) []uint16 {
 	}
 	panic("containerAndNot: We should not reach here")
 }
+
+// nextGeq returns the smallest set value >= y in bitmap container b, and
+// whether one exists.
+func (b bitmap) nextGeq(y uint16) (uint16, bool) {
+	data := b[startIdx:]
+	w := int(y >> 4)
+	// bitmapMask[pos] is 1<<(15-pos), so positions >= y&15 occupy the low bits
+	// of the word: keep them, drop the earlier (higher) bits.
+	word := data[w] & (0xFFFF >> (y & 0xF))
+	for {
+		if word != 0 {
+			pos := uint16(bits.LeadingZeros16(word))
+			return uint16(w)<<4 | pos, true
+		}
+		w++
+		if w >= len(data) {
+			return 0, false
+		}
+		word = data[w]
+	}
+}

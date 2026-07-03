@@ -129,3 +129,69 @@ func (cur *ContainsCursor) arrayHas(y uint16) bool {
 	cur.arrPos = i
 	return i < cur.arrN && c[si+i] == y
 }
+
+// NextGeq returns the smallest set value >= x and whether one exists. It shares
+// the cursor's cache and leaves the cursor positioned on the returned value, so
+// interleaving Contains and NextGeq with non-decreasing arguments keeps both on
+// their fast paths. This is the successor primitive for leapfrog intersection:
+// instead of probing candidates one by one, a caller can jump directly to the
+// bitmap's next admissible value.
+func (cur *ContainsCursor) NextGeq(x uint64) (uint64, bool) {
+	if cur == nil || cur.ra == nil {
+		return 0, false
+	}
+	key := x & mask
+	if key > cur.maxKey {
+		return 0, false
+	}
+	y := uint16(x)
+	var idx int
+	switch {
+	case key == cur.lastKey:
+		idx = cur.lastIdx
+	case key > cur.lastKey:
+		idx = cur.lastIdx // forward: gallop from where we are
+		if idx < cur.numKeys && cur.keys.key(idx) < key {
+			idx = cur.keys.searchFrom(idx, key)
+		}
+	default:
+		idx = cur.keys.search(key) // backward: plain search
+	}
+	// walk containers forward until one holds a value at or after x; for
+	// containers past x's own, any set value qualifies (want == 0)
+	for ; idx < cur.numKeys; idx++ {
+		ck := cur.keys.key(idx)
+		c := cur.ra.getContainer(cur.keys.val(idx))
+		n := getCardinality(c)
+		if n == 0 {
+			continue
+		}
+		want := uint16(0)
+		if ck == key {
+			want = y
+		}
+		switch c[indexType] {
+		case typeBitmap:
+			if v, ok := bitmap(c).nextGeq(want); ok {
+				cur.lastIdx, cur.lastKey = idx, ck
+				cur.lastContainer, cur.isLastBitmap = c, true
+				return ck | uint64(v), true
+			}
+		case typeArray:
+			pos := 0
+			if want > 0 {
+				pos = array(c).find(want)
+			}
+			if pos < n {
+				cur.lastIdx, cur.lastKey = idx, ck
+				cur.lastContainer, cur.isLastBitmap = c, false
+				cur.arrN, cur.arrPos = n, pos
+				return ck | uint64(c[int(startIdx)+pos]), true
+			}
+		}
+		// unknown container types are skipped, mirroring Contains' default-false
+	}
+	// no successor (only possible via empty or unknown trailing containers);
+	// cursor state is left untouched
+	return 0, false
+}
