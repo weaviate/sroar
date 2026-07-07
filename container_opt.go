@@ -14,74 +14,65 @@ func init() {
 	setCardinality(emptyArrayContainer, 0)
 }
 
-// andNotDenseByHeaders reports, from cardinality headers alone, that (ac &^ bc)
-// keeps at least andNotCompactThreshold values: bc can remove at most its own
-// cardinality. Lets andNotResultCard skip exact counting for provably dense
-// results.
-func andNotDenseByHeaders(ac, bc []uint16) bool {
-	return getCardinality(ac)-getCardinality(bc) >= andNotCompactThreshold
-}
-
-// bitmapCardClamped counts the set bits of bitmap container c, returning bound
-// as soon as the count reaches it.
-func bitmapCardClamped(c []uint16, bound int) int {
-	c64 := uint16To64SliceUnsafe(c[startIdx:])
-	n := 0
-	for i := range c64 {
-		n += bits.OnesCount64(c64[i])
-		if n >= bound {
-			return bound
-		}
-	}
-	return n
-}
-
 // andNotResultCard returns the cardinality of (ac &^ bc) without materializing
-// the result and without allocating. bc == nil means no matching container.
-// Bitmap sources are counted by their bits — never the cardinality header, so
-// a corrupt header can't produce a negative or under-real count — and clamped
-// at andNotCompactThreshold, above which the exact count is unused.
+// or allocating, clamped at andNotCompactThreshold (above it the exact count is
+// unused, as the source stays a maxContainerSize bitmap). A nil or empty bc
+// leaves ac unchanged.
+//
+// Bitmap sources are counted from the cardinality header, not by recounting
+// bits: bc removes at most bcCard values, so acCard-bcCard >= andNotCompactThreshold
+// proves a dense result without any counting.
 func andNotResultCard(ac, bc []uint16) int {
-	if bc == nil {
+	acCard := getCardinality(ac)
+	bcCard := 0
+	if bc != nil {
+		bcCard = getCardinality(bc)
+	}
+	if bcCard == 0 {
+		// nothing to subtract: result is ac unchanged
 		if ac[indexType] == typeBitmap {
-			return bitmapCardClamped(ac, andNotCompactThreshold)
+			// clamp: a full bitmap's cardinality overflows the caller's uint16,
+			// and the exact value above the threshold is unused
+			return min(acCard, andNotCompactThreshold)
 		}
-		// the header defines an array's content, but cap it to the container
-		// so a corrupt size/cardinality pair cannot slice past it
-		return min(getCardinality(ac), len(ac)-int(startIdx))
+		// an array result stays an array sized to this exact count, so no clamp
+		return acCard
 	}
 	at, bt := ac[indexType], bc[indexType]
 	switch {
 	case at == typeArray && bt == typeArray:
-		av := ac[startIdx : int(startIdx)+getCardinality(ac)]
-		bv := bc[startIdx : int(startIdx)+getCardinality(bc)]
-		return len(av) - intersection2by2Cardinality(av, bv)
+		return acCard - intersection2by2Cardinality(array(ac).all(), array(bc).all())
 	case at == typeArray && bt == typeBitmap:
-		n := 0
-		for _, x := range ac[startIdx : int(startIdx)+getCardinality(ac)] {
-			if !bitmap(bc).has(x) {
-				n++
-			}
-		}
-		return n
-	case at == typeBitmap && bt == typeArray:
-		if andNotDenseByHeaders(ac, bc) {
-			return andNotCompactThreshold
-		}
-		bn := getCardinality(bc)
-		n := bitmapCardClamped(ac, andNotCompactThreshold+bn)
-		if n >= andNotCompactThreshold+bn {
-			return andNotCompactThreshold // dense regardless of overlap
-		}
-		for _, x := range bc[startIdx : int(startIdx)+bn] {
-			if bitmap(ac).has(x) {
+		n := acCard
+		for _, x := range array(ac).all() {
+			if bitmap(bc).has(x) {
 				n--
 			}
 		}
 		return n
-	default: // bitmap, bitmap
-		if andNotDenseByHeaders(ac, bc) {
-			return andNotCompactThreshold
+	case at == typeBitmap && bt == typeArray:
+		if acCard-bcCard >= andNotCompactThreshold {
+			return andNotCompactThreshold // dense by headers alone
+		}
+		// Start from acCard and drop each array element present in ac. n only
+		// falls, so n-remaining is its floor; once that reaches the threshold
+		// the result is dense no matter the rest.
+		n := acCard
+		remaining := bcCard
+		for _, x := range array(bc).all() {
+			remaining--
+			if bitmap(ac).has(x) {
+				n--
+			}
+			if n-remaining >= andNotCompactThreshold {
+				return andNotCompactThreshold
+			}
+		}
+		// the final iteration's floor check was n >= threshold, so here n < threshold
+		return n
+	case at == typeBitmap && bt == typeBitmap:
+		if acCard-bcCard >= andNotCompactThreshold {
+			return andNotCompactThreshold // dense by headers alone
 		}
 		a64 := uint16To64SliceUnsafe(ac[startIdx:])
 		b64 := uint16To64SliceUnsafe(bc[startIdx:])
@@ -93,6 +84,8 @@ func andNotResultCard(ac, bc []uint16) int {
 			}
 		}
 		return n
+	default:
+		panic("andNotResultCard: We should not reach here")
 	}
 }
 
@@ -422,195 +415,144 @@ func (b bitmap) intersectsBitmap(other bitmap) bool {
 	return false
 }
 
-func containerAndNotAlt(ac, bc []uint16, optBuf []uint16, runMode int) []uint16 {
+// containerAndNotAlt computes ac &^ bc. A nil bc means nothing to subtract.
+//
+// Inline (runMode&runInline): subtracts bc from ac in place.
+//
+// Non-inline: writes the result into dst, whose length selects the output form —
+// a full bitmap when len(dst) == maxContainerSize, otherwise a compact array.
+// The result is produced straight into dst with no workspace: an array source
+// subtracts into the slot; a dense bitmap is copied in and subtracted in place;
+// a sparse bitmap has its survivors enumerated into the slot. A compact array's
+// spare tail is left uninitialized — array reads never look past the cardinality.
+func containerAndNotAlt(ac, bc, dst []uint16, runMode int) []uint16 {
+	if runMode&runInline == 0 {
+		out := dst[startIdx:]
+		var w int
+		switch ac[indexType] {
+		case typeArray:
+			a := array(ac)
+			switch {
+			case bc == nil:
+				w = copy(out, a.all())
+			case bc[indexType] == typeArray:
+				w = a.andNotArrayIntoArray(array(bc), out)
+			case bc[indexType] == typeBitmap:
+				w = a.andNotBitmapIntoArray(bitmap(bc), out)
+			default:
+				panic("containerAndNot: unknown bc container type")
+			}
+		case typeBitmap:
+			if len(dst) == maxContainerSize {
+				// dense result stays a bitmap: subtract in place inside the slot
+				copy(dst, ac)
+				containerAndNotAlt(dst, bc, nil, runInline)
+				return dst
+			}
+			// sparse result: enumerate the survivors into the slot as an array
+			b := bitmap(ac)
+			switch {
+			case bc == nil:
+				w = b.intoArray(out)
+			case bc[indexType] == typeArray:
+				w = b.andNotArrayIntoArray(array(bc), out)
+			case bc[indexType] == typeBitmap:
+				w = b.andNotBitmapIntoArray(bitmap(bc), out)
+			default:
+				panic("containerAndNot: unknown bc container type")
+			}
+		default:
+			panic("containerAndNot: unknown ac container type")
+		}
+		setArrayHeader(dst, w)
+		return dst
+	}
+
+	if bc == nil {
+		return nil // subtracting nothing leaves ac unchanged
+	}
 	at := ac[indexType]
 	bt := bc[indexType]
-
-	if at == typeArray && bt == typeArray {
-		left := array(ac)
-		right := array(bc)
-		return left.andNotArrayAlt(right, optBuf, runMode)
+	switch {
+	case at == typeArray && bt == typeArray:
+		array(ac).andNotArrayAlt(array(bc))
+	case at == typeArray && bt == typeBitmap:
+		array(ac).andNotBitmapAlt(bitmap(bc))
+	case at == typeBitmap && bt == typeArray:
+		bitmap(ac).andNotArrayAlt(array(bc))
+	case at == typeBitmap && bt == typeBitmap:
+		bitmap(ac).andNotBitmapAlt(bitmap(bc))
+	default:
+		panic("containerAndNot: We should not reach here")
 	}
-	if at == typeArray && bt == typeBitmap {
-		left := array(ac)
-		right := bitmap(bc)
-		return left.andNotBitmapAlt(right, optBuf, runMode)
-	}
-	if at == typeBitmap && bt == typeArray {
-		left := bitmap(ac)
-		right := array(bc)
-		return left.andNotArrayAlt(right, optBuf, runMode)
-	}
-	if at == typeBitmap && bt == typeBitmap {
-		left := bitmap(ac)
-		right := bitmap(bc)
-		return left.andNotBitmapAlt(right, optBuf, runMode)
-	}
-	panic("containerAnd: We should not reach here")
-}
-
-func (c array) andNotArrayAlt(other array, optBuf []uint16, runMode int) []uint16 {
-	cnum := getCardinality(c)
-	onum := getCardinality(other)
-
-	if cnum == 0 {
-		if runMode&runInline == 0 {
-			return emptyArrayContainer
-		}
-		// do nothing, array already empty
-		return nil
-	}
-	if onum == 0 {
-		if runMode&runInline == 0 {
-			return resizeArray(c, optBuf)
-		}
-		// do nothing, nothing to remove
-		return nil
-	}
-
-	// merge
-	out := c
-	if runMode&runInline == 0 {
-		out = optBuf
-		if out == nil {
-			out = make([]uint16, roundSize(startIdx+uint16(cnum)))
-		}
-	}
-	setc := c.all()
-	seto := other.all()
-	num := difference(setc, seto, out[startIdx:])
-	lastIdx := startIdx + uint16(num)
-
-	if runMode&runInline == 0 {
-		return bufAsArray(out, lastIdx)
-	}
-	setCardinality(c, num)
 	return nil
 }
 
-func (c array) andNotBitmapAlt(other bitmap, optBuf []uint16, runMode int) []uint16 {
-	cnum := getCardinality(c)
-	onum := getCardinality(other)
+// The four andNot*Alt methods subtract other from the receiver in place. An
+// empty receiver or an empty other leaves the receiver untouched.
 
-	if cnum == 0 {
-		if runMode&runInline == 0 {
-			return emptyArrayContainer
-		}
-		// do nothing, array already empty
-		return nil
+func (c array) andNotArrayAlt(other array) {
+	if getCardinality(c) == 0 || getCardinality(other) == 0 {
+		return
 	}
-	if onum == 0 {
-		if runMode&runInline == 0 {
-			return resizeArray(c, optBuf)
-		}
-		// do nothing, nothing to remove
-		return nil
-	}
+	setCardinality(c, c.andNotArrayIntoArray(other, c[startIdx:]))
+}
 
-	// merge
-	out := c
-	if runMode&runInline == 0 {
-		out = optBuf
-		if out == nil {
-			out = make([]uint16, roundSize(startIdx+uint16(cnum)))
-		}
+func (c array) andNotBitmapAlt(other bitmap) {
+	if getCardinality(c) == 0 || getCardinality(other) == 0 {
+		return
 	}
+	setCardinality(c, c.andNotBitmapIntoArray(other, c[startIdx:]))
+}
 
-	lastIdx := startIdx
+// andNotArrayIntoArray writes the ascending values of (c &^ other) into out,
+// returning the count. Array minus array is exactly a set difference.
+func (c array) andNotArrayIntoArray(other array, out []uint16) int {
+	return difference(c.all(), other.all(), out)
+}
+
+// andNotBitmapIntoArray writes the ascending values of (c &^ other) into out
+// and returns the count, keeping the values not present in other.
+func (c array) andNotBitmapIntoArray(other bitmap, out []uint16) int {
+	w := 0
 	for _, x := range c.all() {
 		if !other.has(x) {
-			out[lastIdx] = x
-			lastIdx++
+			out[w] = x
+			w++
 		}
 	}
-
-	if runMode&runInline == 0 {
-		return bufAsArray(out, lastIdx)
-	}
-	setCardinality(c, int(lastIdx-startIdx))
-	return nil
+	return w
 }
 
-func (b bitmap) andNotArrayAlt(other array, optBuf []uint16, runMode int) []uint16 {
+func (b bitmap) andNotArrayAlt(other array) {
 	bnum := getCardinality(b)
-	onum := getCardinality(other)
-
-	if bnum == 0 {
-		if runMode&runInline == 0 {
-			return emptyArrayContainer
-		}
-		// do nothing, array already empty
-		return nil
+	if bnum == 0 || getCardinality(other) == 0 {
+		return
 	}
-	if onum == 0 {
-		if runMode&runInline == 0 {
-			return b
-		}
-		// do nothing, nothing to remove
-		return nil
-	}
-
-	// merge
-	out := b
-	if runMode&runInline == 0 {
-		out = copyBitmap(b, optBuf)
-	}
-
 	delnum := 0
 	for _, x := range other.all() {
 		idx := x >> 4
 		pos := x & 0xF
-		if has := out[startIdx+idx]&bitmapMask[pos] > 0; has {
-			out[startIdx+idx] ^= bitmapMask[pos]
+		if b[startIdx+idx]&bitmapMask[pos] > 0 {
+			b[startIdx+idx] ^= bitmapMask[pos]
 			delnum++
 		}
 	}
-	setCardinality(out, bnum-delnum)
-
-	if runMode&runInline == 0 {
-		return out
-	}
-	return nil
+	setCardinality(b, bnum-delnum)
 }
 
-func (b bitmap) andNotBitmapAlt(other bitmap, optBuf []uint16, runMode int) []uint16 {
-	bnum := getCardinality(b)
-	onum := getCardinality(other)
-
-	if bnum == 0 {
-		if runMode&runInline == 0 {
-			return emptyArrayContainer
-		}
-		// do nothing, array already empty
-		return nil
+func (b bitmap) andNotBitmapAlt(other bitmap) {
+	if getCardinality(b) == 0 || getCardinality(other) == 0 {
+		return
 	}
-	if onum == 0 {
-		if runMode&runInline == 0 {
-			return b
-		}
-		// do nothing, nothing to remove
-		return nil
-	}
-
-	// merge
-	out := b
-	if runMode&runInline == 0 {
-		out = copyBitmap(b, optBuf)
-	}
-
-	dst64 := uint16To64SliceUnsafe(out[startIdx:])
+	dst64 := uint16To64SliceUnsafe(b[startIdx:])
 	src64 := uint16To64SliceUnsafe(other[startIdx:])
 	var num int
 	for i := range dst64 {
 		dst64[i] &^= src64[i]
 		num += bits.OnesCount64(dst64[i])
 	}
-	setCardinality(out, num)
-
-	if runMode&runInline == 0 {
-		return out
-	}
-	return nil
+	setCardinality(b, num)
 }
 
 func containerOrAlt(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
@@ -886,9 +828,7 @@ func resizeArray(c array, out []uint16) []uint16 {
 	} else {
 		out = out[:size]
 	}
-	out[indexType] = typeArray
-	out[indexSize] = uint16(len(out))
-	setCardinality(out, cnum)
+	setArrayHeader(out, cnum)
 	copy(out[startIdx:], c[startIdx:lastIdx])
 	return out
 }
@@ -903,9 +843,7 @@ func copyBitmap(b bitmap, out []uint16) []uint16 {
 
 func bufAsArray(buf []uint16, lastIdx uint16) []uint16 {
 	out := buf[:roundSize(lastIdx)]
-	out[indexType] = typeArray
-	out[indexSize] = uint16(len(out))
-	setCardinality(out, int(lastIdx-startIdx))
+	setArrayHeader(out, int(lastIdx-startIdx))
 	return out
 }
 

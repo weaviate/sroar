@@ -226,8 +226,7 @@ func AndNot(a, b *Bitmap) *Bitmap {
 		return a.Clone()
 	}
 
-	buf := make([]uint16, maxContainerSize)
-	andNotContainers(a, b, res, buf)
+	andNotContainers(a, b, res)
 	return res
 }
 
@@ -275,10 +274,10 @@ func andNotResultSize(ac []uint16, n int) int {
 	return compactedArraySize(n)
 }
 
-func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
-	// pass 1: size res by counting each pair's result cardinality, so it grows
-	// once here instead of doubling container by container (the dominant
-	// allocation churn). counts is reused by pass 2.
+func andNotContainers(a, b, res *Bitmap) {
+	// Count each pair's result cardinality and total the container sizes, then
+	// grow res once. The counts are kept so the materialization below does not
+	// recompute them.
 	counts := make([]uint16, 0, a.keys.numKeys())
 	newKeys, sizeContainers := 0, 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
@@ -295,9 +294,9 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 	}
 	res.expandConditionally(newKeys, sizeContainers)
 
-	// pass 2: materialize. Reusing pass 1's counts keeps both passes' size and
-	// type decisions identical. a-keys arrive ascending, so setKey always
-	// appends and never memmoves existing keys.
+	// Materialize each result: reserve a slot of the counted size and let
+	// containerAndNotAlt fill it. Sizing and filling both go through
+	// andNotResultSize, so the slot always fits exactly.
 	idx := 0
 	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
 		n := int(counts[idx])
@@ -305,52 +304,11 @@ func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
 		if n == 0 {
 			return
 		}
-		if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
-			// subtract straight into res, no scratch round-trip
-			offset := res.newContainerNoClr(uint16(maxContainerSize))
-			dst := res.data[offset : offset+uint64(maxContainerSize)]
-			if bc == nil {
-				copy(dst, ac)
-			} else if c := containerAndNotAlt(ac, bc, dst, 0); &c[0] != &dst[0] {
-				copy(dst, c) // the ops' early-outs return their input, not dst
-			}
-			res.setKey(ak, offset)
-			return
-		}
-		c := ac
-		if bc != nil {
-			c = containerAndNotAlt(ac, bc, optBuf, 0)
-		}
-		if c[indexType] == typeBitmap {
-			writeCompactedArray(res, ak, c, n)
-			return
-		}
-		writeArrayValues(res, ak, c[startIdx:int(startIdx)+n])
+		sz := andNotResultSize(ac, n)
+		offset := res.newContainerNoClr(uint16(sz))
+		containerAndNotAlt(ac, bc, res.data[offset:offset+uint64(sz)], 0)
+		res.setKey(ak, offset)
 	})
-}
-
-// writeCompactedArray appends bitmap container c (result cardinality n, with
-// n < andNotCompactThreshold) to res as an array container under key ak.
-func writeCompactedArray(res *Bitmap, ak uint64, c []uint16, n int) {
-	sz := compactedArraySize(n)
-	offset := res.newContainerNoClr(uint16(sz))
-	bitmap(c).toArrayContainer(res.data[offset : offset+uint64(sz)])
-	res.setKey(ak, offset)
-}
-
-// writeArrayValues appends vals (the sorted values of an array-container
-// result) to res as an array container under key ak, dropping any capacity
-// slack the source container carried.
-func writeArrayValues(res *Bitmap, ak uint64, vals []uint16) {
-	sz := compactedArraySize(len(vals))
-	offset := res.newContainerNoClr(uint16(sz))
-	dst := res.data[offset : offset+uint64(sz)]
-	dst[indexSize] = uint16(sz)
-	dst[indexType] = typeArray
-	n := copy(dst[startIdx:], vals)
-	setCardinality(dst, n)
-	clear(dst[int(startIdx)+n:])
-	res.setKey(ak, offset)
 }
 
 // AndNot performs in-place AND-NOT of ra and bm (ra &^= bm).
