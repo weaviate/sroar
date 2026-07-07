@@ -158,10 +158,46 @@ func TestNextGeqEdgeCases(t *testing.T) {
 			}
 		}
 	})
+	// A same-key probe past the cached container's last value must fall through
+	// to the "cached container exhausted" branch (idx = lastIdx+1) and let a
+	// LATER container supply the successor. The random differential reaches the
+	// array shape of this often but never the bitmap shape, so assert both.
+	t.Run("bitmap_exhausted_then_later_container", func(t *testing.T) {
+		b := NewBitmap()
+		for x := uint64(0); x < 65536; x += 2 {
+			b.Set(x) // 32768 values -> key-0 bitmap container; last set bit 65534
+		}
+		b.Set(2<<16 + 7)
+		cur := b.NewContainsCursor()
+		if v, ok := cur.NextGeq(100); !ok || v != 100 { // land in the key-0 bitmap
+			t.Fatalf("NextGeq(100) = (%d,%v), want (100,true)", v, ok)
+		}
+		// same key 0, past the last set bit: bitmap.nextGeq fails, so the walk
+		// must advance to the key-2 container's minimum.
+		if v, ok := cur.NextGeq(65535); !ok || v != 2<<16+7 {
+			t.Fatalf("NextGeq(65535) = (%d,%v), want (%d,true)", v, ok, 2<<16+7)
+		}
+	})
+	t.Run("array_exhausted_then_later_container", func(t *testing.T) {
+		b := NewBitmap()
+		b.Set(10)
+		b.Set(20) // key-0 array container
+		b.Set(2<<16 + 7)
+		cur := b.NewContainsCursor()
+		if v, ok := cur.NextGeq(10); !ok || v != 10 { // land in the key-0 array
+			t.Fatalf("NextGeq(10) = (%d,%v), want (10,true)", v, ok)
+		}
+		if v, ok := cur.NextGeq(21); !ok || v != 2<<16+7 { // past the array's max
+			t.Fatalf("NextGeq(21) = (%d,%v), want (%d,true)", v, ok, 2<<16+7)
+		}
+	})
 }
 
-// Leapfrog successor scan: the sparse-filter iteration pattern NextGeq exists
-// for (jump, land, jump), vs re-probing candidates one by one with Contains.
+// Ascending small-gap jumps over denseBitmap (all array containers): jumps of
+// ~1-2000 against ~650-value/container arrays keep almost every probe in the
+// same container, so this measures the array same-container fast path
+// (arrayGeqPos). It does NOT exercise bitmap.nextGeq or the cross-container
+// walk — see BenchmarkNextGeqBitmap and BenchmarkNextGeqCrossContainer for those.
 func BenchmarkNextGeqLeapfrog(b *testing.B) {
 	bm := denseBitmap()
 	max := uint64(200_000_000)
@@ -170,6 +206,97 @@ func BenchmarkNextGeqLeapfrog(b *testing.B) {
 	gaps := make([]uint64, 1<<16)
 	for i := range gaps {
 		gaps[i] = uint64(rng.Intn(2000) + 1)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	cur := bm.NewContainsCursor()
+	x := uint64(0)
+	var s int
+	for i := 0; i < b.N; i++ {
+		v, ok := cur.NextGeq(x)
+		if !ok {
+			cur.Reset(bm)
+			x = 0
+			continue
+		}
+		s++
+		x = v + gaps[i&(1<<16-1)]
+		if x >= max {
+			cur.Reset(bm)
+			x = 0
+		}
+	}
+	sink = s
+}
+
+var (
+	bitmapContainersOnce   sync.Once
+	bitmapContainersShared *Bitmap
+)
+
+// bitmapContainerFixture builds a bitmap whose every container is a bitmap
+// container (cardinality > 4096), sparse enough (every 5th value) that
+// bitmap.nextGeq scans real zero-runs. The denseBitmap/mixedBitmap array
+// containers never enter bitmap.nextGeq, so this fixture is needed to bench it.
+func bitmapContainerFixture() *Bitmap {
+	bitmapContainersOnce.Do(func() {
+		b := NewBitmap()
+		for k := uint64(0); k < 16; k++ {
+			base := k << 16
+			for v := uint64(0); v < 1<<16; v += 5 { // ~13108/key -> bitmap container
+				b.Set(base | v)
+			}
+		}
+		bitmapContainersShared = b
+	})
+	return bitmapContainersShared
+}
+
+// BenchmarkNextGeqBitmap is the bitmap-container analog of
+// BenchmarkNextGeqLeapfrog: small ascending jumps that mostly stay inside one
+// bitmap container, so the timed path is bitmap.nextGeq (the word-masked scan
+// this PR adds) rather than the array fast path.
+func BenchmarkNextGeqBitmap(b *testing.B) {
+	bm := bitmapContainerFixture()
+	max := uint64(16 << 16)
+	rng := rand.New(rand.NewSource(9))
+	gaps := make([]uint64, 1<<16)
+	for i := range gaps {
+		gaps[i] = uint64(rng.Intn(2000) + 1)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	cur := bm.NewContainsCursor()
+	x := uint64(0)
+	var s int
+	for i := 0; i < b.N; i++ {
+		v, ok := cur.NextGeq(x)
+		if !ok {
+			cur.Reset(bm)
+			x = 0
+			continue
+		}
+		s++
+		x = v + gaps[i&(1<<16-1)]
+		if x >= max {
+			cur.Reset(bm)
+			x = 0
+		}
+	}
+	sink = s
+}
+
+// BenchmarkNextGeqCrossContainer is a genuine cross-container leapfrog: jumps
+// far larger than a container's 65536 span, so every probe changes key and
+// exercises the keys searchFrom gallop plus the fresh-container walk (including
+// skips over mixedBitmap's empty-key gaps) rather than any same-container path.
+func BenchmarkNextGeqCrossContainer(b *testing.B) {
+	bm := mixedBitmap()
+	max := uint64(90 << 16)
+	rng := rand.New(rand.NewSource(9))
+	gaps := make([]uint64, 1<<16)
+	for i := range gaps {
+		gaps[i] = uint64(1<<16) + uint64(rng.Intn(3<<16)) // 1-4 containers forward
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
