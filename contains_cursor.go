@@ -103,17 +103,17 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	}
 }
 
-// arrayHas answers has(y) for the cached array container.
+// arrayHas answers has(y) for the cached array container, and leaves arrPos at
+// y's lower bound — the index of the smallest value >= y, arrN when past the
+// end. NextGeq reads that invariant to turn the same probe into a successor.
+// The hit and in-gap cases hold it without a store: arrPos is already the
+// lower bound there. Example with values c = [10 20 30 40] after a previous
+// probe of 25 (arrPos = 2, c[2] = 30):
 //
-// Invariant: arrPos is the lower bound of the previous probe — the index of the
-// smallest value >= it, arrN when the probe was past the last value. Example
-// with values c = [10 20 30 40] after a previous probe of 25 (arrPos = 2,
-// c[2] = 30):
-//
-//	y = 30          hit under the cursor          -> true, no search
-//	y = 31..39      forward of the cursor         -> advanceUntil from index 2
-//	y = 21..29      inside the gap (20, 30)       -> absent, one compare (20 < y)
-//	y <= 20         at or behind the previous gap -> full binary search
+//	y = 30          at the cursor              -> one compare, no store
+//	y = 31..39      forward of the cursor      -> advanceUntil from index 2
+//	y = 21..29      in the gap below           -> one compare (20 < y), no store
+//	y <= 20         at or behind the gap       -> full binary search
 //
 // Only the last shape searches: the invariant already brackets y in the other
 // three. The single-gap check cannot be extended to earlier gaps
@@ -128,21 +128,100 @@ func (cur *ContainsCursor) arrayHas(y uint16) bool {
 		// the cursor already sits on y
 		return true
 	case i < cur.arrN && c[si+i] < y:
-		// forward of the cursor: advance, O(log(distance moved))
+		// forward: advance from the cursor, O(log(distance moved))
 		i = advanceUntil(c[si:], i, cur.arrN, y)
-	case i == 0:
-		// cursor at the start and c[0] > y (or the container is empty):
-		// y precedes every value
-		return false
-	case c[si+i-1] < y:
-		// inside the gap right below the cursor (c[i-1] < y < c[i], or past
-		// the last value when i == arrN): provably absent, and arrPos is
-		// already y's lower bound
+	case i == 0 || c[si+i-1] < y:
+		// y falls in the gap right below the cursor — before the first value
+		// (i == 0), between the neighbours (c[i-1] < y < c[i]), or past the
+		// last value (i == arrN and c[arrN-1] < y): provably absent, and
+		// arrPos is already y's lower bound. One compare, no search.
 		return false
 	default:
-		// at or behind the previous gap: full binary search
+		// true backward move: full binary search
 		i = array(c).find(y)
 	}
 	cur.arrPos = i
 	return i < cur.arrN && c[si+i] == y
+}
+
+// NextGeq returns the smallest set value >= x and whether one exists. It shares
+// the cursor's cache and leaves the cursor positioned on the returned value, so
+// interleaving Contains and NextGeq with non-decreasing arguments keeps both on
+// their fast paths. This is the successor primitive for leapfrog intersection:
+// instead of probing candidates one by one, a caller can jump directly to the
+// bitmap's next admissible value.
+func (cur *ContainsCursor) NextGeq(x uint64) (uint64, bool) {
+	if cur == nil || cur.ra == nil {
+		return 0, false
+	}
+	key := x & mask
+	y := uint16(x)
+	var idx int
+	switch {
+	case key == cur.lastKey:
+		// same-key fast path: resolve within the cached container without
+		// touching the keys node or the arena. Skipping the maxKey check is
+		// sound — lastKey is a resolved key (<= maxKey) or the unmatchable
+		// sentinel.
+		if cur.lastContainer == nil {
+			idx = cur.lastIdx // key resolved as absent: walk from its slot
+			break
+		}
+		if cur.isLastBitmap {
+			if v, ok := bitmap(cur.lastContainer).nextGeq(y); ok {
+				return key | uint64(v), true
+			}
+		} else if cur.arrayHas(y) {
+			return key | uint64(y), true
+		} else if cur.arrPos < cur.arrN {
+			// miss, but arrayHas left arrPos at y's lower bound: the successor
+			return key | uint64(cur.lastContainer[int(startIdx)+cur.arrPos]), true
+		}
+		idx = cur.lastIdx + 1 // cached container exhausted: successor is a later container's min
+	case key > cur.maxKey:
+		return 0, false
+	case key > cur.lastKey:
+		idx = cur.lastIdx // forward: gallop from where we are
+		if idx < cur.numKeys && cur.keys.key(idx) < key {
+			idx = cur.keys.searchFrom(idx, key)
+		}
+	default:
+		idx = cur.keys.search(key) // backward: plain search
+	}
+	// walk containers forward until one holds a value at or after x; for
+	// containers past x's own, any set value qualifies (want == 0)
+	for ; idx < cur.numKeys; idx++ {
+		ck := cur.keys.key(idx)
+		c := cur.ra.getContainer(cur.keys.val(idx))
+		n := getCardinality(c)
+		if n == 0 {
+			continue
+		}
+		want := uint16(0)
+		if ck == key {
+			want = y
+		}
+		switch c[indexType] {
+		case typeBitmap:
+			if v, ok := bitmap(c).nextGeq(want); ok {
+				cur.lastIdx, cur.lastKey = idx, ck
+				cur.lastContainer, cur.isLastBitmap = c, true
+				return ck | uint64(v), true
+			}
+		case typeArray:
+			pos := 0
+			if want > 0 {
+				pos = array(c).find(want)
+			}
+			if pos < n {
+				cur.lastIdx, cur.lastKey = idx, ck
+				cur.lastContainer, cur.isLastBitmap = c, false
+				cur.arrN, cur.arrPos = n, pos
+				return ck | uint64(c[int(startIdx)+pos]), true
+			}
+		}
+		// unknown container types are skipped, mirroring Contains' default-false
+	}
+	// no set value at or after x; cursor state is left untouched
+	return 0, false
 }
