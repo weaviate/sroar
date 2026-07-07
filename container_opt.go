@@ -14,74 +14,65 @@ func init() {
 	setCardinality(emptyArrayContainer, 0)
 }
 
-// andNotDenseByHeaders reports, from cardinality headers alone, that (ac &^ bc)
-// keeps at least andNotCompactThreshold values: bc can remove at most its own
-// cardinality. Lets andNotResultCard skip exact counting for provably dense
-// results.
-func andNotDenseByHeaders(ac, bc []uint16) bool {
-	return getCardinality(ac)-getCardinality(bc) >= andNotCompactThreshold
-}
-
-// bitmapCardClamped counts the set bits of bitmap container c, returning bound
-// as soon as the count reaches it.
-func bitmapCardClamped(c []uint16, bound int) int {
-	c64 := uint16To64SliceUnsafe(c[startIdx:])
-	n := 0
-	for i := range c64 {
-		n += bits.OnesCount64(c64[i])
-		if n >= bound {
-			return bound
-		}
-	}
-	return n
-}
-
 // andNotResultCard returns the cardinality of (ac &^ bc) without materializing
-// the result and without allocating. bc == nil means no matching container.
-// Bitmap sources are counted by their bits — never the cardinality header, so
-// a corrupt header can't produce a negative or under-real count — and clamped
-// at andNotCompactThreshold, above which the exact count is unused.
+// or allocating, clamped at andNotCompactThreshold (above it the exact count is
+// unused, as the source stays a maxContainerSize bitmap). A nil or empty bc
+// leaves ac unchanged.
+//
+// Bitmap sources are counted from the cardinality header, not by recounting
+// bits: bc removes at most bcCard values, so acCard-bcCard >= andNotCompactThreshold
+// proves a dense result without any counting.
 func andNotResultCard(ac, bc []uint16) int {
-	if bc == nil {
+	acCard := getCardinality(ac)
+	bcCard := 0
+	if bc != nil {
+		bcCard = getCardinality(bc)
+	}
+	if bcCard == 0 {
+		// nothing to subtract: result is ac unchanged
 		if ac[indexType] == typeBitmap {
-			return bitmapCardClamped(ac, andNotCompactThreshold)
+			// clamp: a full bitmap's cardinality overflows the caller's uint16,
+			// and the exact value above the threshold is unused
+			return min(acCard, andNotCompactThreshold)
 		}
-		// the header defines an array's content, but cap it to the container
-		// so a corrupt size/cardinality pair cannot slice past it
-		return min(getCardinality(ac), len(ac)-int(startIdx))
+		// an array result stays an array sized to this exact count, so no clamp
+		return acCard
 	}
 	at, bt := ac[indexType], bc[indexType]
 	switch {
 	case at == typeArray && bt == typeArray:
-		av := ac[startIdx : int(startIdx)+getCardinality(ac)]
-		bv := bc[startIdx : int(startIdx)+getCardinality(bc)]
-		return len(av) - intersection2by2Cardinality(av, bv)
+		return acCard - intersection2by2Cardinality(array(ac).all(), array(bc).all())
 	case at == typeArray && bt == typeBitmap:
-		n := 0
-		for _, x := range ac[startIdx : int(startIdx)+getCardinality(ac)] {
-			if !bitmap(bc).has(x) {
-				n++
-			}
-		}
-		return n
-	case at == typeBitmap && bt == typeArray:
-		if andNotDenseByHeaders(ac, bc) {
-			return andNotCompactThreshold
-		}
-		bn := getCardinality(bc)
-		n := bitmapCardClamped(ac, andNotCompactThreshold+bn)
-		if n >= andNotCompactThreshold+bn {
-			return andNotCompactThreshold // dense regardless of overlap
-		}
-		for _, x := range bc[startIdx : int(startIdx)+bn] {
-			if bitmap(ac).has(x) {
+		n := acCard
+		for _, x := range array(ac).all() {
+			if bitmap(bc).has(x) {
 				n--
 			}
 		}
 		return n
-	default: // bitmap, bitmap
-		if andNotDenseByHeaders(ac, bc) {
-			return andNotCompactThreshold
+	case at == typeBitmap && bt == typeArray:
+		if acCard-bcCard >= andNotCompactThreshold {
+			return andNotCompactThreshold // dense by headers alone
+		}
+		// Start from acCard and drop each array element present in ac. n only
+		// falls, so n-remaining is its floor; once that reaches the threshold
+		// the result is dense no matter the rest.
+		n := acCard
+		remaining := bcCard
+		for _, x := range array(bc).all() {
+			remaining--
+			if bitmap(ac).has(x) {
+				n--
+			}
+			if n-remaining >= andNotCompactThreshold {
+				return andNotCompactThreshold
+			}
+		}
+		// the final iteration's floor check was n >= threshold, so here n < threshold
+		return n
+	case at == typeBitmap && bt == typeBitmap:
+		if acCard-bcCard >= andNotCompactThreshold {
+			return andNotCompactThreshold // dense by headers alone
 		}
 		a64 := uint16To64SliceUnsafe(ac[startIdx:])
 		b64 := uint16To64SliceUnsafe(bc[startIdx:])
@@ -93,6 +84,8 @@ func andNotResultCard(ac, bc []uint16) int {
 			}
 		}
 		return n
+	default:
+		panic("andNotResultCard: We should not reach here")
 	}
 }
 
