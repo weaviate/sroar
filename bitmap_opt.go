@@ -210,6 +210,13 @@ func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16, useGallopB 
 	}
 }
 
+// andNotCompactThreshold is the result cardinality below which AndNot writes a
+// surviving bitmap container out as an array container. Set below the 4096
+// encoding break-even on purpose: the conversion is only worth losing the O(1)
+// bit-test probe when the array is small enough to stay cache-resident and the
+// space win is large (8KB -> at most ~2KB).
+const andNotCompactThreshold = 1024
+
 func AndNot(a, b *Bitmap) *Bitmap {
 	res := NewBitmap()
 	if a.IsEmpty() {
@@ -219,69 +226,89 @@ func AndNot(a, b *Bitmap) *Bitmap {
 		return a.Clone()
 	}
 
-	buf := make([]uint16, maxContainerSize)
-	andNotContainers(a, b, res, buf)
+	andNotContainers(a, b, res)
 	return res
 }
 
-func andNotContainers(a, b, res *Bitmap, optBuf []uint16) {
-	ai, an := 0, a.keys.numKeys()
-	bi, bn := 0, b.keys.numKeys()
-
-	akToAc := map[uint64][]uint16{}
-	sizeContainers := 0
-	newKeys := 0
-
-	for ai < an && bi < bn {
+// andNotWalk drives one ordered pass over a's keys, pairing each with b's
+// matching container (bc == nil for unmatched keys) and skipping containers
+// that are empty by their cardinality header. Both andNotContainers passes use
+// it, so the sizing and materialization walks cannot disagree.
+func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
+	an := a.keys.numKeys()
+	bn := b.keys.numKeys()
+	for ai, bi := 0, 0; ai < an; ai++ {
 		ak := a.keys.key(ai)
-		bk := b.keys.key(bi)
-		if ak == bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			off = b.keys.val(bi)
-			bc := b.getContainer(off)
-			if c := containerAndNotAlt(ac, bc, optBuf, 0); len(c) > 0 && getCardinality(c) > 0 {
-				// create a new container and update the key offset to this container.
-				offset := res.newContainerNoClr(uint16(len(c)))
-				copy(res.data[offset:], c)
-				res.setKey(ak, offset)
-			}
-			ai++
-			bi++
-		} else if ak < bk {
-			off := a.keys.val(ai)
-			ac := a.getContainer(off)
-			if getCardinality(ac) > 0 {
-				akToAc[ak] = ac
-				sizeContainers += len(ac)
-				newKeys++
-			}
-			ai++
-		} else {
+		for bi < bn && b.keys.key(bi) < ak {
 			bi++
 		}
-	}
-	for ; ai < an; ai++ {
-		offset := a.keys.val(ai)
-		ac := a.getContainer(offset)
-		if getCardinality(ac) > 0 {
-			ak := a.keys.key(ai)
-			akToAc[ak] = ac
-			sizeContainers += len(ac)
-			newKeys++
+		ac := a.getContainer(a.keys.val(ai))
+		if getCardinality(ac) == 0 {
+			continue
 		}
-	}
-
-	if sizeContainers > 0 {
-		res.expandConditionally(newKeys, sizeContainers)
-
-		for ak, ac := range akToAc {
-			// create a new container and update the key offset to this container.
-			offset := res.newContainerNoClr(uint16(len(ac)))
-			copy(res.data[offset:], ac)
-			res.setKey(ak, offset)
+		var bc []uint16
+		if bi < bn && b.keys.key(bi) == ak {
+			bc = b.getContainer(b.keys.val(bi))
+			bi++
 		}
+		visit(ak, ac, bc)
 	}
+}
+
+// compactedArraySize is the arena footprint of an array container of
+// cardinality n: header, values, one spare slot, padded to a multiple of 4
+// uint16s so every later container keeps the 8-byte alignment the
+// uint16To64SliceUnsafe views rely on. A full 4096-value array drops the spare
+// rather than exceed maxContainerSize.
+func compactedArraySize(n int) int {
+	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
+}
+
+// andNotResultSize returns the uint16s the result for source ac occupies in
+// res at cardinality n. A bitmap source at/above the threshold stays a
+// maxContainerSize bitmap, so andNotResultCard's clamp there is harmless.
+func andNotResultSize(ac []uint16, n int) int {
+	if ac[indexType] == typeBitmap && n >= andNotCompactThreshold {
+		return maxContainerSize
+	}
+	return compactedArraySize(n)
+}
+
+func andNotContainers(a, b, res *Bitmap) {
+	// Count each pair's result cardinality and total the container sizes, then
+	// grow res once. The counts are kept so the materialization below does not
+	// recompute them.
+	counts := make([]uint16, 0, a.keys.numKeys())
+	newKeys, sizeContainers := 0, 0
+	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
+		n := andNotResultCard(ac, bc)
+		counts = append(counts, uint16(n))
+		if n <= 0 {
+			return
+		}
+		newKeys++
+		sizeContainers += andNotResultSize(ac, n)
+	})
+	if newKeys == 0 {
+		return
+	}
+	res.expandConditionally(newKeys, sizeContainers)
+
+	// Materialize each result: reserve a slot of the counted size and let
+	// containerAndNotAlt fill it. Sizing and filling both go through
+	// andNotResultSize, so the slot always fits exactly.
+	idx := 0
+	andNotWalk(a, b, func(ak uint64, ac, bc []uint16) {
+		n := int(counts[idx])
+		idx++
+		if n == 0 {
+			return
+		}
+		sz := andNotResultSize(ac, n)
+		offset := res.newContainerNoClr(uint16(sz))
+		containerAndNotAlt(ac, bc, res.data[offset:offset+uint64(sz)], 0)
+		res.setKey(ak, offset)
+	})
 }
 
 // AndNot performs in-place AND-NOT of ra and bm (ra &^= bm).

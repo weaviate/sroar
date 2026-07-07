@@ -80,6 +80,14 @@ func setCardinality(data []uint16, c int) {
 	}
 }
 
+// setArrayHeader stamps c's header as an array container of the given
+// cardinality, sized to c's full length.
+func setArrayHeader(c []uint16, card int) {
+	c[indexSize] = uint16(len(c))
+	c[indexType] = typeArray
+	setCardinality(c, card)
+}
+
 func zeroOutContainer(c []uint16) {
 	c[indexCardinality] = 0
 	c[indexCardinality+1] = 0
@@ -237,9 +245,7 @@ func (c array) andArray(other array) []uint16 {
 
 	// Truncate out to how many values were found.
 	out = out[:startIdx+num+1]
-	out[indexType] = typeArray
-	out[indexSize] = uint16(len(out))
-	setCardinality(out, int(num))
+	setArrayHeader(out, int(num))
 	return out
 }
 
@@ -254,9 +260,7 @@ func (c array) andNotArray(other array, buf []uint16) []uint16 {
 
 	// Truncate out to how many values were found.
 	out = out[:startIdx+num+1]
-	out[indexType] = typeArray
-	out[indexSize] = uint16(len(out))
-	setCardinality(out, int(num))
+	setArrayHeader(out, int(num))
 	return out
 }
 
@@ -278,9 +282,7 @@ func (c array) orArray(other array, buf []uint16, runMode int) []uint16 {
 	// The output would be of typeArray.
 	out := buf[:int(startIdx)+max]
 	num := union2by2(c.all(), other.all(), out[startIdx:])
-	out[indexType] = typeArray
-	out[indexSize] = uint16(len(out))
-	setCardinality(out, num)
+	setArrayHeader(out, num)
 	return out
 }
 
@@ -288,7 +290,6 @@ var tmp = make([]uint16, 8192)
 
 func (c array) andBitmap(other bitmap) []uint16 {
 	out := make([]uint16, int(startIdx)+getCardinality(c)+2) // some extra space.
-	out[indexType] = typeArray
 
 	pos := startIdx
 	for _, x := range c.all() {
@@ -298,8 +299,7 @@ func (c array) andBitmap(other bitmap) []uint16 {
 
 	// Ensure we have at least one empty slot at the end.
 	res := out[:pos+1]
-	res[indexSize] = uint16(len(res))
-	setCardinality(res, int(pos-startIdx))
+	setArrayHeader(res, int(pos-startIdx))
 	return res
 }
 
@@ -588,18 +588,87 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 }
 
 func (b bitmap) all() []uint16 {
-	var res []uint16
-	data := b[startIdx:]
-	for idx := uint16(0); idx < uint16(len(data)); idx++ {
-		x := data[idx]
-		// TODO: This could potentially be optimized.
-		for pos := uint16(0); pos < 16; pos++ {
-			if x&bitmapMask[pos] > 0 {
-				res = append(res, (idx<<4)|pos)
+	res := make([]uint16, getCardinality(b))
+	return res[:b.intoArray(res)]
+}
+
+// intoArray writes b's set values into out in ascending order and returns the
+// number written. Stops when out is full, so a cardinality header that
+// understates the popcount degrades deterministically rather than overrunning.
+func (b bitmap) intoArray(out []uint16) int {
+	idx := 0
+	for w, word := range b[startIdx:] {
+		if word == 0 {
+			continue
+		}
+		base := uint16(w) << 4
+		// bitmapMask[pos] is 1<<(15-pos), so the smallest pos is the highest bit:
+		// LeadingZeros16 yields values in ascending order.
+		for word != 0 {
+			if idx == len(out) {
+				return idx
 			}
+			pos := uint16(bits.LeadingZeros16(word))
+			out[idx] = base | pos
+			idx++
+			word &^= 1 << (15 - pos)
 		}
 	}
-	return res
+	return idx
+}
+
+// andNotBitmapIntoArray writes the ascending survivors of (b &^ other) into out
+// and returns the count, subtracting word by word with no intermediate bitmap.
+func (b bitmap) andNotBitmapIntoArray(other bitmap, out []uint16) int {
+	odata := other[startIdx:]
+	idx := 0
+	for w, word := range b[startIdx:] {
+		if word &^= odata[w]; word == 0 {
+			continue
+		}
+		base := uint16(w) << 4
+		for word != 0 {
+			if idx == len(out) {
+				return idx
+			}
+			pos := uint16(bits.LeadingZeros16(word))
+			out[idx] = base | pos
+			idx++
+			word &^= 1 << (15 - pos)
+		}
+	}
+	return idx
+}
+
+// andNotArrayIntoArray writes the ascending survivors of (b &^ other) into out
+// and returns the count, enumerating b's bits while a two-pointer walks other's
+// sorted values to skip the removed ones.
+func (b bitmap) andNotArrayIntoArray(other array, out []uint16) int {
+	ovals := other.all()
+	idx, j := 0, 0
+	for w, word := range b[startIdx:] {
+		if word == 0 {
+			continue
+		}
+		base := uint16(w) << 4
+		for word != 0 {
+			if idx == len(out) {
+				return idx
+			}
+			pos := uint16(bits.LeadingZeros16(word))
+			word &^= 1 << (15 - pos)
+			val := base | pos
+			for j < len(ovals) && ovals[j] < val {
+				j++
+			}
+			if j < len(ovals) && ovals[j] == val {
+				continue // removed by the array subtrahend
+			}
+			out[idx] = val
+			idx++
+		}
+	}
+	return idx
 }
 
 // TODO: It can be optimized.
