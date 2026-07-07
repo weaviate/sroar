@@ -108,21 +108,40 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 }
 
 // arrayGeqPos returns the index of the smallest value >= y in the cached array
-// container (arrN if none). arrPos holds the lower bound of the previous probe,
-// so everything left of it is smaller than any forward probe: a y at the cursor
-// or in the gap just below it resolves in O(1), a forward move advances in
-// O(log(distance moved)), a true backward move binary-searches from scratch.
+// container (arrN if none); callers derive membership by comparing c[result]
+// against y and maintain the invariant by storing the result back into arrPos.
+//
+// Invariant: arrPos is the lower bound of the previous probe — the index of the
+// smallest value >= it, arrN when the probe was past the last value. Example
+// with values c = [10 20 30 40] after a previous probe of 25 (arrPos = 2,
+// c[2] = 30):
+//
+//	y = 31..39      forward of the cursor         -> advanceUntil from index 2
+//	y = 21..30      at the cursor or in its gap   -> index 2, one compare (20 < y)
+//	y <= 20         at or behind the previous gap -> full binary search
+//
+// Only the last shape searches: the invariant already brackets y in the other
+// two. The single-gap check cannot be extended to earlier gaps
+// (c[i-2]..c[i-1] and so on) — locating which earlier gap holds y IS the
+// binary search that find() performs. Nor are explicit y < c[0] / y > c[N-1]
+// boundary cases needed: both are answered below via the cursor's neighbours
+// (already in cache) instead of re-reading the array edges.
 func (cur *ContainsCursor) arrayGeqPos(y uint16) int {
 	c, si, i := cur.lastContainer, int(startIdx), cur.arrPos
 	switch {
 	case i < cur.arrN && c[si+i] < y:
+		// forward of the cursor: advance, O(log(distance moved))
 		return advanceUntil(c[si:], i, cur.arrN, y)
-	case i == 0 || c[si+i-1] < y:
-		// before the first value (i == 0), between the neighbours
-		// (c[i-1] < y <= c[i]), or past the last value (i == arrN and
-		// c[arrN-1] < y): i is already y's lower bound
+	case i == 0:
+		// cursor at the start and c[0] >= y (or the container is empty):
+		// 0 is y's lower bound
+		return 0
+	case c[si+i-1] < y:
+		// at the cursor or inside the gap right below it (c[i-1] < y <= c[i],
+		// or past the last value when i == arrN): i is already y's lower bound
 		return i
 	default:
+		// at or behind the previous gap: full binary search
 		return array(c).find(y)
 	}
 }
