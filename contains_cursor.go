@@ -103,10 +103,24 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	}
 }
 
-// arrayHas answers has(y) for the cached array container. arrPos holds the
-// lower bound of the previous probe (the index of the smallest value >= it,
-// arrN when past the end), so everything left of arrPos is smaller than any
-// forward probe.
+// arrayHas answers has(y) for the cached array container.
+//
+// Invariant: arrPos is the lower bound of the previous probe — the index of the
+// smallest value >= it, arrN when the probe was past the last value. Example
+// with values c = [10 20 30 40] after a previous probe of 25 (arrPos = 2,
+// c[2] = 30):
+//
+//	y = 30          hit under the cursor          -> true, no search
+//	y = 31..39      forward of the cursor         -> advanceUntil from index 2
+//	y = 21..29      inside the gap (20, 30)       -> absent, one compare (20 < y)
+//	y <= 20         at or behind the previous gap -> full binary search
+//
+// Only the last shape searches: the invariant already brackets y in the other
+// three. The single-gap check cannot be extended to earlier gaps
+// (c[i-2]..c[i-1] and so on) — locating which earlier gap holds y IS the
+// binary search that find() performs. Nor are explicit y < c[0] / y > c[N-1]
+// boundary cases needed: both are answered below via the cursor's neighbours
+// (already in cache) instead of re-reading the array edges.
 func (cur *ContainsCursor) arrayHas(y uint16) bool {
 	c, si, i := cur.lastContainer, int(startIdx), cur.arrPos
 	switch {
@@ -114,16 +128,19 @@ func (cur *ContainsCursor) arrayHas(y uint16) bool {
 		// the cursor already sits on y
 		return true
 	case i < cur.arrN && c[si+i] < y:
-		// forward: advance from the cursor, O(log(distance moved))
+		// forward of the cursor: advance, O(log(distance moved))
 		i = advanceUntil(c[si:], i, cur.arrN, y)
-	case i == 0 || c[si+i-1] < y:
-		// y falls in the gap right below the cursor — before the first value
-		// (i == 0), between the neighbours (c[i-1] < y < c[i]), or past the
-		// last value (i == arrN and c[arrN-1] < y): provably absent, and
-		// arrPos is already y's lower bound. One compare, no search.
+	case i == 0:
+		// cursor at the start and c[0] > y (or the container is empty):
+		// y precedes every value
+		return false
+	case c[si+i-1] < y:
+		// inside the gap right below the cursor (c[i-1] < y < c[i], or past
+		// the last value when i == arrN): provably absent, and arrPos is
+		// already y's lower bound
 		return false
 	default:
-		// true backward move: full binary search
+		// at or behind the previous gap: full binary search
 		i = array(c).find(y)
 	}
 	cur.arrPos = i
