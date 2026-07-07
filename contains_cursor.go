@@ -62,7 +62,9 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 		if cur.isLastBitmap {
 			return bitmap(cur.lastContainer).has(y)
 		}
-		return cur.arrayHas(y)
+		i := cur.arrayGeqPos(y)
+		cur.arrPos = i
+		return i < cur.arrN && cur.lastContainer[int(startIdx)+i] == y
 	}
 	if key > cur.maxKey {
 		// beyond the last container: absent, and no cursor state to update —
@@ -93,8 +95,10 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	case typeArray:
 		cur.isLastBitmap = false
 		cur.arrN = getCardinality(cur.lastContainer)
-		cur.arrPos = cur.arrN // arrayHas re-establishes the lower bound
-		return cur.arrayHas(y)
+		cur.arrPos = cur.arrN // forces arrayGeqPos to search from scratch
+		i := cur.arrayGeqPos(y)
+		cur.arrPos = i
+		return i < cur.arrN && cur.lastContainer[int(startIdx)+i] == y
 	default:
 		// mirror Contains' default-false on unknown container types; nil cont
 		// makes repeat probes into this container report false as well.
@@ -103,31 +107,24 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	}
 }
 
-// arrayHas answers has(y) for the cached array container. arrPos holds the
-// lower bound of the previous probe (the index of the smallest value >= it,
-// arrN when past the end), so everything left of arrPos is smaller than any
-// forward probe.
-func (cur *ContainsCursor) arrayHas(y uint16) bool {
+// arrayGeqPos returns the index of the smallest value >= y in the cached array
+// container (arrN if none). arrPos holds the lower bound of the previous probe,
+// so everything left of it is smaller than any forward probe: a y at the cursor
+// or in the gap just below it resolves in O(1), a forward move advances in
+// O(log(distance moved)), a true backward move binary-searches from scratch.
+func (cur *ContainsCursor) arrayGeqPos(y uint16) int {
 	c, si, i := cur.lastContainer, int(startIdx), cur.arrPos
 	switch {
-	case i < cur.arrN && c[si+i] == y:
-		// the cursor already sits on y
-		return true
 	case i < cur.arrN && c[si+i] < y:
-		// forward: advance from the cursor, O(log(distance moved))
-		i = advanceUntil(c[si:], i, cur.arrN, y)
+		return advanceUntil(c[si:], i, cur.arrN, y)
 	case i == 0 || c[si+i-1] < y:
-		// y falls in the gap right below the cursor — before the first value
-		// (i == 0), between the neighbours (c[i-1] < y < c[i]), or past the
-		// last value (i == arrN and c[arrN-1] < y): provably absent, and
-		// arrPos is already y's lower bound. One compare, no search.
-		return false
+		// before the first value (i == 0), between the neighbours
+		// (c[i-1] < y <= c[i]), or past the last value (i == arrN and
+		// c[arrN-1] < y): i is already y's lower bound
+		return i
 	default:
-		// true backward move: full binary search
-		i = array(c).find(y)
+		return array(c).find(y)
 	}
-	cur.arrPos = i
-	return i < cur.arrN && c[si+i] == y
 }
 
 // NextGeq returns the smallest set value >= x and whether one exists. It shares
@@ -141,14 +138,29 @@ func (cur *ContainsCursor) NextGeq(x uint64) (uint64, bool) {
 		return 0, false
 	}
 	key := x & mask
-	if key > cur.maxKey {
-		return 0, false
-	}
 	y := uint16(x)
 	var idx int
 	switch {
 	case key == cur.lastKey:
-		idx = cur.lastIdx
+		// same-key fast path: resolve within the cached container without
+		// touching the keys node or the arena. Skipping the maxKey check is
+		// sound — lastKey is a resolved key (<= maxKey) or the unmatchable
+		// sentinel.
+		if cur.lastContainer == nil {
+			idx = cur.lastIdx // key resolved as absent: walk from its slot
+			break
+		}
+		if cur.isLastBitmap {
+			if v, ok := bitmap(cur.lastContainer).nextGeq(y); ok {
+				return key | uint64(v), true
+			}
+		} else if pos := cur.arrayGeqPos(y); pos < cur.arrN {
+			cur.arrPos = pos
+			return key | uint64(cur.lastContainer[int(startIdx)+pos]), true
+		}
+		idx = cur.lastIdx + 1 // cached container exhausted: successor is a later container's min
+	case key > cur.maxKey:
+		return 0, false
 	case key > cur.lastKey:
 		idx = cur.lastIdx // forward: gallop from where we are
 		if idx < cur.numKeys && cur.keys.key(idx) < key {
@@ -191,7 +203,6 @@ func (cur *ContainsCursor) NextGeq(x uint64) (uint64, bool) {
 		}
 		// unknown container types are skipped, mirroring Contains' default-false
 	}
-	// no successor (only possible via empty or unknown trailing containers);
-	// cursor state is left untouched
+	// no set value at or after x; cursor state is left untouched
 	return 0, false
 }
