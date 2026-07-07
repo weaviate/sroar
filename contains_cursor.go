@@ -62,9 +62,7 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 		if cur.isLastBitmap {
 			return bitmap(cur.lastContainer).has(y)
 		}
-		i := cur.arrayGeqPos(y)
-		cur.arrPos = i
-		return i < cur.arrN && cur.lastContainer[int(startIdx)+i] == y
+		return cur.arrayHas(y)
 	}
 	if key > cur.maxKey {
 		// beyond the last container: absent, and no cursor state to update —
@@ -95,10 +93,8 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	case typeArray:
 		cur.isLastBitmap = false
 		cur.arrN = getCardinality(cur.lastContainer)
-		cur.arrPos = cur.arrN // forces arrayGeqPos to search from scratch
-		i := cur.arrayGeqPos(y)
-		cur.arrPos = i
-		return i < cur.arrN && cur.lastContainer[int(startIdx)+i] == y
+		cur.arrPos = cur.arrN // arrayHas re-establishes the lower bound
+		return cur.arrayHas(y)
 	default:
 		// mirror Contains' default-false on unknown container types; nil cont
 		// makes repeat probes into this container report false as well.
@@ -107,43 +103,45 @@ func (cur *ContainsCursor) Contains(x uint64) bool {
 	}
 }
 
-// arrayGeqPos returns the index of the smallest value >= y in the cached array
-// container (arrN if none); callers derive membership by comparing c[result]
-// against y and maintain the invariant by storing the result back into arrPos.
+// arrayHas answers has(y) for the cached array container, and leaves arrPos at
+// y's lower bound — the index of the smallest value >= y, arrN when past the
+// end. NextGeq reads that invariant to turn the same probe into a successor.
+// The hit and in-gap cases hold it without a store: arrPos is already the
+// lower bound there. Example with values c = [10 20 30 40] after a previous
+// probe of 25 (arrPos = 2, c[2] = 30):
 //
-// Invariant: arrPos is the lower bound of the previous probe — the index of the
-// smallest value >= it, arrN when the probe was past the last value. Example
-// with values c = [10 20 30 40] after a previous probe of 25 (arrPos = 2,
-// c[2] = 30):
-//
-//	y = 31..39      forward of the cursor         -> advanceUntil from index 2
-//	y = 21..30      at the cursor or in its gap   -> index 2, one compare (20 < y)
-//	y <= 20         at or behind the previous gap -> full binary search
+//	y = 30          at the cursor              -> one compare, no store
+//	y = 31..39      forward of the cursor      -> advanceUntil from index 2
+//	y = 21..29      in the gap below           -> one compare (20 < y), no store
+//	y <= 20         at or behind the gap       -> full binary search
 //
 // Only the last shape searches: the invariant already brackets y in the other
-// two. The single-gap check cannot be extended to earlier gaps
+// three. The single-gap check cannot be extended to earlier gaps
 // (c[i-2]..c[i-1] and so on) — locating which earlier gap holds y IS the
 // binary search that find() performs. Nor are explicit y < c[0] / y > c[N-1]
 // boundary cases needed: both are answered below via the cursor's neighbours
 // (already in cache) instead of re-reading the array edges.
-func (cur *ContainsCursor) arrayGeqPos(y uint16) int {
+func (cur *ContainsCursor) arrayHas(y uint16) bool {
 	c, si, i := cur.lastContainer, int(startIdx), cur.arrPos
 	switch {
+	case i < cur.arrN && c[si+i] == y:
+		// the cursor already sits on y
+		return true
 	case i < cur.arrN && c[si+i] < y:
-		// forward of the cursor: advance, O(log(distance moved))
-		return advanceUntil(c[si:], i, cur.arrN, y)
-	case i == 0:
-		// cursor at the start and c[0] >= y (or the container is empty):
-		// 0 is y's lower bound
-		return 0
-	case c[si+i-1] < y:
-		// at the cursor or inside the gap right below it (c[i-1] < y <= c[i],
-		// or past the last value when i == arrN): i is already y's lower bound
-		return i
+		// forward: advance from the cursor, O(log(distance moved))
+		i = advanceUntil(c[si:], i, cur.arrN, y)
+	case i == 0 || c[si+i-1] < y:
+		// y falls in the gap right below the cursor — before the first value
+		// (i == 0), between the neighbours (c[i-1] < y < c[i]), or past the
+		// last value (i == arrN and c[arrN-1] < y): provably absent, and
+		// arrPos is already y's lower bound. One compare, no search.
+		return false
 	default:
-		// at or behind the previous gap: full binary search
-		return array(c).find(y)
+		// true backward move: full binary search
+		i = array(c).find(y)
 	}
+	cur.arrPos = i
+	return i < cur.arrN && c[si+i] == y
 }
 
 // NextGeq returns the smallest set value >= x and whether one exists. It shares
@@ -173,9 +171,11 @@ func (cur *ContainsCursor) NextGeq(x uint64) (uint64, bool) {
 			if v, ok := bitmap(cur.lastContainer).nextGeq(y); ok {
 				return key | uint64(v), true
 			}
-		} else if pos := cur.arrayGeqPos(y); pos < cur.arrN {
-			cur.arrPos = pos
-			return key | uint64(cur.lastContainer[int(startIdx)+pos]), true
+		} else if cur.arrayHas(y) {
+			return key | uint64(y), true
+		} else if cur.arrPos < cur.arrN {
+			// miss, but arrayHas left arrPos at y's lower bound: the successor
+			return key | uint64(cur.lastContainer[int(startIdx)+cur.arrPos]), true
 		}
 		idx = cur.lastIdx + 1 // cached container exhausted: successor is a later container's min
 	case key > cur.maxKey:

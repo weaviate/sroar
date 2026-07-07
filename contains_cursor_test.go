@@ -257,3 +257,48 @@ func BenchmarkContainsCursor(b *testing.B) {
 }
 
 var sink int
+
+// The reject-walk probe shapes: misses landing in the gap at the cursor and
+// re-probes of the value the cursor sits on. Both are arrayHas early returns —
+// one compare, no arrPos store — and regress first if that fast path is lost.
+func BenchmarkContainsCursorGapShapes(b *testing.B) {
+	bm := NewBitmap()
+	for x := uint64(0); x < 8<<16; x += 17 { // ~3855/container: array containers
+		bm.Set(x)
+	}
+	max := uint64(8 << 16)
+
+	b.Run("gap_reject", func(b *testing.B) {
+		cur := bm.NewContainsCursor()
+		var s int
+		y := uint64(1)
+		for i := 0; i < b.N; i++ {
+			if cur.Contains(y) { // 17k+1: always a miss in the gap ahead
+				s++
+			}
+			y += 17
+			if y >= max {
+				y = 1
+			}
+		}
+		sink = s
+	})
+	b.Run("at_cursor_hit", func(b *testing.B) {
+		cur := bm.NewContainsCursor()
+		var s int
+		y := uint64(0)
+		for i := 0; i < b.N; i += 2 {
+			if cur.Contains(y) { // advance to y (hit)
+				s++
+			}
+			if cur.Contains(y) { // re-probe the cursor position (hit)
+				s++
+			}
+			y += 17
+			if y >= max {
+				y = 0
+			}
+		}
+		sink = s
+	})
+}
