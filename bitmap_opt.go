@@ -881,9 +881,11 @@ func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
 // equivalent of src.CloneToBuf(buf), reusing dst instead of allocating a new
 // Bitmap. Callers that pool result buffers can pool the Bitmap struct along
 // with them and re-initialize it on every checkout, so cloning allocates
-// nothing. dst's previous content is discarded, never freed — it must not
-// own anything the caller still needs. A nil src initializes dst as an empty
-// bitmap over buf (the NewBitmapToBuf semantics).
+// nothing when buf is large enough; it panics if buf cannot hold src. dst's
+// previous content is discarded, never freed — it must not own anything the
+// caller still needs. A nil src initializes dst as an empty bitmap over buf
+// (the NewBitmapToBuf semantics); a buf too small for even the empty bitmap
+// then falls back to a heap allocation.
 func (dst *Bitmap) InitCloneToBuf(src *Bitmap, buf []byte) {
 	if src == nil {
 		dst.initNewToBuf(buf)
@@ -918,9 +920,10 @@ func FromBufferUnlimited(buf []byte) *Bitmap {
 // InitFromBufferUnlimited re-points dst at buf — the in-place equivalent of
 // FromBufferUnlimited, reusing dst instead of allocating a new Bitmap.
 // Callers that pool buffers can pool the Bitmap struct along with them and
-// re-initialize it on every checkout, so viewing a buffer allocates nothing.
-// dst's previous content is discarded, never freed — it must not own
-// anything the caller still needs.
+// re-initialize it on every checkout, so viewing a buffer allocates nothing;
+// only a buf too small for even the empty bitmap (under 8 bytes) falls back
+// to a heap allocation. dst's previous content is discarded, never freed —
+// it must not own anything the caller still needs.
 func (dst *Bitmap) InitFromBufferUnlimited(buf []byte) {
 	ln := len(buf)
 	assert(ln%2 == 0)

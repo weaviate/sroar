@@ -51,6 +51,18 @@ func TestInitFromBufferUnlimited(t *testing.T) {
 		require.True(t, dst.Contains(999_999_999))
 	})
 
+	t.Run("reinit drops the previous buffer", func(t *testing.T) {
+		bufA := randomBitmap(7, 100, 10_000).ToBufferWithCopy()
+		bufB := randomBitmap(8, 100, 10_000).ToBufferWithCopy()
+
+		var dst Bitmap
+		dst.InitFromBufferUnlimited(bufA)
+		require.Same(t, &bufA[0], &dst._ptr[0])
+
+		dst.InitFromBufferUnlimited(bufB)
+		require.Same(t, &bufB[0], &dst._ptr[0])
+	})
+
 	t.Run("tiny buffer falls back to empty bitmap", func(t *testing.T) {
 		var dst Bitmap
 		dst.InitFromBufferUnlimited(make([]byte, 0))
@@ -90,6 +102,19 @@ func TestInitCloneToBuf(t *testing.T) {
 
 		dst.InitCloneToBuf(b, buf)
 		require.Equal(t, b.ToArray(), dst.ToArray())
+	})
+
+	t.Run("reinit drops the previous buffer", func(t *testing.T) {
+		a := randomBitmap(9, 100, 10_000)
+		bufA := make([]byte, 0, a.LenInBytes())
+		bufB := make([]byte, 0, a.LenInBytes())
+
+		var dst Bitmap
+		dst.InitCloneToBuf(a, bufA)
+		require.Same(t, &bufA[:1][0], &dst._ptr[0])
+
+		dst.InitCloneToBuf(a, bufB)
+		require.Same(t, &bufB[:1][0], &dst._ptr[0])
 	})
 
 	t.Run("nil src initializes empty bitmap over buf", func(t *testing.T) {
