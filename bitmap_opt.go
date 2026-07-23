@@ -872,15 +872,29 @@ func (ra *Bitmap) capInBytes() int {
 }
 
 func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
-	if ra == nil {
-		return NewBitmapToBuf(buf)
+	dst := &Bitmap{}
+	dst.InitCloneToBuf(ra, buf)
+	return dst
+}
+
+// InitCloneToBuf makes dst a clone of src stored in buf — the in-place
+// equivalent of src.CloneToBuf(buf), reusing dst instead of allocating a new
+// Bitmap. Callers that pool result buffers can pool the Bitmap struct along
+// with them and re-initialize it on every checkout, so cloning allocates
+// nothing. dst's previous content is discarded, never freed — it must not
+// own anything the caller still needs. A nil src initializes dst as an empty
+// bitmap over buf (the NewBitmapToBuf semantics).
+func (dst *Bitmap) InitCloneToBuf(src *Bitmap, buf []byte) {
+	if src == nil {
+		dst.initNewToBuf(buf)
+		return
 	}
 
 	// Use full capacity, rounded down to an even number of bytes since
 	// the bitmap operates on []uint16 (2 bytes per element).
 	buf = buf[:cap(buf)/2*2]
 
-	srcLen := ra.LenInBytes()
+	srcLen := src.LenInBytes()
 	if srcLen > len(buf) {
 		panic(fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", srcLen, cap(buf)))
 	}
@@ -888,19 +902,31 @@ func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
 	// Copy at the uint16 level into the destination buffer, then trim data
 	// to the used length while keeping the full buffer capacity available
 	// for future growth.
-	copy(byteTo16SliceUnsafe(buf), ra.data)
-	bm := FromBuffer(buf)
-	bm.data = bm.data[:srcLen/2]
-	return bm
+	copy(byteTo16SliceUnsafe(buf), src.data)
+	dst.initFromBuffer(buf)
+	dst.data = dst.data[:srcLen/2]
 }
 
 // FromBufferUnlimited returns a pointer to bitmap corresponding to the given buffer.
 // Entire buffer capacity is utlized for future bitmap modifications and expansions.
 func FromBufferUnlimited(buf []byte) *Bitmap {
+	dst := &Bitmap{}
+	dst.InitFromBufferUnlimited(buf)
+	return dst
+}
+
+// InitFromBufferUnlimited re-points dst at buf — the in-place equivalent of
+// FromBufferUnlimited, reusing dst instead of allocating a new Bitmap.
+// Callers that pool buffers can pool the Bitmap struct along with them and
+// re-initialize it on every checkout, so viewing a buffer allocates nothing.
+// dst's previous content is discarded, never freed — it must not own
+// anything the caller still needs.
+func (dst *Bitmap) InitFromBufferUnlimited(buf []byte) {
 	ln := len(buf)
 	assert(ln%2 == 0)
 	if len(buf) < 8 {
-		return NewBitmap()
+		*dst = *NewBitmap()
+		return
 	}
 
 	cp := cap(buf)
@@ -911,7 +937,7 @@ func FromBufferUnlimited(buf []byte) *Bitmap {
 
 	du := byteTo16SliceUnsafe(data)
 	x := uint16To64SliceUnsafe(du[:4])[indexNodeSize]
-	return &Bitmap{
+	*dst = Bitmap{
 		data: du[:ln/2],
 		_ptr: buf, // Keep a hold of data, otherwise GC would do its thing.
 		keys: uint16To64SliceUnsafe(du[:x]),
@@ -951,7 +977,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 
 		var bm *Bitmap
 		if minimalLen <= cap(ra.data) {
-			bm = newBitampToBuf(minimalKeysLen, maxContainerSize, ra.data)
+			bm = newBitmapToBuf(minimalKeysLen, maxContainerSize, ra.data)
 		} else {
 			bm = newBitmapWith(int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
 		}

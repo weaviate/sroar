@@ -45,13 +45,22 @@ type Bitmap struct {
 // FromBuffer returns a pointer to bitmap corresponding to the given buffer. This bitmap shouldn't
 // be modified because it might corrupt the given buffer.
 func FromBuffer(data []byte) *Bitmap {
+	dst := &Bitmap{}
+	dst.initFromBuffer(data)
+	return dst
+}
+
+// initFromBuffer is the in-place body of FromBuffer, shared with
+// InitCloneToBuf.
+func (dst *Bitmap) initFromBuffer(data []byte) {
 	assert(len(data)%2 == 0)
 	if len(data) < 8 {
-		return NewBitmap()
+		*dst = *NewBitmap()
+		return
 	}
 	du := byteTo16SliceUnsafe(data)
 	x := toUint64Slice(du[:4])[indexNodeSize]
-	return &Bitmap{
+	*dst = Bitmap{
 		data: du,
 		_ptr: data, // Keep a hold of data, otherwise GC would do its thing.
 		keys: toUint64Slice(du[:x]),
@@ -106,20 +115,28 @@ func NewBitmapWith(numKeys int) *Bitmap {
 // field is set to keep a GC reference to buf, since the bitmap operates on an
 // unsafe []uint16 view of the same memory.
 func NewBitmapToBuf(buf []byte) *Bitmap {
+	dst := &Bitmap{}
+	dst.initNewToBuf(buf)
+	return dst
+}
+
+// initNewToBuf is the in-place body of NewBitmapToBuf, shared with
+// InitCloneToBuf's nil-src path.
+func (dst *Bitmap) initNewToBuf(buf []byte) {
 	// Use full capacity, rounded down to an even number of bytes since
 	// the bitmap operates on []uint16 (2 bytes per element).
 	buf = buf[:cap(buf)/2*2]
 
 	keysLen := calcInitialKeysLen(2)
 	if minLen := (keysLen + minContainerSize) * 2; minLen > len(buf) {
-		return NewBitmap()
+		*dst = *NewBitmap()
+		return
 	}
 
 	bufU16 := byteTo16SliceUnsafe(buf)
 	clear(bufU16)
-	bm := newBitampToBuf(keysLen, minContainerSize, bufU16)
-	bm._ptr = buf
-	return bm
+	dst.initBitmapToBuf(keysLen, minContainerSize, bufU16)
+	dst._ptr = buf
 }
 
 func newBitmapWith(numKeys, initialContainerSize, additionalCapacity int) *Bitmap {
@@ -128,11 +145,17 @@ func newBitmapWith(numKeys, initialContainerSize, additionalCapacity int) *Bitma
 	}
 	keysLen := calcInitialKeysLen(numKeys)
 	buf := make([]uint16, keysLen+initialContainerSize+additionalCapacity)
-	return newBitampToBuf(keysLen, initialContainerSize, buf)
+	return newBitmapToBuf(keysLen, initialContainerSize, buf)
 }
 
-func newBitampToBuf(keysLen, initialContainerSize int, buf []uint16) *Bitmap {
-	ra := &Bitmap{data: buf[:keysLen]}
+func newBitmapToBuf(keysLen, initialContainerSize int, buf []uint16) *Bitmap {
+	ra := &Bitmap{}
+	ra.initBitmapToBuf(keysLen, initialContainerSize, buf)
+	return ra
+}
+
+func (ra *Bitmap) initBitmapToBuf(keysLen, initialContainerSize int, buf []uint16) {
+	*ra = Bitmap{data: buf[:keysLen]}
 	ra.keys = toUint64Slice(ra.data)
 	ra.keys.setNodeSize(keysLen)
 
@@ -142,8 +165,6 @@ func newBitampToBuf(keysLen, initialContainerSize int, buf []uint16) *Bitmap {
 	// First two are for num keys. index=2 -> 0 key. index=3 -> offset.
 	ra.keys.setAt(indexNodeStart+1, offset)
 	ra.keys.setNumKeys(1)
-
-	return ra
 }
 
 func calcInitialKeysLen(numKeys int) int {
