@@ -8,15 +8,17 @@ import "math/bits"
 // structural container merge per source — for array containers that is an
 // O(container size) memmove to insert even a single element, which makes
 // N-way unions of near-singleton bitmaps quadratic in the source count. The
-// accumulator makes every deposit O(1): each touched 64K key range gets one
-// fixed-size dense staging block (the 64K bits of that range), array-container
-// sources set bits directly, bitmap-container sources OR in word-wise, and
-// the final roaring bitmap is allocated at its exact size and assembled once
-// by Bitmap, BitmapToBuf or InitBitmapToBuf.
+// accumulator makes every deposit O(1) by staging each touched 64K key
+// range in one fixed-size dense block, then assembling the exact-size
+// result once (Bitmap, BitmapToBuf or InitBitmapToBuf).
 //
 // Total cost is O(total input elements + touched key ranges); staging memory
 // is one 8KB block per touched key range (proportional to the spread of the
-// result, not to the number of sources).
+// result, not to the number of sources). Within one source, keys ascend, so
+// its new ranges append cheaply; across sources, each new range that
+// arrives out of order pays an O(existing ranges) insertion shift, so
+// unions spanning many ranges fed from unsorted sources approach
+// O(ranges²) in that term.
 //
 // Usage:
 //
@@ -201,10 +203,10 @@ func (acc *Accumulator) BitmapToBuf(get func(sizeBytes int) []byte) *Bitmap {
 // struct together with its buffer: get returns both — typically from one
 // pool entry — and the union is built into them, so a warm accumulator
 // building into pooled memory allocates nothing. The struct must be
-// non-nil; its previous content is discarded, never freed — it must not
-// own anything the caller still needs (the InitCloneToBuf contract). If
-// the buffer is too small it is left untouched and the struct is instead
-// set to a union built on the heap.
+// non-nil; its previous fields are overwritten, never freed — it must not
+// own anything the caller still needs. If the buffer is too small it is
+// left untouched and the struct is instead set to a union built on the
+// heap.
 func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
 	var scratch [layoutScratchLen]int
 	cards, newKeys, sizeInitial, sizeContainers := acc.layout(scratch[:])

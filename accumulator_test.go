@@ -186,6 +186,19 @@ func TestAccumulator(t *testing.T) {
 	}
 }
 
+func TestAccumulatorOrSkipsEmptyContainers(t *testing.T) {
+	// Removing every element of a container leaves a zero-cardinality
+	// container inside a non-empty bitmap; Or must skip it rather than
+	// stage its range.
+	bm := bitmapOf(5, 1<<20)
+	bm.Remove(5)
+
+	acc := NewAccumulator()
+	acc.Or(bm)
+	require.Len(t, acc.keys, 1)
+	require.Equal(t, []uint64{1 << 20}, acc.Bitmap().ToArray())
+}
+
 func TestAccumulatorReset(t *testing.T) {
 	acc := NewAccumulator()
 	acc.Or(bitmapOf(1, 2, 3))
@@ -416,6 +429,30 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 		require.Same(t, &bm, got)
 		require.Equal(t, a.ToArray(), got.ToArray())
 		require.Nil(t, got._ptr)
+	})
+
+	t.Run("dirty buffer serializes deterministically at exact size", func(t *testing.T) {
+		// Same guarantees the BitmapToBuf subtests pin, routed directly
+		// through the Init path: byte-deterministic serialization filling
+		// the buffer exactly. The union holds array containers, so padding
+		// tails are exercised.
+		var size int
+		serialize := func(fill byte) []byte {
+			var bm Bitmap
+			acc := NewAccumulator()
+			acc.Or(a)
+			return acc.InitBitmapToBuf(func(n int) (*Bitmap, []byte) {
+				size = n
+				buf := make([]byte, n)
+				for i := range buf {
+					buf[i] = fill
+				}
+				return &bm, buf
+			}).ToBufferWithCopy()
+		}
+		s0, s1 := serialize(0x00), serialize(0xFF)
+		require.Equal(t, s0, s1)
+		require.Len(t, s0, size)
 	})
 
 	t.Run("warm accumulator with pooled memory allocates nothing", func(t *testing.T) {

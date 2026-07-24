@@ -525,6 +525,52 @@ func TestSetSorted(t *testing.T) {
 	check(1e6)
 }
 
+func TestFromSortedListContainerAlignment(t *testing.T) {
+	// Container payloads are read through uint64 views
+	// (uint16To64SliceUnsafe), so every container must start 8-byte
+	// aligned. containerSizeForCard keeps sizes at multiples of 4 uint16s
+	// even for small array containers, so no container can misalign the
+	// ones that follow it.
+	bm := FromSortedList([]uint64{1, 2, 3, 1 << 20, 1<<20 + 1, 1 << 40})
+	n := bm.keys.numKeys()
+	require.Equal(t, 3, n)
+	for i := 0; i < n; i++ {
+		require.Zero(t, bm.keys.val(i)%4)
+	}
+}
+
+func TestSetIntoCompactedArrayContainer(t *testing.T) {
+	// containerSizeForCard can leave a single spare slot in a fresh array
+	// container (e.g. cardinality 2047, vs the old sizing's fixed 4);
+	// growing past the spares and across the 2048 array-bitmap cutoff
+	// must work for containers built by both exact-size constructors.
+	for _, n := range []int{2046, 2047, 2048} {
+		vals := make([]uint64, n)
+		for i := range vals {
+			vals[i] = uint64(i) * 2 // even values: odd ones stay free to Set
+		}
+		builders := map[string]func() *Bitmap{
+			"FromSortedList": func() *Bitmap { return FromSortedList(vals) },
+			"Accumulator": func() *Bitmap {
+				acc := NewAccumulator()
+				acc.Or(bitmapOf(vals...))
+				return acc.Bitmap()
+			},
+		}
+		for name, build := range builders {
+			t.Run(fmt.Sprintf("%s n=%d", name, n), func(t *testing.T) {
+				bm := build()
+				for j := 0; j < 5; j++ {
+					v := uint64(j)*2 + 1
+					require.True(t, bm.Set(v))
+					require.True(t, bm.Contains(v))
+				}
+				require.Equal(t, n+5, bm.GetCardinality())
+			})
+		}
+	}
+}
+
 // testMaskedCommon runs the shared correctness cases for Masked and MaskedToBuf.
 // masker abstracts the call so each test function can pass its own implementation.
 func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap) {
