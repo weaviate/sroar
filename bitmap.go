@@ -472,30 +472,20 @@ func FromSortedList(vals []uint64) *Bitmap {
 		if len(l) == 0 {
 			return
 		}
-		if len(l) <= 2048 {
-			// 4 uint16s for the header, and extra 4 uint16s so that adding more elements using
-			// Set operation doesn't fail.
-			sz := uint16(8 + len(l))
-			off = ra.newContainer(sz)
-			c := ra.getContainer(off)
-			c[indexSize] = sz
-			c[indexType] = typeArray
+		sz, typ := containerSizeForCard(len(l))
+		off = ra.newContainer(sz)
+		c := ra.getContainer(off)
+		c[indexSize] = sz
+		c[indexType] = typ
+		if typ == typeArray {
 			setCardinality(c, len(l))
-			for i := 0; i < len(l); i++ {
-				c[int(startIdx)+i] = l[i]
-			}
-
+			copy(c[startIdx:], l)
 		} else {
-			off = ra.newContainer(maxContainerSize)
-			c := ra.getContainer(off)
-			c[indexSize] = maxContainerSize
-			c[indexType] = typeBitmap
 			for _, v := range l {
 				bitmap(c).add(v)
 			}
 		}
 		ra.setKey(key, off)
-		return
 	}
 
 	lastHi = 0
