@@ -76,10 +76,17 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	}
 }
 
+// ToBuffer returns a live alias of the underlying arena. A lazy cardinality
+// header (see runLazy) is settled in place first, because the header is part of
+// the serialized format and a reader outside this package would take it at face
+// value. That write makes ToBuffer unsafe to call concurrently on a bitmap that
+// was just merged in place; ToBufferWithCopy and Clone settle a copy instead
+// and stay read-only.
 func (ra *Bitmap) ToBuffer() []byte {
 	if ra.IsEmpty() {
 		return nil
 	}
+	ra.reconcileCardinality()
 	return toByteSlice(ra.data)
 }
 
@@ -89,7 +96,36 @@ func (ra *Bitmap) ToBufferWithCopy() []byte {
 	}
 	buf := make([]uint16, len(ra.data))
 	copy(buf, ra.data)
-	return toByteSlice(buf)
+	out := toByteSlice(buf)
+	FromBuffer(out).reconcileCardinality()
+	return out
+}
+
+// reconcileCardinality settles every lazy container header (see runLazy) to its
+// exact cardinality. Only for callers that own ra for writing. It writes
+// nothing when no container is lazy, so the concurrent readers that share a
+// bitmap loaded from disk stay race-free.
+//
+// Serialization must go through this: the cardinality header is part of the
+// wire format, and a reader outside this package would take a lazy one at face
+// value.
+func (ra *Bitmap) reconcileCardinality() {
+	for i, n := 0, ra.keys.numKeys(); i < n; i++ {
+		offset := ra.keys.val(i)
+		if getCardinality(ra.data[offset:]) == invalidCardinality {
+			calculateAndSetCardinality(ra.getContainer(offset))
+		}
+	}
+}
+
+// containerCardinalityAt returns the exact cardinality of the container at
+// offset without writing to it, keeping the header-only read on the path where
+// the header is already exact.
+func (ra *Bitmap) containerCardinalityAt(offset uint64) int {
+	if card := getCardinality(ra.data[offset:]); card != invalidCardinality {
+		return card
+	}
+	return bitmap(ra.getContainer(offset)).cardinality()
 }
 
 func NewBitmap() *Bitmap {
@@ -410,10 +446,14 @@ func (ra *Bitmap) getContainer(offset uint64) []uint16 {
 }
 
 func (ra *Bitmap) Clone() *Bitmap {
-	abuf := ra.ToBuffer()
-	bbuf := make([]byte, len(abuf))
-	copy(bbuf, abuf)
-	return FromBuffer(bbuf)
+	if ra.IsEmpty() {
+		return NewBitmap()
+	}
+	bbuf := make([]byte, ra.LenInBytes())
+	copy(bbuf, toByteSlice(ra.data))
+	bm := FromBuffer(bbuf)
+	bm.reconcileCardinality()
+	return bm
 }
 
 func (ra *Bitmap) IsEmpty() bool {
@@ -542,7 +582,7 @@ func (ra *Bitmap) Select(x uint64) (uint64, error) {
 	for i := 0; i < n; i++ {
 		off := ra.keys.val(i)
 		con := ra.getContainer(off)
-		c := uint64(getCardinality(con))
+		c := uint64(containerCardinality(con))
 		assert(c != uint64(invalidCardinality))
 		if x < c {
 			key := ra.keys.key(i)
@@ -693,9 +733,9 @@ func (ra *Bitmap) GetCardinality() int {
 	var sz int
 	for i := 0; i < N; i++ {
 		offset := ra.keys.val(i)
-		// Pass ra.data[offset:] directly to skip getContainer — getCardinality
-		// only reads indices 2 and 3, so no bounded slice is needed.
-		sz += getCardinality(ra.data[offset:])
+		// The header-only read needs no bounded slice; only a lazy header sends
+		// containerCardinalityAt through getContainer to recount.
+		sz += ra.containerCardinalityAt(offset)
 	}
 	return sz
 }
@@ -741,11 +781,12 @@ func (ra *Bitmap) String() string {
 
 		sz := c[indexSize]
 		usedSize += int(sz)
-		card += getCardinality(c)
+		cCard := containerCardinality(c)
+		card += cCard
 
 		b.WriteString(fmt.Sprintf(
 			"[%03d] Key: %#8x. Offset: %7d. Size: %4d. Type: %d. Card: %6d. Uint16/Uid: %.2f\n",
-			i, k, v, sz, c[indexType], getCardinality(c), float64(sz)/float64(getCardinality(c))))
+			i, k, v, sz, c[indexType], cCard, float64(sz)/float64(cCard)))
 	}
 	b.WriteString(fmt.Sprintf("Number of containers: %d. Cardinality: %d\n",
 		ra.keys.numKeys(), card))
@@ -1072,7 +1113,7 @@ func (ra *Bitmap) Rank(x uint64) int {
 			break
 		}
 		cont := ra.getContainer(ra.keys.val(i))
-		rank += getCardinality(cont)
+		rank += containerCardinality(cont)
 	}
 	return rank
 }
@@ -1216,7 +1257,9 @@ func FastOr(bitmaps ...*Bitmap) *Bitmap {
 		for i := 0; i < b.keys.numKeys(); i++ {
 			offset := b.keys.val(i)
 			cont := b.getContainer(offset)
-			card := getCardinality(cont)
+			// A worst-case bound is what this sizing pass already assumes, so a
+			// lazy header needs no recount here.
+			card := cardinalityUpperBound(cont)
 			containers[b.keys.key(i)] += card
 		}
 	}

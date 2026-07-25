@@ -70,6 +70,51 @@ func isEmpty(data []uint16) bool {
 	return data[indexCardinality]|data[indexCardinality+1] == 0
 }
 
+// containerCardinality returns c's exact cardinality. It recounts when the
+// header is lazy (see runLazy) and never writes: observers of a shared bitmap
+// may run concurrently, so turning a read into a write would introduce a race
+// where callers have none today. Owners that can write should use
+// fixCardinality instead so the recount is paid once.
+//
+// c must be bounded to the container, as returned by Bitmap.getContainer.
+func containerCardinality(c []uint16) int {
+	if card := getCardinality(c); card != invalidCardinality {
+		return card
+	}
+	return bitmap(c).cardinality()
+}
+
+// fixCardinality stores c's exact cardinality if the header is lazy. Only for
+// callers that already own c for writing.
+func fixCardinality(c []uint16) {
+	if getCardinality(c) == invalidCardinality {
+		calculateAndSetCardinality(c)
+	}
+}
+
+// cardinalityUpperBound returns a bound usable for sizing and ordering
+// heuristics. A lazy header answers with the largest cardinality a container
+// can hold, which is the worst case those heuristics already assume.
+func cardinalityUpperBound(c []uint16) int {
+	return min(getCardinality(c), maxCardinality)
+}
+
+// lazyCardinality maps the two accumulators a lazy word loop keeps into the
+// header value to store. orAcc is the OR of every result word and andAcc the
+// AND, so empty and full stay exact for 1-2 ALU ops per word — and empty and
+// full are precisely what the next operation branches on
+// (bitmap.andBitmapAlt's bnum == 0 and bitmap.orBitmapAlt's
+// bnum == maxCardinality). Every other cardinality is deferred.
+func lazyCardinality(orAcc, andAcc uint64) int {
+	if orAcc == 0 {
+		return 0
+	}
+	if andAcc == math.MaxUint64 {
+		return maxCardinality
+	}
+	return invalidCardinality
+}
+
 func setCardinality(data []uint16, c int) {
 	if c > math.MaxUint16 {
 		data[indexCardinality] = math.MaxUint16
@@ -395,6 +440,8 @@ func (b bitmap) add(x uint16) bool {
 		return false
 	}
 
+	// incrCardinality steps the header, so a lazy one has to be settled first.
+	fixCardinality(b)
 	b[startIdx+idx] |= bitmapMask[pos]
 	incrCardinality(b)
 	return true
@@ -404,7 +451,7 @@ func (b bitmap) remove(x uint16) bool {
 	idx := x >> 4
 	pos := x & 0xF
 
-	c := getCardinality(b)
+	c := containerCardinality(b)
 	if has := b[startIdx+idx] & bitmapMask[pos]; has > 0 {
 		b[startIdx+idx] ^= bitmapMask[pos]
 		setCardinality(b, c-1)
@@ -420,7 +467,7 @@ func (b bitmap) removeRange(lo, hi uint16) {
 	hiIdx := hi >> 4
 	hiPos := hi & 0xF
 
-	N := getCardinality(b)
+	N := containerCardinality(b)
 	var removed int
 	for i := loIdx + 1; i < hiIdx; i++ {
 		removed += bits.OnesCount16(b[startIdx+i])
@@ -588,7 +635,7 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 }
 
 func (b bitmap) all() []uint16 {
-	res := make([]uint16, getCardinality(b))
+	res := make([]uint16, containerCardinality(b))
 	return res[:b.intoArray(res)]
 }
 
@@ -747,7 +794,18 @@ func (b bitmap) maximum() uint16 {
 
 func (b bitmap) cardinality() int {
 	var num int
-	for _, x := range b[startIdx:] {
+	data := b[startIdx:]
+	// Count 64 bits at a time. A popcount costs the same per instruction at
+	// either width, so the uint16 loop issued four times as many for the same
+	// container — which showed up as soon as this became the settle pass for a
+	// deferred cardinality rather than a rarely taken fallback.
+	if len(data)%4 == 0 {
+		for _, w := range uint16To64SliceUnsafe(data) {
+			num += bits.OnesCount64(w)
+		}
+		return num
+	}
+	for _, x := range data {
 		num += bits.OnesCount16(x)
 	}
 	return num

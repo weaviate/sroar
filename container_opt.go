@@ -1,6 +1,7 @@
 package sroar
 
 import (
+	"math"
 	"math/bits"
 	"slices"
 )
@@ -23,10 +24,12 @@ func init() {
 // bits: bc removes at most bcCard values, so acCard-bcCard >= andNotCompactThreshold
 // proves a dense result without any counting.
 func andNotResultCard(ac, bc []uint16) int {
-	acCard := getCardinality(ac)
+	// Both counts drive arithmetic and the result's storage form, so lazy
+	// headers have to be settled rather than clamped.
+	acCard := containerCardinality(ac)
 	bcCard := 0
 	if bc != nil {
-		bcCard = getCardinality(bc)
+		bcCard = containerCardinality(bc)
 	}
 	if bcCard == 0 {
 		// nothing to subtract: result is ac unchanged
@@ -341,7 +344,28 @@ func (b bitmap) andBitmapAlt(other bitmap, optBuf []uint16, runMode int) []uint1
 
 	dst64 := uint16To64SliceUnsafe(out[startIdx:])
 	src64 := uint16To64SliceUnsafe(other[startIdx:])
+
+	if runMode&runLazy > 0 {
+		var orAcc uint64
+		andAcc := uint64(math.MaxUint64)
+		for i := range dst64 {
+			w := dst64[i] & src64[i]
+			dst64[i] = w
+			orAcc |= w
+			andAcc &= w
+		}
+		setCardinality(out, lazyCardinality(orAcc, andAcc))
+
+		if runMode&runInline == 0 {
+			return out
+		}
+		return nil
+	}
+
 	var num int
+	// A lazy bnum is not below the threshold, so it lands on the dense loop.
+	// That is the right default: the sparse loop only pays when whole words are
+	// zero, which the density it can no longer read would have to prove.
 	if bnum < maxCardinality/2 {
 		// Sparse path: skip zero words to avoid AND+POPCNT on empty words.
 		// Faster below ~50% fill; above that the branch overhead exceeds the benefit.
@@ -525,10 +549,11 @@ func (c array) andNotBitmapIntoArray(other bitmap, out []uint16) int {
 }
 
 func (b bitmap) andNotArrayAlt(other array) {
-	bnum := getCardinality(b)
-	if bnum == 0 || getCardinality(other) == 0 {
+	if getCardinality(b) == 0 || getCardinality(other) == 0 {
 		return
 	}
+	// The result is counted as bnum-delnum, so a lazy bnum has to be settled.
+	bnum := containerCardinality(b)
 	delnum := 0
 	for _, x := range other.all() {
 		idx := x >> 4
@@ -693,6 +718,8 @@ func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	// because it avoids the 256-word OR+POPCNT sweep (~130ns fixed overhead).
 	out := buf
 	copy(out, other)
+	// The result is counted as onum+addnum, so a lazy onum has to be settled.
+	onum = containerCardinality(other)
 	addnum := 0
 	for _, x := range c.all() {
 		idx := x >> 4
@@ -738,6 +765,11 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		out = buf
 		copy(out, b)
 	}
+
+	// The result is counted as bnum+addnum, so a lazy bnum has to be settled.
+	// Array operands are rare on the merge paths that go lazy, so this recount
+	// is not on the path the laziness is there to speed up.
+	bnum = containerCardinality(b)
 
 	var addnum int
 	if bnum == 0 {
@@ -800,6 +832,24 @@ func (b bitmap) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 
 	dst64 := uint16To64SliceUnsafe(out[startIdx:])
 	src64 := uint16To64SliceUnsafe(other[startIdx:])
+
+	if runMode&runLazy > 0 {
+		var orAcc uint64
+		andAcc := uint64(math.MaxUint64)
+		for i := range dst64 {
+			w := dst64[i] | src64[i]
+			dst64[i] = w
+			orAcc |= w
+			andAcc &= w
+		}
+		setCardinality(out, lazyCardinality(orAcc, andAcc))
+
+		if runMode&runInline == 0 {
+			return out
+		}
+		return nil
+	}
+
 	var num int
 	for i := range dst64 {
 		dst64[i] |= src64[i]

@@ -30,6 +30,22 @@ type Iterator struct {
 
 	bitmapIdx int
 	bitset    uint16
+
+	// card is the exact cardinality of the container at key index cardIdx,
+	// cached because Next reads it on every call and a lazily merged container
+	// (see runLazy) has to be recounted to answer exactly.
+	card    int
+	cardIdx int
+}
+
+// cardinality returns the exact cardinality of the container at it.keyIdx,
+// recounting only when the cached value belongs to a different key.
+func (it *Iterator) cardinality(cont []uint16) int {
+	if it.cardIdx != it.keyIdx {
+		it.card = containerCardinality(cont)
+		it.cardIdx = it.keyIdx
+	}
+	return it.card
 }
 
 func (bm *Bitmap) NewRangeIterators(numRanges int) []*Iterator {
@@ -60,6 +76,7 @@ func (bm *Bitmap) NewIterator() *Iterator {
 		keyIdx:    0,
 		contIdx:   -1,
 		bitmapIdx: -1,
+		cardIdx:   -1,
 	}
 }
 
@@ -71,7 +88,7 @@ func (it *Iterator) Next() uint64 {
 	key := it.keys[it.keyIdx]
 	off := it.keys[it.keyIdx+1]
 	cont := it.bm.getContainer(off)
-	card := getCardinality(cont)
+	card := it.cardinality(cont)
 
 	// Loop until we find a container on which next operation is possible. When such a container
 	// is found, reset the variables responsible for container iteration.
@@ -87,7 +104,7 @@ func (it *Iterator) Next() uint64 {
 		key = it.keys[it.keyIdx]
 		off = it.keys[it.keyIdx+1]
 		cont = it.bm.getContainer(off)
-		card = getCardinality(cont)
+		card = it.cardinality(cont)
 	}
 
 	//  The above loop assures that we can do next in this container.

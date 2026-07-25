@@ -187,7 +187,7 @@ func andContainersInRange(a, b *Bitmap, ai, aj int, optBuf []uint16, useGallopB 
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			if c := containerAndAlt(ac, bc, optBuf, runInline); len(c) > 0 {
+			if c := containerAndAlt(ac, bc, optBuf, runInline|runLazy); len(c) > 0 {
 				panic("new container not expected in And inline mode")
 			}
 			ai++
@@ -571,7 +571,7 @@ func orContainersInRange(a, b *Bitmap, bi, bj int, useGallopA bool) {
 			ac := a.getContainer(aoff)
 			boff := b.keys.val(bi)
 			bc := b.getContainer(boff)
-			if c := containerOrAlt(ac, bc, buf, runInline); len(c) > 0 {
+			if c := containerOrAlt(ac, bc, buf, runInline|runLazy); len(c) > 0 {
 				// Since buffer is used in containers merge, result container has to be copied
 				// to the bitmap immediately to let buffer be reused in next merge,
 				// contrary to unique containers from bitmap b copied at the end of method execution
@@ -723,7 +723,7 @@ func orContainersInRangeConc(a, b *Bitmap, bi, bj int, useGallopA bool,
 			ac := a.getContainer(off)
 			off = b.keys.val(bi)
 			bc := b.getContainer(off)
-			c := containerOrAlt(ac, bc, buf, runInline)
+			c := containerOrAlt(ac, bc, buf, runInline|runLazy)
 			if clen := len(c); clen > 0 {
 				cc := make([]uint16, clen)
 				copy(cc, c)
@@ -978,7 +978,8 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 	// same container
 	if maxKey == minKey {
 		commonContainer := ra.getContainer(minOffset)
-		card := getCardinality(commonContainer)
+		// card feeds card+newYs, so a lazy header has to be settled first.
+		card := containerCardinality(commonContainer)
 		newYs := maxY - minY
 
 		switch commonContainer[indexType] {
@@ -1027,7 +1028,8 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		requiredContainersCount--
 
 		commonContainer := ra.getContainer(minOffset)
-		card := getCardinality(commonContainer)
+		// card feeds card+newYs, so a lazy header has to be settled first.
+		card := containerCardinality(commonContainer)
 		newYs := maxCardinality - 1 - minY
 
 		switch commonContainer[indexType] {
@@ -1707,7 +1709,7 @@ func buildFoldOrder(
 	for i := 0; i < n; i++ {
 		sum := 0
 		for _, e := range groups[i] {
-			sum += getCardinality(bms[i].data[e.offset:])
+			sum += cardinalityUpperBound(bms[i].data[e.offset:])
 		}
 		cardEst[i] = sum
 		foldOrder[i] = i
