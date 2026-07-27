@@ -62,7 +62,7 @@ func (ra *Bitmap) ToBuffer() []byte {
 	if ra.IsEmpty() {
 		return nil
 	}
-	return toByteSlice(ra.data)
+	return uint16ToByteSliceUnsafe(ra.data)
 }
 
 func (ra *Bitmap) ToBufferWithCopy() []byte {
@@ -71,7 +71,7 @@ func (ra *Bitmap) ToBufferWithCopy() []byte {
 	}
 	buf := make([]uint16, len(ra.data))
 	copy(buf, ra.data)
-	return toByteSlice(buf)
+	return uint16ToByteSliceUnsafe(buf)
 }
 
 func NewBitmap() *Bitmap {
@@ -102,7 +102,7 @@ func initBitmapToBuf(dst *Bitmap, buf []byte) *Bitmap {
 		return initBitmapWithCap(dst, 2, minContainerSize, 0)
 	}
 
-	bufU16 := byteTo16SliceUnsafe(buf)
+	bufU16 := byteToUint16SliceUnsafe(buf)
 	clear(bufU16)
 	initBitmapCore(dst, keysLen, minContainerSize, bufU16)
 	dst._ptr = buf
@@ -125,7 +125,7 @@ func initBitmapWithCap(dst *Bitmap, numKeys, initialContainerSize, additionalCap
 // key-0 container — over buf; every initializer funnels here. Returns dst.
 func initBitmapCore(dst *Bitmap, keysLen, initialContainerSize int, buf []uint16) *Bitmap {
 	*dst = Bitmap{data: buf[:keysLen]}
-	dst.keys = toUint64Slice(dst.data)
+	dst.keys = uint16To64SliceUnsafe(dst.data)
 	dst.keys.setNodeSize(keysLen)
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused
@@ -153,7 +153,7 @@ func (ra *Bitmap) initSpaceForKeys(N int) {
 
 	// The following code is borrowed from setKey.
 	ra.scootRight(curSize, bySize)
-	ra.keys = toUint64Slice(ra.data[:curSize+bySize])
+	ra.keys = uint16To64SliceUnsafe(ra.data[:curSize+bySize])
 	ra.keys.setNodeSize(int(curSize + bySize))
 	assert(1 == ra.keys.numKeys()) // This initialization assumes that the number of keys are 1.
 
@@ -655,7 +655,7 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 func (ra *Bitmap) Reset() {
 	keysLen := calcInitialKeysLen(2)
 	ra.data = ra.data[:keysLen]
-	ra.keys = toUint64Slice(ra.data)
+	ra.keys = uint16To64SliceUnsafe(ra.data)
 	ra.keys.setNodeSize(keysLen)
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused

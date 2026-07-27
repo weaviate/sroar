@@ -19,12 +19,12 @@ func fill(c []uint16, b uint16) {
 
 func TestModify(t *testing.T) {
 	data := make([]uint16, 16)
-	s := toUint64Slice(data)
+	s := uint16To64SliceUnsafe(data)
 	for i := 0; i < len(s); i++ {
 		s[i] = uint64(i)
 	}
 
-	o := toUint64Slice(data)
+	o := uint16To64SliceUnsafe(data)
 	for i := 0; i < len(o); i++ {
 		require.Equal(t, uint64(i), o[i])
 	}
@@ -304,7 +304,7 @@ func TestBulkAdd(t *testing.T) {
 				t.Logf("Added: %d %#x. Added: %v\n", x, x, ra.Set(x))
 				t.Logf("After add. has: %v\n", ra.Contains(x))
 
-				// 				t.Logf("Hex dump of container at offset: %d\n%s\n", off, hex.Dump(toByteSlice(c)))
+				// 				t.Logf("Hex dump of container at offset: %d\n%s\n", off, hex.Dump(uint16ToByteSliceUnsafe(c)))
 				t.FailNow()
 			}
 			continue
@@ -342,7 +342,7 @@ func TestBulkAdd(t *testing.T) {
 	dup := make([]uint16, len(ra.data))
 	copy(dup, ra.data)
 
-	ra2 := FromBuffer(toByteSlice(dup))
+	ra2 := FromBuffer(uint16ToByteSliceUnsafe(dup))
 	require.Equal(t, len(m), ra2.GetCardinality())
 	for x := range m {
 		require.True(t, ra2.Contains(x))

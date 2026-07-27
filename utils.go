@@ -19,7 +19,6 @@ package sroar
 import (
 	"log"
 	"math"
-	"reflect"
 	"unsafe"
 
 	"github.com/pkg/errors"
@@ -60,27 +59,6 @@ func addUint64(a, b uint64) uint64 {
 	return a + b
 }
 
-func toByteSlice(b []uint16) []byte {
-	// reference: https://go101.org/article/unsafe.html
-	var bs []byte
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&bs))
-	hdr.Len = len(b) * 2
-	hdr.Cap = hdr.Len
-	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
-	return bs
-}
-
-// toUint64Slice converts the given byte slice to uint64 slice
-func toUint64Slice(b []uint16) []uint64 {
-	var u64s []uint64
-	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u64s))
-	hdr.Len = len(b) / 4
-	hdr.Cap = hdr.Len
-	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
-	return u64s
-}
-
-
 // Following methods do not make copies, they are pointer-based (unsafe).
 // The caller is responsible to ensure that the input slice does not get garbage collected,
 // deleted or modified while returned slice is hold.
@@ -95,7 +73,12 @@ func uint64To16SliceUnsafe(u64s []uint64) []uint16 {
 	return unsafe.Slice((*uint16)(unsafe.Pointer(&u64s[0])), len(u64s)*4)
 }
 
-// byteTo16SliceUnsafe converts given byte slice to uint16 slice
-func byteTo16SliceUnsafe(b []byte) []uint16 {
+// byteToUint16SliceUnsafe converts given byte slice to uint16 slice
+func byteToUint16SliceUnsafe(b []byte) []uint16 {
 	return unsafe.Slice((*uint16)(unsafe.Pointer(&b[0])), len(b)/2)
+}
+
+// uint16ToByteSliceUnsafe converts given uint16 slice to byte slice
+func uint16ToByteSliceUnsafe(u16s []uint16) []byte {
+	return unsafe.Slice((*byte)(unsafe.Pointer(&u16s[0])), len(u16s)*2)
 }

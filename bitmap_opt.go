@@ -900,7 +900,7 @@ func (src *Bitmap) InitCloneToBuf(dst *Bitmap, buf []byte) *Bitmap {
 	// Copy at the uint16 level into the destination buffer, then trim data
 	// to the used length while keeping the full buffer capacity available
 	// for future growth.
-	copy(byteTo16SliceUnsafe(buf), src.data)
+	copy(byteToUint16SliceUnsafe(buf), src.data)
 	InitFromBufferUnlimited(dst, buf)
 	dst.data = dst.data[:srcLen/2]
 	return dst
@@ -929,7 +929,7 @@ func InitFromBufferUnlimited(dst *Bitmap, buf []byte) *Bitmap {
 		data = buf[:cp-1]
 	}
 
-	du := byteTo16SliceUnsafe(data)
+	du := byteToUint16SliceUnsafe(data)
 	x := uint16To64SliceUnsafe(du[:4])[indexNodeSize]
 	*dst = Bitmap{
 		data: du[:ln/2],
