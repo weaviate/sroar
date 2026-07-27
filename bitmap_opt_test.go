@@ -1215,7 +1215,7 @@ func TestCloneToBuf(t *testing.T) {
 		bm.Set(1)
 		buf := make([]byte, 0, bm.LenInBytes()-1)
 		require.PanicsWithValue(t,
-			fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
+			fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
 			func() { bm.CloneToBuf(buf) })
 	})
 
@@ -2568,7 +2568,7 @@ func TestExpandConditionally(t *testing.T) {
 		}
 
 		numInitialKeys := len(initialKeys)
-		bm := newBitmapWith(
+		bm := initBitmapWithCap(&Bitmap{},
 			1+zeroKey+numInitialKeys+numAdditionalKeys,
 			minContainerSize,
 			(-1+zeroKey+numInitialKeys)*minContainerSize+sizeAdditionalContainers)

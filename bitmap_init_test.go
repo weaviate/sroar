@@ -25,7 +25,7 @@ func TestInitFromBufferUnlimited(t *testing.T) {
 		copy(buf, serialized)
 
 		var dst Bitmap
-		dst.InitFromBufferUnlimited(buf)
+		InitFromBufferUnlimited(&dst, buf)
 		require.Equal(t, FromBufferUnlimited(buf).ToArray(), dst.ToArray())
 	})
 
@@ -34,10 +34,10 @@ func TestInitFromBufferUnlimited(t *testing.T) {
 		b := randomBitmap(3, 200, 10_000)
 
 		var dst Bitmap
-		dst.InitFromBufferUnlimited(a.ToBufferWithCopy())
+		InitFromBufferUnlimited(&dst, a.ToBufferWithCopy())
 		require.Equal(t, a.ToArray(), dst.ToArray())
 
-		dst.InitFromBufferUnlimited(b.ToBufferWithCopy())
+		InitFromBufferUnlimited(&dst, b.ToBufferWithCopy())
 		require.Equal(t, b.ToArray(), dst.ToArray())
 	})
 
@@ -46,7 +46,7 @@ func TestInitFromBufferUnlimited(t *testing.T) {
 		copy(buf, serialized)
 
 		var dst Bitmap
-		dst.InitFromBufferUnlimited(buf)
+		InitFromBufferUnlimited(&dst, buf)
 		require.True(t, dst.Set(999_999_999))
 		require.True(t, dst.Contains(999_999_999))
 	})
@@ -56,18 +56,26 @@ func TestInitFromBufferUnlimited(t *testing.T) {
 		bufB := randomBitmap(8, 100, 10_000).ToBufferWithCopy()
 
 		var dst Bitmap
-		dst.InitFromBufferUnlimited(bufA)
+		InitFromBufferUnlimited(&dst, bufA)
 		require.Same(t, &bufA[0], &dst._ptr[0])
 
-		dst.InitFromBufferUnlimited(bufB)
+		InitFromBufferUnlimited(&dst, bufB)
 		require.Same(t, &bufB[0], &dst._ptr[0])
 	})
 
 	t.Run("tiny buffer falls back to empty bitmap", func(t *testing.T) {
 		var dst Bitmap
-		dst.InitFromBufferUnlimited(make([]byte, 0))
+		InitFromBufferUnlimited(&dst, make([]byte, 0))
 		require.True(t, dst.IsEmpty())
 		require.True(t, dst.Set(42), "fallback bitmap must be mutable")
+	})
+
+	t.Run("tiny buffer fallback allocates only the backing slice", func(t *testing.T) {
+		var dst Bitmap
+		allocs := testing.AllocsPerRun(100, func() {
+			InitFromBufferUnlimited(&dst, make([]byte, 0))
+		})
+		require.Equal(t, 1.0, allocs)
 	})
 }
 
@@ -78,14 +86,14 @@ func TestInitCloneToBuf(t *testing.T) {
 		buf := make([]byte, 0, src.LenInBytes()+1024)
 
 		var dst Bitmap
-		dst.InitCloneToBuf(src, buf)
+		src.InitCloneToBuf(&dst, buf)
 		require.Equal(t, src.ToArray(), dst.ToArray())
 		require.Equal(t, src.CloneToBuf(make([]byte, 0, src.LenInBytes())).ToArray(), dst.ToArray())
 	})
 
 	t.Run("clone is independent of src", func(t *testing.T) {
 		var dst Bitmap
-		dst.InitCloneToBuf(src, make([]byte, 0, src.LenInBytes()+1024))
+		src.InitCloneToBuf(&dst, make([]byte, 0, src.LenInBytes()+1024))
 		dst.Set(999_999_998)
 		require.True(t, dst.Contains(999_999_998))
 		require.False(t, src.Contains(999_999_998))
@@ -97,10 +105,10 @@ func TestInitCloneToBuf(t *testing.T) {
 		buf := make([]byte, 0, max(a.LenInBytes(), b.LenInBytes()))
 
 		var dst Bitmap
-		dst.InitCloneToBuf(a, buf)
+		a.InitCloneToBuf(&dst, buf)
 		require.Equal(t, a.ToArray(), dst.ToArray())
 
-		dst.InitCloneToBuf(b, buf)
+		b.InitCloneToBuf(&dst, buf)
 		require.Equal(t, b.ToArray(), dst.ToArray())
 	})
 
@@ -110,25 +118,43 @@ func TestInitCloneToBuf(t *testing.T) {
 		bufB := make([]byte, 0, a.LenInBytes())
 
 		var dst Bitmap
-		dst.InitCloneToBuf(a, bufA)
+		a.InitCloneToBuf(&dst, bufA)
 		require.Same(t, &bufA[:1][0], &dst._ptr[0])
 
-		dst.InitCloneToBuf(a, bufB)
+		a.InitCloneToBuf(&dst, bufB)
 		require.Same(t, &bufB[:1][0], &dst._ptr[0])
 	})
 
 	t.Run("nil src initializes empty bitmap over buf", func(t *testing.T) {
+		var nilSrc *Bitmap
 		var dst Bitmap
-		dst.InitCloneToBuf(nil, make([]byte, 0, 4096))
+		nilSrc.InitCloneToBuf(&dst, make([]byte, 0, 4096))
 		require.True(t, dst.IsEmpty())
 		require.True(t, dst.Set(7))
 		require.True(t, dst.Contains(7))
 	})
 
+	t.Run("zero-value src initializes empty bitmap over buf", func(t *testing.T) {
+		var src, dst Bitmap
+		src.InitCloneToBuf(&dst, make([]byte, 0, 4096))
+		require.True(t, dst.IsEmpty())
+		require.True(t, dst.Set(7))
+		require.True(t, dst.Contains(7))
+	})
+
+	t.Run("nil src with tiny buffer allocates only the backing slice", func(t *testing.T) {
+		var nilSrc *Bitmap
+		var dst Bitmap
+		allocs := testing.AllocsPerRun(100, func() {
+			nilSrc.InitCloneToBuf(&dst, make([]byte, 0))
+		})
+		require.Equal(t, 1.0, allocs)
+	})
+
 	t.Run("too-small buffer panics", func(t *testing.T) {
 		var dst Bitmap
 		require.Panics(t, func() {
-			dst.InitCloneToBuf(src, make([]byte, 0, 8))
+			src.InitCloneToBuf(&dst, make([]byte, 0, 8))
 		})
 	})
 }
