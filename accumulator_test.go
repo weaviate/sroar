@@ -199,6 +199,24 @@ func TestAccumulatorOrSkipsEmptyContainers(t *testing.T) {
 	require.Equal(t, []uint64{1 << 20}, acc.Bitmap().ToArray())
 }
 
+func TestAccumulatorZeroValue(t *testing.T) {
+	var acc Accumulator
+	acc.Or(bitmapOf(1, 100_000))
+	acc.Or(bitmapOf(2))
+	require.Equal(t, []uint64{1, 2, 100_000}, acc.Bitmap().ToArray())
+}
+
+func TestAccumulatorOrUnknownContainerType(t *testing.T) {
+	// FromBuffer adopts arbitrary bytes without validating container type
+	// tags; a tag that is neither array nor bitmap must fail loudly instead
+	// of silently dropping the container's elements from the union.
+	bm := bitmapOf(5)
+	bm.getContainer(bm.keys.val(0))[indexType] = typeBitmap + 1
+
+	acc := NewAccumulator()
+	require.Panics(t, func() { acc.Or(bm) })
+}
+
 func TestAccumulatorReset(t *testing.T) {
 	acc := NewAccumulator()
 	acc.Or(bitmapOf(1, 2, 3))
@@ -287,25 +305,25 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		require.Equal(t, &buf[0], &got._ptr[0])
 	})
 
-	t.Run("too small falls back to heap", func(t *testing.T) {
+	t.Run("too small panics", func(t *testing.T) {
 		acc := build()
-		got := acc.BitmapToBuf(func(int) []byte { return make([]byte, 16) })
-		require.Equal(t, want, got.ToArray())
-		require.Nil(t, got._ptr)
+		require.Panics(t, func() {
+			acc.BitmapToBuf(func(int) []byte { return make([]byte, 16) })
+		})
 	})
 
-	t.Run("one uint16 short falls back to heap", func(t *testing.T) {
+	t.Run("one uint16 short panics leaving the buffer untouched", func(t *testing.T) {
 		// The requested size fits exactly (see "result occupies exactly the
-		// requested size"); one uint16 less must fall back and leave the
-		// buffer untouched.
+		// requested size"); one uint16 less must panic without writing to
+		// the buffer.
 		acc := build()
 		var buf []byte
-		got := acc.BitmapToBuf(func(n int) []byte {
-			buf = make([]byte, n-2)
-			return buf
+		require.Panics(t, func() {
+			acc.BitmapToBuf(func(n int) []byte {
+				buf = make([]byte, n-2)
+				return buf
+			})
 		})
-		require.Equal(t, want, got.ToArray())
-		require.Nil(t, got._ptr)
 		require.Equal(t, make([]byte, len(buf)), buf)
 	})
 
@@ -334,7 +352,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 	t.Run("result occupies exactly the requested size without key 0", func(t *testing.T) {
 		// A union that never touches key 0 keeps the pre-created key-0
 		// container as a minimum-size placeholder that is still part of the
-		// serialized slab.
+		// serialized bytes.
 		acc := NewAccumulator()
 		for i := 1; i <= 40; i++ {
 			acc.Or(bitmapOf(uint64(i) << 16))
@@ -346,7 +364,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 	})
 
 	t.Run("dirty buffer does not leak into serialized bytes", func(t *testing.T) {
-		// ToBuffer serializes the whole data slab, so every byte of the
+		// ToBuffer serializes the whole data array, so every byte of the
 		// result — including array-container padding — must be independent
 		// of the buffer's prior contents.
 		serialize := func(fill byte) []byte {
@@ -360,6 +378,70 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 			}).ToBufferWithCopy()
 		}
 		require.Equal(t, serialize(0x00), serialize(0xFF))
+	})
+
+	t.Run("dirty buffer does not leak without key 0", func(t *testing.T) {
+		// The key-0 placeholder is the one container the build never
+		// overwrites — its up-front clearing alone must keep serialization
+		// deterministic.
+		serialize := func(fill byte) []byte {
+			acc := NewAccumulator()
+			for i := 1; i <= 40; i++ {
+				acc.Or(bitmapOf(uint64(i)<<16 | uint64(i)))
+			}
+			return acc.BitmapToBuf(func(n int) []byte {
+				buf := make([]byte, n)
+				for i := range buf {
+					buf[i] = fill
+				}
+				return buf
+			}).ToBufferWithCopy()
+		}
+		require.Equal(t, serialize(0x00), serialize(0xFF))
+	})
+
+	t.Run("odd-capacity buffer", func(t *testing.T) {
+		acc := build()
+		var buf []byte
+		got := acc.BitmapToBuf(func(n int) []byte {
+			buf = make([]byte, n, n+1) // odd spare byte the bitmap cannot use
+			return buf
+		})
+		require.Equal(t, want, got.ToArray())
+		require.Equal(t, &buf[0], &got._ptr[0])
+	})
+
+	t.Run("nil buffer panics", func(t *testing.T) {
+		acc := build()
+		require.Panics(t, func() {
+			acc.BitmapToBuf(func(int) []byte { return nil })
+		})
+	})
+
+	t.Run("get using the accumulator panics", func(t *testing.T) {
+		// A deposit inside get would desync the staged bits from the layout
+		// snapshot the build was sized with, silently corrupting the result.
+		acc := NewAccumulator()
+		acc.Or(bitmapOf(100, 200, 300))
+		require.PanicsWithValue(t,
+			"Accumulator: mutated during build — get must not use the accumulator",
+			func() {
+				acc.BitmapToBuf(func(n int) []byte {
+					acc.Or(bitmapOf(1, 2, 3))
+					return make([]byte, n)
+				})
+			})
+	})
+
+	t.Run("get resetting the accumulator panics", func(t *testing.T) {
+		acc := NewAccumulator()
+		acc.Or(bitmapOf(100, 200, 300))
+		require.Panics(t, func() {
+			acc.BitmapToBuf(func(n int) []byte {
+				acc.Reset()
+				return make([]byte, n)
+			})
+		})
 	})
 
 	t.Run("ToBuffer FromBuffer round-trip", func(t *testing.T) {
@@ -419,20 +501,19 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 		require.Equal(t, &buf[0], &got._ptr[0])
 	})
 
-	t.Run("too small sets the struct to a heap-built union", func(t *testing.T) {
+	t.Run("too small panics", func(t *testing.T) {
 		var bm Bitmap
 		acc := NewAccumulator()
 		acc.Or(a)
-		got := acc.InitBitmapToBuf(func(int) (*Bitmap, []byte) {
-			return &bm, make([]byte, 16)
+		require.Panics(t, func() {
+			acc.InitBitmapToBuf(func(int) (*Bitmap, []byte) {
+				return &bm, make([]byte, 16)
+			})
 		})
-		require.Same(t, &bm, got)
-		require.Equal(t, a.ToArray(), got.ToArray())
-		require.Nil(t, got._ptr)
 	})
 
 	t.Run("dirty buffer serializes deterministically at exact size", func(t *testing.T) {
-		// Same guarantees the BitmapToBuf subtests pin, routed directly
+		// Same guarantees the BitmapToBuf subtests assert, routed directly
 		// through the Init path: byte-deterministic serialization filling
 		// the buffer exactly. The union holds array containers, so padding
 		// tails are exercised.

@@ -29,14 +29,10 @@ func BenchmarkOr(b *testing.B) {
 		}
 		return sources
 	}
-	makeLarge := func(rng *rand.Rand, n, card int, universe uint64) []*Bitmap {
+	makeLarge := func(seed int64, n, card int, universe uint64) []*Bitmap {
 		sources := make([]*Bitmap, n)
 		for i := range sources {
-			bm := NewBitmap()
-			for j := 0; j < card; j++ {
-				bm.Set(rng.Uint64() % universe)
-			}
-			sources[i] = bm
+			sources[i] = randomBitmap(seed+int64(i), card, universe)
 		}
 		return sources
 	}
@@ -49,10 +45,13 @@ func BenchmarkOr(b *testing.B) {
 		{"tiny_10k_u300k", makeTiny(rand.New(rand.NewSource(2)), 10_000, 300_000)},
 		{"tiny_100k_u300k", makeTiny(rand.New(rand.NewSource(3)), 100_000, 300_000)},
 		{"tiny_100k_u10m", makeTiny(rand.New(rand.NewSource(4)), 100_000, 10_000_000)},
+		{"tiny_100k_u100m", makeTiny(rand.New(rand.NewSource(8)), 100_000, 100_000_000)},
+		{"tiny_100k_u300m", makeTiny(rand.New(rand.NewSource(9)), 100_000, 300_000_000)},
+		{"tiny_100k_u1b", makeTiny(rand.New(rand.NewSource(10)), 100_000, 1_000_000_000)},
 		{"mixed_10k_tiny_5_large_u10m", append(
 			makeTiny(rand.New(rand.NewSource(5)), 10_000, 10_000_000),
-			makeLarge(rand.New(rand.NewSource(6)), 5, 200_000, 10_000_000)...)},
-		{"large_8x1m_u10m", makeLarge(rand.New(rand.NewSource(7)), 8, 1_000_000, 10_000_000)},
+			makeLarge(6, 5, 200_000, 10_000_000)...)},
+		{"large_8x1m_u10m", makeLarge(7, 8, 1_000_000, 10_000_000)},
 	}
 
 	strategies := []struct {
