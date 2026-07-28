@@ -1198,15 +1198,16 @@ func TestCloneToBuf(t *testing.T) {
 		require.Equal(t, clonedCap, cloned.capInBytes())
 
 		// Verify that expansion reuses the pre-allocated buffer without
-		// allocating new memory. CloneToBuf itself allocates exactly one
-		// Bitmap struct; the Set that triggers data expansion must not
-		// allocate since the buffer has sufficient capacity.
+		// allocating new memory. CloneToBuf allocates at most its one Bitmap
+		// struct (zero when it inlines and the struct stays on the stack);
+		// the Set that triggers data expansion must not allocate since the
+		// buffer has sufficient capacity.
 		allocs := testing.AllocsPerRun(10, func() {
 			c := bm.CloneToBuf(buf)
 			c.Set(1 + uint64(maxCardinality))
 		})
-		require.Equal(t, float64(1), allocs,
-			"only the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
+		require.LessOrEqual(t, allocs, float64(1),
+			"at most the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
 	})
 
 	t.Run("panic on smaller buffer size", func(t *testing.T) {
@@ -1214,7 +1215,7 @@ func TestCloneToBuf(t *testing.T) {
 		bm.Set(1)
 		buf := make([]byte, 0, bm.LenInBytes()-1)
 		require.PanicsWithValue(t,
-			fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
+			fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
 			func() { bm.CloneToBuf(buf) })
 	})
 
@@ -2567,7 +2568,7 @@ func TestExpandConditionally(t *testing.T) {
 		}
 
 		numInitialKeys := len(initialKeys)
-		bm := newBitmapWith(
+		bm := initBitmapWithCap(&Bitmap{},
 			1+zeroKey+numInitialKeys+numAdditionalKeys,
 			minContainerSize,
 			(-1+zeroKey+numInitialKeys)*minContainerSize+sizeAdditionalContainers)

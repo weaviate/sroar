@@ -872,35 +872,55 @@ func (ra *Bitmap) capInBytes() int {
 }
 
 func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
-	if ra == nil {
-		return NewBitmapToBuf(buf)
+	return ra.InitCloneToBuf(&Bitmap{}, buf)
+}
+
+// InitCloneToBuf re-initializes dst over buf with a clone of src — the
+// in-place equivalent of CloneToBuf. dst's previous content is discarded,
+// never freed. A nil or zero-value src yields an empty bitmap over buf; a
+// buf too small for the clone panics, too small for even the empty bitmap
+// falls back to a heap allocation. Returns dst.
+func (src *Bitmap) InitCloneToBuf(dst *Bitmap, buf []byte) *Bitmap {
+	// Nothing to clone — parsing an empty src would fail.
+	srcLen := src.LenInBytes()
+	if srcLen == 0 {
+		return initBitmapToBuf(dst, buf)
 	}
 
 	// Use full capacity, rounded down to an even number of bytes since
 	// the bitmap operates on []uint16 (2 bytes per element).
 	buf = buf[:cap(buf)/2*2]
 
-	srcLen := ra.LenInBytes()
 	if srcLen > len(buf) {
-		panic(fmt.Sprintf("CloneToBuf: buf too small: need at least %d bytes, got %d", srcLen, cap(buf)))
+		// Report cap: it matches what the caller passed, and with srcLen
+		// always even the rounded-down len could only confuse.
+		panic(fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", srcLen, cap(buf)))
 	}
 
 	// Copy at the uint16 level into the destination buffer, then trim data
 	// to the used length while keeping the full buffer capacity available
 	// for future growth.
-	copy(byteTo16SliceUnsafe(buf), ra.data)
-	bm := FromBuffer(buf)
-	bm.data = bm.data[:srcLen/2]
-	return bm
+	copy(byteToUint16SliceUnsafe(buf), src.data)
+	InitFromBufferUnlimited(dst, buf)
+	dst.data = dst.data[:srcLen/2]
+	return dst
 }
 
 // FromBufferUnlimited returns a pointer to bitmap corresponding to the given buffer.
 // Entire buffer capacity is utlized for future bitmap modifications and expansions.
 func FromBufferUnlimited(buf []byte) *Bitmap {
+	return InitFromBufferUnlimited(&Bitmap{}, buf)
+}
+
+// InitFromBufferUnlimited re-points dst at buf — the in-place equivalent of
+// FromBufferUnlimited. dst's previous content is discarded, never freed. A
+// buf too small for even the empty bitmap (under 8 bytes) falls back to a
+// heap allocation. Returns dst.
+func InitFromBufferUnlimited(dst *Bitmap, buf []byte) *Bitmap {
 	ln := len(buf)
 	assert(ln%2 == 0)
 	if len(buf) < 8 {
-		return NewBitmap()
+		return initBitmapWithCap(dst, 2, minContainerSize, 0)
 	}
 
 	cp := cap(buf)
@@ -909,13 +929,14 @@ func FromBufferUnlimited(buf []byte) *Bitmap {
 		data = buf[:cp-1]
 	}
 
-	du := byteTo16SliceUnsafe(data)
+	du := byteToUint16SliceUnsafe(data)
 	x := uint16To64SliceUnsafe(du[:4])[indexNodeSize]
-	return &Bitmap{
+	*dst = Bitmap{
 		data: du[:ln/2],
 		_ptr: buf, // Keep a hold of data, otherwise GC would do its thing.
 		keys: uint16To64SliceUnsafe(du[:x]),
 	}
+	return dst
 }
 
 // Prefill creates bitmap prefilled with elements [0-maxX]
@@ -924,7 +945,7 @@ func Prefill(maxX uint64) *Bitmap {
 	// create additional container for remaining values
 	// (or reserve space for new one if there are not any remaining)
 	// +1 additional key to avoid keys expanding (there should always be 1 spare)
-	bm := newBitmapWith(int(containersCount)+1+1, maxContainerSize, int(containersCount)*maxContainerSize)
+	bm := initBitmapWithCap(&Bitmap{}, int(containersCount)+1+1, maxContainerSize, int(containersCount)*maxContainerSize)
 	bm.prefill(containersCount, remainingCount)
 	return bm
 }
@@ -949,11 +970,11 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		minimalKeysLen := calcInitialKeysLen(minimalContainersCount + 1)
 		minimalLen := minimalKeysLen + minimalContainersCount*maxContainerSize
 
-		var bm *Bitmap
+		bm := &Bitmap{}
 		if minimalLen <= cap(ra.data) {
-			bm = newBitampToBuf(minimalKeysLen, maxContainerSize, ra.data)
+			initBitmapCore(bm, minimalKeysLen, maxContainerSize, ra.data)
 		} else {
-			bm = newBitmapWith(int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
+			initBitmapWithCap(bm, int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
 		}
 		bm.prefill(maxContainersCount, maxRemainingCount)
 		ra.data = bm.data
