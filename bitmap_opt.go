@@ -264,6 +264,18 @@ func compactedArraySize(n int) int {
 	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
 }
 
+// containerSizeForCard returns the size and type of the container that
+// materializes cardinality n within one key range: a compacted array up to
+// 2048 values, a bitmap container above. Shared by the exact-size
+// constructors (FromSortedList, Accumulator) so identical content gets
+// identical container layout regardless of which built it.
+func containerSizeForCard(n int) (sz uint16, typ uint16) {
+	if n <= 2048 {
+		return uint16(compactedArraySize(n)), typeArray
+	}
+	return maxContainerSize, typeBitmap
+}
+
 // andNotResultSize returns the uint16s the result for source ac occupies in
 // res at cardinality n. A bitmap source at/above the threshold stays a
 // maxContainerSize bitmap, so andNotResultCard's clamp there is harmless.
