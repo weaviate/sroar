@@ -32,6 +32,17 @@ func bitmapOf(vals ...uint64) *Bitmap {
 	return bm
 }
 
+// accConstructors runs the Or/AndNot tables under the serial, capped, and
+// uncapped accumulator variants.
+var accConstructors = []struct {
+	name   string
+	newAcc func() *Accumulator
+}{
+	{"serial", NewAccumulator},
+	{"conc", func() *Accumulator { return NewAccumulator().WithConc(4) }},
+	{"unbounded", func() *Accumulator { return NewAccumulator().WithConc(0) }},
+}
+
 func TestAccumulator(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 
@@ -167,36 +178,96 @@ func TestAccumulator(t *testing.T) {
 				return []*Bitmap{bitmapOf(vals...), bitmapOf(1, 2, 3)}
 			},
 		},
+		{
+			name: "wide source spanning many ranges",
+			sources: func() []*Bitmap {
+				// A single source with hundreds of containers: the shape
+				// that engages the concurrent deposit path.
+				vals := make([]uint64, 0, 200*100)
+				for k := 0; k < 200; k++ {
+					for j := 0; j < 100; j++ {
+						vals = append(vals, uint64(k)<<16|uint64(j*13))
+					}
+				}
+				return []*Bitmap{bitmapOf(vals...), bitmapOf(42)}
+			},
+		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sources := tt.sources()
-			want := refUnion(sources)
+	for _, c := range accConstructors {
+		t.Run(c.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					sources := tt.sources()
+					want := refUnion(sources)
 
-			acc := NewAccumulator()
-			for _, s := range sources {
-				acc.Or(s)
+					acc := c.newAcc()
+					for _, s := range sources {
+						acc.Or(s)
+					}
+					got := acc.Bitmap()
+
+					require.Equal(t, len(want), got.GetCardinality())
+					require.Equal(t, want, got.ToArray())
+				})
 			}
-			got := acc.Bitmap()
-
-			require.Equal(t, len(want), got.GetCardinality())
-			require.Equal(t, want, got.ToArray())
 		})
 	}
 }
 
 func TestAccumulatorOrSkipsEmptyContainers(t *testing.T) {
 	// Removing every element of a container leaves a zero-cardinality
-	// container inside a non-empty bitmap; Or must skip it rather than
-	// stage its range.
-	bm := bitmapOf(5, 1<<20)
-	bm.Remove(5)
+	// container inside a non-empty bitmap; Or must not stage its range. A
+	// source whose containers were ALL emptied spans enough ranges to
+	// engage the concurrent path, yet must stage nothing.
+	tests := []struct {
+		name     string
+		bm       func() *Bitmap
+		wantKeys int
+		want     []uint64
+	}{
+		{
+			name: "one emptied container",
+			bm: func() *Bitmap {
+				bm := bitmapOf(5, 1<<20)
+				bm.Remove(5)
+				return bm
+			},
+			wantKeys: 1,
+			want:     []uint64{1 << 20},
+		},
+		{
+			name: "all containers emptied wide source",
+			bm: func() *Bitmap {
+				vals := make([]uint64, 0, 100)
+				for k := 0; k < 100; k++ {
+					vals = append(vals, uint64(k)<<16|5)
+				}
+				bm := bitmapOf(vals...)
+				for _, v := range vals {
+					bm.Remove(v)
+				}
+				return bm
+			},
+			wantKeys: 0,
+			want:     []uint64{},
+		},
+	}
 
-	acc := NewAccumulator()
-	acc.Or(bm)
-	require.Len(t, acc.keys, 1)
-	require.Equal(t, []uint64{1 << 20}, acc.Bitmap().ToArray())
+	for _, c := range accConstructors {
+		t.Run(c.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					acc := c.newAcc()
+					acc.Or(tt.bm())
+					require.Len(t, acc.keys, tt.wantKeys)
+					got := acc.Bitmap()
+					require.Equal(t, len(tt.want), got.GetCardinality())
+					require.Equal(t, tt.want, got.ToArray())
+				})
+			}
+		})
+	}
 }
 
 func TestAccumulatorZeroValue(t *testing.T) {
@@ -215,6 +286,337 @@ func TestAccumulatorOrUnknownContainerType(t *testing.T) {
 
 	acc := NewAccumulator()
 	require.Panics(t, func() { acc.Or(bm) })
+}
+
+// accOp is one step of an Or/AndNot fold.
+type accOp struct {
+	andNot bool
+	bm     *Bitmap
+}
+
+// refFold computes the expected result of applying ops in order, entirely
+// independent of any sroar merge code.
+func refFold(ops []accOp) []uint64 {
+	seen := map[uint64]struct{}{}
+	for _, op := range ops {
+		if op.bm == nil {
+			continue
+		}
+		for _, v := range op.bm.ToArray() {
+			if op.andNot {
+				delete(seen, v)
+			} else {
+				seen[v] = struct{}{}
+			}
+		}
+	}
+	out := make([]uint64, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func TestAccumulatorAndNot(t *testing.T) {
+	rng := rand.New(rand.NewSource(23))
+
+	randomBitmapOf := func(n int, universe uint64) *Bitmap {
+		vals := make([]uint64, n)
+		for i := range vals {
+			vals[i] = rng.Uint64() % universe
+		}
+		return bitmapOf(vals...)
+	}
+
+	spread2049 := func() *Bitmap {
+		vals := make([]uint64, 2049)
+		for i := range vals {
+			vals[i] = uint64(i) * 2
+		}
+		return bitmapOf(vals...)
+	}
+
+	tests := []struct {
+		name string
+		ops  func() []accOp
+	}{
+		{
+			name: "subtract from array-staged range",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(1, 2, 3, 100_000)},
+					{andNot: true, bm: bitmapOf(2, 100_000)},
+				}
+			},
+		},
+		{
+			name: "subtract crosses the array-bitmap cutoff",
+			ops: func() []accOp {
+				// 2049 staged values become a bitmap container; removing one
+				// brings the build back under the cutoff to an array container.
+				return []accOp{
+					{bm: spread2049()},
+					{andNot: true, bm: bitmapOf(0)},
+				}
+			},
+		},
+		{
+			name: "subtract bitmap-container subtrahend",
+			ops: func() []accOp {
+				// A dense 5000-value subtrahend is a bitmap-type container,
+				// exercising the word-wise clear in depositAndNot.
+				or := make([]uint64, 2500)
+				for i := range or {
+					or[i] = uint64(i) * 3
+				}
+				sub := make([]uint64, 5000)
+				for i := range sub {
+					sub[i] = uint64(i)
+				}
+				return []accOp{{bm: bitmapOf(or...)}, {andNot: true, bm: bitmapOf(sub...)}}
+			},
+		},
+		{
+			name: "subtract untouched ranges is a no-op",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(5)},
+					{andNot: true, bm: bitmapOf(1<<20|3, 1<<40)},
+				}
+			},
+		},
+		{
+			name: "subtract everything",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(1, 2, 3, 1<<20, 1<<40)},
+					{andNot: true, bm: bitmapOf(1, 2, 3, 1<<20, 1<<40)},
+				}
+			},
+		},
+		{
+			name: "andnot before any or yields empty",
+			ops: func() []accOp {
+				return []accOp{{andNot: true, bm: bitmapOf(1, 2, 3)}}
+			},
+		},
+		{
+			name: "nil and empty sources",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(7)},
+					{andNot: true, bm: nil},
+					{andNot: true, bm: NewBitmap()},
+				}
+			},
+		},
+		{
+			name: "re-add after subtract",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(7, 100_000)},
+					{andNot: true, bm: bitmapOf(7, 100_000)},
+					{bm: bitmapOf(7)},
+				}
+			},
+		},
+		{
+			name: "top key range",
+			ops: func() []accOp {
+				return []accOp{
+					{bm: bitmapOf(math.MaxUint64, math.MaxUint64-1, 0)},
+					{andNot: true, bm: bitmapOf(math.MaxUint64, 0)},
+				}
+			},
+		},
+		{
+			name: "interleaved source layers",
+			ops: func() []accOp {
+				// The segment-fold shape: per layer, subtract its deletions,
+				// then deposit its additions.
+				ops := make([]accOp, 0, 20)
+				for i := 0; i < 10; i++ {
+					ops = append(ops,
+						accOp{andNot: true, bm: randomBitmapOf(1_000, 1_000_000)},
+						accOp{bm: randomBitmapOf(1_000, 1_000_000)},
+					)
+				}
+				return ops
+			},
+		},
+		{
+			name: "wide subtract from wide accumulator",
+			ops: func() []accOp {
+				// Hundreds of overlapping ranges on both sides: the shape
+				// that engages the concurrent subtract path.
+				or := make([]uint64, 0, 300)
+				sub := make([]uint64, 0, 200)
+				for k := 0; k < 300; k++ {
+					or = append(or, uint64(k)<<16|7)
+				}
+				for k := 50; k < 250; k++ {
+					sub = append(sub, uint64(k)<<16|7)
+				}
+				return []accOp{{bm: bitmapOf(or...)}, {andNot: true, bm: bitmapOf(sub...)}}
+			},
+		},
+		{
+			name: "gallop over wide source",
+			ops: func() []accOp {
+				// Narrow accumulator, >1000-range source: the walk advances
+				// through the source side exponentially.
+				sub := make([]uint64, 0, 1200)
+				for k := 0; k < 1200; k++ {
+					sub = append(sub, uint64(k)<<16|3)
+				}
+				return []accOp{
+					{bm: bitmapOf(5<<16|3, 500<<16|3, 900<<16|3, 900<<16|4)},
+					{andNot: true, bm: bitmapOf(sub...)},
+				}
+			},
+		},
+		{
+			name: "gallop over wide accumulator",
+			ops: func() []accOp {
+				// >1000-range accumulator, narrow source: the walk advances
+				// through the accumulator side exponentially.
+				or := make([]uint64, 0, 1200)
+				for k := 0; k < 1200; k++ {
+					or = append(or, uint64(k)<<16|3)
+				}
+				return []accOp{
+					{bm: bitmapOf(or...)},
+					{andNot: true, bm: bitmapOf(5<<16|3, 900<<16|3)},
+				}
+			},
+		},
+	}
+
+	for _, c := range accConstructors {
+		t.Run(c.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					ops := tt.ops()
+					want := refFold(ops)
+
+					acc := c.newAcc()
+					for _, op := range ops {
+						if op.andNot {
+							acc.AndNot(op.bm)
+						} else {
+							acc.Or(op.bm)
+						}
+					}
+					got := acc.Bitmap()
+
+					require.Equal(t, len(want), got.GetCardinality())
+					require.Equal(t, want, got.ToArray())
+				})
+			}
+		})
+	}
+}
+
+func TestAccumulatorAndNotEmptiedContainerClearsNothing(t *testing.T) {
+	// Removing every element of a subtrahend container leaves a
+	// zero-cardinality container; the staged bits of that range must
+	// survive the subtraction untouched.
+	sub := bitmapOf(5, 1<<20)
+	sub.Remove(1 << 20)
+
+	acc := NewAccumulator()
+	acc.Or(bitmapOf(5, 1<<20))
+	acc.AndNot(sub)
+	require.Equal(t, []uint64{1 << 20}, acc.Bitmap().ToArray())
+}
+
+func TestAccumulatorAndNotSerializationRoundTrip(t *testing.T) {
+	// A result shaped by AndNot — an emptied key-0 container and a fully
+	// vanished range — must serialize into bytes FromBuffer reads back
+	// identically, even from a dirty pooled buffer.
+	acc := NewAccumulator()
+	acc.Or(bitmapOf(0, 1, 2, 1<<20, 1<<20|1, 1<<40))
+	acc.AndNot(bitmapOf(0, 1, 2, 1<<40))
+	want := []uint64{1 << 20, 1<<20 | 1}
+
+	serialized := acc.BitmapToBuf(func(n int) []byte {
+		buf := make([]byte, n)
+		for i := range buf {
+			buf[i] = 0xFF
+		}
+		return buf
+	}).ToBufferWithCopy()
+	require.Equal(t, want, FromBuffer(serialized).ToArray())
+}
+
+func TestAccumulatorAndNotUnknownContainerType(t *testing.T) {
+	// Same contract as Or: a container type tag that is neither array nor
+	// bitmap must fail loudly instead of silently leaving elements behind.
+	bm := bitmapOf(5)
+	bm.getContainer(bm.keys.val(0))[indexType] = typeBitmap + 1
+
+	acc := NewAccumulator()
+	acc.Or(bitmapOf(5))
+	require.Panics(t, func() { acc.AndNot(bm) })
+}
+
+func TestAccumulatorAndNotCreatesNoBlocks(t *testing.T) {
+	// Subtracting can never grow the accumulator: ranges it never touched
+	// must not get a staging block allocated just to clear bits in it.
+	acc := NewAccumulator()
+	acc.Or(bitmapOf(5))
+	require.Len(t, acc.keys, 1)
+	acc.AndNot(bitmapOf(5, 1<<20, 1<<40))
+	require.Len(t, acc.keys, 1)
+	require.Equal(t, 0, acc.Bitmap().GetCardinality())
+}
+
+func TestAccumulatorWithConcRetuning(t *testing.T) {
+	// A pooled accumulator is retuned between uses: WithConc may be called
+	// between calls and the cap survives Reset.
+	wide := func() *Bitmap {
+		vals := make([]uint64, 0, 100)
+		for k := 0; k < 100; k++ {
+			vals = append(vals, uint64(k)<<16|9)
+		}
+		return bitmapOf(vals...)
+	}
+
+	acc := NewAccumulator()
+	acc.Or(wide())
+	require.Equal(t, 100, acc.Bitmap().GetCardinality())
+
+	acc.Reset()
+	acc.WithConc(4)
+	acc.Or(wide())
+	acc.AndNot(wide())
+	require.Equal(t, 0, acc.Bitmap().GetCardinality())
+
+	acc.Reset()
+	require.Equal(t, 4, acc.maxConc)
+}
+
+func TestAccumulatorConcCap(t *testing.T) {
+	// calcConcurrency reads a cap of 0 as "no limit", so the translation
+	// must keep the never-configured accumulator serial while explicit
+	// WithConc(<=0) lifts the cap.
+	tests := []struct {
+		name string
+		acc  func() *Accumulator
+		want int
+	}{
+		{"zero value", func() *Accumulator { return &Accumulator{} }, 1},
+		{"WithConc(0)", func() *Accumulator { return NewAccumulator().WithConc(0) }, 0},
+		{"WithConc(-3)", func() *Accumulator { return NewAccumulator().WithConc(-3) }, 0},
+		{"WithConc(1)", func() *Accumulator { return NewAccumulator().WithConc(1) }, 1},
+		{"WithConc(8)", func() *Accumulator { return NewAccumulator().WithConc(8) }, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.acc().concCap())
+		})
+	}
 }
 
 func TestAccumulatorReset(t *testing.T) {
@@ -433,6 +835,19 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 			})
 	})
 
+	t.Run("get subtracting from the accumulator panics", func(t *testing.T) {
+		acc := NewAccumulator()
+		acc.Or(bitmapOf(100, 200, 300))
+		require.PanicsWithValue(t,
+			"Accumulator: mutated during build — get must not use the accumulator",
+			func() {
+				acc.BitmapToBuf(func(n int) []byte {
+					acc.AndNot(bitmapOf(100))
+					return make([]byte, n)
+				})
+			})
+	})
+
 	t.Run("get resetting the accumulator panics", func(t *testing.T) {
 		acc := NewAccumulator()
 		acc.Or(bitmapOf(100, 200, 300))
@@ -538,6 +953,7 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 
 	t.Run("warm accumulator with pooled memory allocates nothing", func(t *testing.T) {
 		sources := []*Bitmap{bitmapOf(1, 2, 3), bitmapOf(70_000), bitmapOf(1 << 33)}
+		sub := bitmapOf(2, 70_000)
 		var bm Bitmap
 		buf := make([]byte, 4096)
 		get := func(int) (*Bitmap, []byte) { return &bm, buf }
@@ -548,6 +964,7 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 			for _, s := range sources {
 				acc.Or(s)
 			}
+			acc.AndNot(sub)
 			acc.InitBitmapToBuf(get)
 		})
 		require.Zero(t, allocs)
