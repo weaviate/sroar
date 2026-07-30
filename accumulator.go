@@ -1,7 +1,6 @@
 package sroar
 
 import (
-	"fmt"
 	"math/bits"
 	"slices"
 )
@@ -230,24 +229,7 @@ func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte
 	if acc.gen != gen {
 		panic("Accumulator: mutated during build — get must not use the accumulator")
 	}
-	// Same even-capacity view as NewBitmapToBuf: the bitmap operates on
-	// []uint16 (2 bytes per element).
-	buf = buf[:cap(buf)/2*2]
-	if len(buf)/2 < need {
-		// Report cap: it matches what the caller passed, and with need*2
-		// always even the rounded-down len could only confuse.
-		panic(fmt.Sprintf("Accumulator.InitBitmapToBuf: buf too small: need %d bytes, got %d", need*2, cap(buf)))
-	}
-	bufU16 := byteToUint16SliceUnsafe(buf)
-
-	// Pooled buffers arrive dirty. The build writes every byte the result
-	// exposes — container headers and payloads in full, array-container
-	// padding cleared in buildInto — except the keys node's unused slots,
-	// which are cleared here so the serialized form stays deterministic.
-	clear(bufU16[:keysLen])
-
-	initBitmapCore(dst, keysLen, sizeInitial, bufU16)
-	dst._ptr = buf // Keep a GC reference to buf, mirroring NewBitmapToBuf.
+	initBitmapToBufExact("Accumulator.InitBitmapToBuf", dst, buf, keysLen, sizeInitial, need)
 	acc.buildInto(dst, cards)
 	return dst
 }

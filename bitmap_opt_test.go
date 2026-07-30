@@ -3897,3 +3897,317 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 		require.Equal(t, expected.ToArray(), got.ToArray())
 	})
 }
+
+func TestFromSortedList(t *testing.T) {
+	rnd := rand.New(rand.NewSource(1724861525311))
+
+	genSeq := func(n int, stride uint64) []uint64 {
+		vals := make([]uint64, n)
+		for i := range vals {
+			vals[i] = uint64(i) * stride
+		}
+		return vals
+	}
+	genRandom := func(n int, max int64) []uint64 {
+		unique := map[uint64]struct{}{}
+		for len(unique) < n {
+			unique[uint64(rnd.Int63n(max))] = struct{}{}
+		}
+		vals := make([]uint64, 0, n)
+		for v := range unique {
+			vals = append(vals, v)
+		}
+		slices.Sort(vals)
+		return vals
+	}
+
+	testCases := map[string][]uint64{
+		"empty":                         nil,
+		"single value":                  {7},
+		"few values in key 0":           {1, 2, 3},
+		"container boundaries":          {1, 2, 3, 1 << 20, 1<<20 + 1, 1 << 40},
+		"not starting at key 0":         {1 << 20, 1<<20 + 5, 1 << 33},
+		"array/bitmap threshold 2048":   genSeq(2048, 3),
+		"array/bitmap threshold 2049":   genSeq(2049, 3),
+		"one full container":            genSeq(65536, 1),
+		"dense across containers":       genSeq(1_000_000, 1),
+		"sparse arrays":                 genSeq(100_000, 1000),
+		"one value per container":       genSeq(1_000, 1<<16),
+		"random":                        genRandom(50_000, 1<<40),
+		"max uint64 values":             {1, math.MaxUint64 - 1, math.MaxUint64},
+		"last value of first container": {65534, 65535, 65536},
+	}
+
+	for name, vals := range testCases {
+		t.Run(name, func(t *testing.T) {
+			expected := NewBitmap()
+			for _, v := range vals {
+				expected.Set(v)
+			}
+			bm := FromSortedList(vals)
+			require.Equal(t, expected.GetCardinality(), bm.GetCardinality())
+			require.Equal(t, expected.ToArray(), bm.ToArray())
+
+			// Exact-size constructors share their layout: same content must
+			// serialize to the same bytes as the Accumulator build.
+			acc := NewAccumulator()
+			acc.Or(bm)
+			require.Equal(t, acc.Bitmap().ToBuffer(), bm.ToBuffer())
+
+			// The serialized form must survive a deserialize cycle.
+			rt := FromBuffer(bm.ToBuffer())
+			require.Equal(t, expected.GetCardinality(), rt.GetCardinality())
+			require.Equal(t, expected.ToArray(), rt.ToArray())
+
+			// ToBuf must produce the identical bitmap from a dirty,
+			// oversized buffer.
+			var askedBytes int
+			bmBuf := FromSortedListToBuf(vals, func(sizeBytes int) []byte {
+				askedBytes = sizeBytes
+				buf := make([]byte, sizeBytes+100)
+				for i := range buf {
+					buf[i] = 0xff
+				}
+				return buf
+			})
+			if !bm.IsEmpty() {
+				// The requested size is exactly what the result serializes to.
+				require.Equal(t, len(bm.ToBuffer()), askedBytes)
+			} else {
+				// Empty input still asks for a buffer (the minimal live
+				// bitmap); its exact size is an implementation detail.
+				require.Positive(t, askedBytes)
+			}
+			require.Equal(t, bm.GetCardinality(), bmBuf.GetCardinality())
+			require.Equal(t, bm.ToBuffer(), bmBuf.ToBuffer())
+		})
+	}
+}
+
+func TestFromSortedListPanicsOnUnsortedInput(t *testing.T) {
+	panics := map[string][]uint64{
+		"unsorted":               {1, 3, 2},
+		"unsorted at first pair": {3, 1},
+		"unsorted across key":    {1 << 20, 1},
+	}
+	for name, vals := range panics {
+		t.Run(name, func(t *testing.T) {
+			require.Panics(t, func() { FromSortedList(vals) })
+		})
+	}
+
+	tolerated := map[string]struct {
+		vals     []uint64
+		expected []uint64
+	}{
+		"duplicate":          {vals: []uint64{1, 2, 2}, expected: []uint64{1, 2}},
+		"duplicate at start": {vals: []uint64{0, 0, 1}, expected: []uint64{0, 1}},
+	}
+	for name, tc := range tolerated {
+		t.Run(name, func(t *testing.T) {
+			var bm *Bitmap
+			require.NotPanics(t, func() { bm = FromSortedList(tc.vals) })
+			require.Equal(t, tc.expected, bm.ToArray())
+		})
+	}
+}
+
+func TestFromSortedListToBufContract(t *testing.T) {
+	t.Run("panics on too small buffer", func(t *testing.T) {
+		require.Panics(t, func() {
+			FromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) []byte {
+				return make([]byte, sizeBytes-2)
+			})
+		})
+	})
+
+	t.Run("input checked before get is called", func(t *testing.T) {
+		called := false
+		require.Panics(t, func() {
+			FromSortedListToBuf([]uint64{2, 1}, func(sizeBytes int) []byte {
+				called = true
+				return make([]byte, sizeBytes)
+			})
+		})
+		require.False(t, called)
+	})
+
+	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
+		bm := FromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) []byte {
+			return make([]byte, 0, sizeBytes)
+		})
+		require.Equal(t, []uint64{1, 2, 3}, bm.ToArray())
+	})
+
+	t.Run("init panics on nil struct from get", func(t *testing.T) {
+		require.PanicsWithValue(t, "InitFromSortedListToBuf: get returned a nil *Bitmap", func() {
+			InitFromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) (*Bitmap, []byte) {
+				return nil, make([]byte, sizeBytes)
+			})
+		})
+	})
+
+	t.Run("init builds into provided struct", func(t *testing.T) {
+		reused := FromSortedList([]uint64{99, 100_000})
+		bm := InitFromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) (*Bitmap, []byte) {
+			return reused, make([]byte, sizeBytes)
+		})
+		require.Same(t, reused, bm)
+		require.Equal(t, []uint64{1, 2, 3}, bm.ToArray())
+		require.Equal(t, FromSortedList([]uint64{1, 2, 3}).ToBuffer(), bm.ToBuffer())
+	})
+
+	t.Run("init allocates nothing with pooled struct and buffer", func(t *testing.T) {
+		vals := []uint64{1, 2, 3, 1 << 20, 1 << 40}
+		pooled := &Bitmap{}
+		buf := make([]byte, 1<<12)
+		get := func(sizeBytes int) (*Bitmap, []byte) {
+			return pooled, buf[:sizeBytes]
+		}
+		allocs := testing.AllocsPerRun(10, func() {
+			InitFromSortedListToBuf(vals, get)
+		})
+		require.Zero(t, allocs)
+	})
+}
+
+func TestFromSortedListDuplicates(t *testing.T) {
+	genDup := func(n int, stride uint64, repeat int) []uint64 {
+		vals := make([]uint64, 0, n*repeat)
+		for i := 0; i < n; i++ {
+			for j := 0; j < repeat; j++ {
+				vals = append(vals, uint64(i)*stride)
+			}
+		}
+		return vals
+	}
+
+	testCases := map[string]struct {
+		vals     []uint64
+		expected []uint64
+	}{
+		"duplicates in array container": {
+			vals:     []uint64{1, 1, 2, 3, 3, 3},
+			expected: []uint64{1, 2, 3},
+		},
+		"duplicates across container boundary": {
+			vals:     []uint64{1 << 16, 1 << 16, 1<<16 + 1},
+			expected: []uint64{1 << 16, 1<<16 + 1},
+		},
+		"all same value": {
+			vals:     genDup(1, 1, 5000),
+			expected: []uint64{0},
+		},
+		"duplicates in bitmap container": {
+			// 3000 distinct values repeated twice: a bitmap container whose
+			// cardinality counts distinct only.
+			vals: genDup(3000, 2, 2),
+			expected: func() []uint64 {
+				v := make([]uint64, 3000)
+				for i := range v {
+					v[i] = uint64(i) * 2
+				}
+				return v
+			}(),
+		},
+		"duplicates straddling bitmap threshold": {
+			// 1500 distinct values repeated twice: 3000 raw elements, but the
+			// container type follows the 1500 distinct — an array, same as a
+			// duplicate-free build.
+			vals: genDup(1500, 2, 2),
+			expected: func() []uint64 {
+				v := make([]uint64, 1500)
+				for i := range v {
+					v[i] = uint64(i) * 2
+				}
+				return v
+			}(),
+		},
+		"key 0 collapses then more keys follow": {
+			// Key 0's segment: 2500 distinct values duplicated to 5000 raw —
+			// the pre-created container is filled as a bitmap, then rewritten
+			// in place as an array; containers for higher keys must append
+			// correctly after the truncated tail.
+			vals: append(genDup(2500, 2, 2), 1<<16, 1<<20, 1<<40),
+			expected: func() []uint64 {
+				v := make([]uint64, 2500)
+				for i := range v {
+					v[i] = uint64(i) * 2
+				}
+				return append(v, 1<<16, 1<<20, 1<<40)
+			}(),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			bm := FromSortedList(tc.vals)
+			require.Equal(t, len(tc.expected), bm.GetCardinality())
+			require.Equal(t, tc.expected, bm.ToArray())
+
+			// Sizing by distinct count makes the layout independent of
+			// duplicate multiplicity and identical across the exact-size
+			// constructors.
+			require.Equal(t, FromSortedList(tc.expected).ToBuffer(), bm.ToBuffer())
+			acc := NewAccumulator()
+			acc.Or(bm)
+			require.Equal(t, acc.Bitmap().ToBuffer(), bm.ToBuffer())
+
+			// The fix-up must work identically inside an adopted buffer,
+			// where the requested size is an upper bound for duplicate
+			// input.
+			var askedBytes int
+			bmBuf := FromSortedListToBuf(tc.vals, func(sizeBytes int) []byte {
+				askedBytes = sizeBytes
+				buf := make([]byte, sizeBytes)
+				for i := range buf {
+					buf[i] = 0xff
+				}
+				return buf
+			})
+			require.GreaterOrEqual(t, askedBytes, len(bm.ToBuffer()))
+			require.Equal(t, bm.ToBuffer(), bmBuf.ToBuffer())
+		})
+	}
+}
+
+func TestFromSortedListToBufMutation(t *testing.T) {
+	vals := []uint64{1, 2, 3, 1 << 20}
+
+	var pool []byte
+	bm := InitFromSortedListToBuf(vals, func(sizeBytes int) (*Bitmap, []byte) {
+		pool = make([]byte, sizeBytes, sizeBytes+1024)
+		return &Bitmap{}, pool
+	})
+	oracle := NewBitmap()
+	for _, v := range vals {
+		oracle.Set(v)
+	}
+	require.NotNil(t, bm._ptr)
+
+	// Mutations that fit the buffer's spare capacity stay on it.
+	mutate := func(b *Bitmap) {
+		b.Set(4)
+		b.Set(1 << 21)
+		b.Remove(2)
+	}
+	mutate(bm)
+	mutate(oracle)
+	require.NotNil(t, bm._ptr)
+	require.Equal(t, oracle.ToArray(), bm.ToArray())
+
+	// Outgrowing the buffer migrates the bitmap to the heap.
+	for v := uint64(0); v < 100_000; v++ {
+		bm.Set(v)
+		oracle.Set(v)
+	}
+	require.Nil(t, bm._ptr)
+
+	// The buffer is then free for reuse: trashing it must not affect the
+	// bitmap.
+	for i := range pool {
+		pool[i] = 0xee
+	}
+	require.Equal(t, oracle.GetCardinality(), bm.GetCardinality())
+	require.Equal(t, oracle.ToArray(), bm.ToArray())
+}

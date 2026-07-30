@@ -144,23 +144,29 @@ func calcInitialKeysLen(numKeys int) int {
 	return 4 * (2*numKeys + 2)
 }
 
-func (ra *Bitmap) initSpaceForKeys(N int) {
-	if N == 0 {
-		return
+// initBitmapToBufExact lays an empty bitmap for the given layout over a
+// caller-supplied buffer and returns dst backed by it. The buffer is
+// adopted at its full capacity, rounded down to an even number of bytes
+// since the bitmap operates on []uint16; a buffer smaller than need panics
+// with the caller's name. The keys node is cleared so a dirty pooled
+// buffer cannot leak into the serialized form — every other exposed byte
+// is written by the container build. Shared by the exact-size ToBuf builds
+// (FromSortedList, Accumulator).
+func initBitmapToBufExact(name string, dst *Bitmap, buf []byte, keysLen, sizeInitial, need int) *Bitmap {
+	if dst == nil {
+		panic(name + ": get returned a nil *Bitmap")
 	}
-	curSize := uint64(len(ra.keys) * 4) // U64 -> U16
-	bySize := uint64(N * 8)             // 2xU64 (key, value) -> 2x4xU16
-
-	// The following code is borrowed from setKey.
-	ra.scootRight(curSize, bySize)
-	ra.keys = uint16To64SliceUnsafe(ra.data[:curSize+bySize])
-	ra.keys.setNodeSize(int(curSize + bySize))
-	assert(1 == ra.keys.numKeys()) // This initialization assumes that the number of keys are 1.
-
-	// The containers have moved to the right bySize. So, update their offsets.
-	// Currently, there's only one container.
-	val := ra.keys.val(0)
-	ra.keys.setAt(valOffset(0), val+uint64(bySize))
+	buf = buf[:cap(buf)/2*2]
+	if len(buf)/2 < need {
+		// Report cap: it matches what the caller passed, and with need*2
+		// always even the rounded-down len could only confuse.
+		panic(fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, need*2, cap(buf)))
+	}
+	bufU16 := byteToUint16SliceUnsafe(buf)
+	clear(bufU16[:keysLen])
+	initBitmapCore(dst, keysLen, sizeInitial, bufU16)
+	dst._ptr = buf // Keep a GC reference to buf, mirroring NewBitmapToBuf.
+	return dst
 }
 
 // setKey sets a key and container offset.
@@ -447,60 +453,14 @@ func (ra *Bitmap) Set(x uint64) bool {
 	panic("we shouldn't reach here")
 }
 
+// FromSortedList builds a bitmap from a sorted list of values; duplicates
+// are allowed and deduplicated. It panics on unsorted input, before
+// anything is allocated. The result is allocated fully sized in a single
+// step, like the Accumulator build.
 func FromSortedList(vals []uint64) *Bitmap {
-	var arr []uint16
-	var hi, lastHi, off uint64
-
-	ra := NewBitmap()
-
-	if len(vals) == 0 {
-		return ra
-	}
-
-	// Set the keys beforehand so that we don't need to move a lot of memory because of adding keys.
-	var numKeys int
-	for _, x := range vals {
-		hi = x & mask
-		if hi != 0 && hi != lastHi {
-			numKeys++
-		}
-		lastHi = hi
-	}
-	ra.initSpaceForKeys(numKeys)
-
-	finalize := func(l []uint16, key uint64) {
-		if len(l) == 0 {
-			return
-		}
-		sz, typ := containerSizeForCard(len(l))
-		off = ra.newContainer(sz)
-		c := ra.getContainer(off)
-		c[indexSize] = sz
-		c[indexType] = typ
-		if typ == typeArray {
-			setCardinality(c, len(l))
-			copy(c[startIdx:], l)
-		} else {
-			for _, v := range l {
-				bitmap(c).add(v)
-			}
-		}
-		ra.setKey(key, off)
-	}
-
-	lastHi = 0
-	for _, x := range vals {
-		hi = x & mask
-		// Finalize the last container before proceeding ahead
-		if hi != 0 && hi != lastHi {
-			finalize(arr, lastHi)
-			arr = arr[:0]
-		}
-		arr = append(arr, uint16(x))
-		lastHi = hi
-	}
-	finalize(arr, lastHi)
-	return ra
+	newKeys, sizeInitial, sizeContainers := fromSortedLayout(vals)
+	ra := initBitmapWithCap(&Bitmap{}, newKeys+2, sizeInitial, sizeContainers)
+	return buildFromSortedInto(ra, vals)
 }
 
 // TODO: Potentially this can be optimized.
