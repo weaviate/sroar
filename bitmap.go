@@ -97,14 +97,14 @@ func initBitmapToBuf(dst *Bitmap, buf []byte) *Bitmap {
 	// the bitmap operates on []uint16 (2 bytes per element).
 	buf = buf[:cap(buf)/2*2]
 
-	keysLen := calcInitialKeysLen(2)
-	if minLen := (keysLen + minContainerSize) * 2; minLen > len(buf) {
+	sizeKeys := calcSizeKeys(2)
+	if minLen := (sizeKeys + minContainerSize) * 2; minLen > len(buf) {
 		return initBitmapWithCap(dst, 2, minContainerSize, 0)
 	}
 
 	bufU16 := byteToUint16SliceUnsafe(buf)
 	clear(bufU16)
-	initBitmapCore(dst, keysLen, minContainerSize, bufU16)
+	initBitmapCore(dst, sizeKeys, minContainerSize, bufU16)
 	dst._ptr = buf
 	return dst
 }
@@ -112,32 +112,32 @@ func initBitmapToBuf(dst *Bitmap, buf []byte) *Bitmap {
 // initBitmapWithCap initializes dst over freshly allocated memory sized for
 // numKeys keys plus additionalCapacity; the heap fallback of the buffer-based
 // initializers. Returns dst.
-func initBitmapWithCap(dst *Bitmap, numKeys, initialContainerSize, additionalCapacity int) *Bitmap {
+func initBitmapWithCap(dst *Bitmap, numKeys, sizeContainer0, additionalCapacity int) *Bitmap {
 	if numKeys < 2 {
 		panic("Must contain at least two keys.")
 	}
-	keysLen := calcInitialKeysLen(numKeys)
-	buf := make([]uint16, keysLen+initialContainerSize+additionalCapacity)
-	return initBitmapCore(dst, keysLen, initialContainerSize, buf)
+	sizeKeys := calcSizeKeys(numKeys)
+	buf := make([]uint16, sizeKeys+sizeContainer0+additionalCapacity)
+	return initBitmapCore(dst, sizeKeys, sizeContainer0, buf)
 }
 
 // initBitmapCore lays out an empty bitmap — keys node plus the mandatory
 // key-0 container — over buf; every initializer funnels here. Returns dst.
-func initBitmapCore(dst *Bitmap, keysLen, initialContainerSize int, buf []uint16) *Bitmap {
-	*dst = Bitmap{data: buf[:keysLen]}
+func initBitmapCore(dst *Bitmap, sizeKeys, sizeContainer0 int, buf []uint16) *Bitmap {
+	*dst = Bitmap{data: buf[:sizeKeys]}
 	dst.keys = uint16To64SliceUnsafe(dst.data)
-	dst.keys.setNodeSize(keysLen)
+	dst.keys.setNodeSize(sizeKeys)
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused
 	// about whether a zero key is a new key or not.
-	offset := dst.newContainer(uint16(initialContainerSize))
+	offset := dst.newContainer(uint16(sizeContainer0))
 	// First two are for num keys. index=2 -> 0 key. index=3 -> offset.
 	dst.keys.setAt(indexNodeStart+1, offset)
 	dst.keys.setNumKeys(1)
 	return dst
 }
 
-func calcInitialKeysLen(numKeys int) int {
+func calcSizeKeys(numKeys int) int {
 	// Each key must also keep an offset. So, we need to double the number
 	// of uint64s allocated. Plus, we need to make space for the first 2
 	// uint64s to store the number of keys and node size.
@@ -147,24 +147,24 @@ func calcInitialKeysLen(numKeys int) int {
 // initBitmapToBufExact lays an empty bitmap for the given layout over a
 // caller-supplied buffer and returns dst backed by it. The buffer is
 // adopted at its full capacity, rounded down to an even number of bytes
-// since the bitmap operates on []uint16; a buffer smaller than need panics
+// since the bitmap operates on []uint16; a buffer smaller than sizeTotal panics
 // with the caller's name. The keys node is cleared so a dirty pooled
 // buffer cannot leak into the serialized form — every other exposed byte
 // is written by the container build. Shared by the exact-size ToBuf builds
 // (FromSortedList, Accumulator).
-func initBitmapToBufExact(name string, dst *Bitmap, buf []byte, keysLen, sizeInitial, need int) *Bitmap {
+func initBitmapToBufExact(name string, dst *Bitmap, buf []byte, sizeKeys, sizeContainer0, sizeTotal int) *Bitmap {
 	if dst == nil {
 		panic(name + ": get returned a nil *Bitmap")
 	}
 	buf = buf[:cap(buf)/2*2]
-	if len(buf)/2 < need {
-		// Report cap: it matches what the caller passed, and with need*2
+	if len(buf)/2 < sizeTotal {
+		// Report cap: it matches what the caller passed, and with sizeTotal*2
 		// always even the rounded-down len could only confuse.
-		panic(fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, need*2, cap(buf)))
+		panic(fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, sizeTotal*2, cap(buf)))
 	}
 	bufU16 := byteToUint16SliceUnsafe(buf)
-	clear(bufU16[:keysLen])
-	initBitmapCore(dst, keysLen, sizeInitial, bufU16)
+	clear(bufU16[:sizeKeys])
+	initBitmapCore(dst, sizeKeys, sizeContainer0, bufU16)
 	dst._ptr = buf // Keep a GC reference to buf, mirroring NewBitmapToBuf.
 	return dst
 }
@@ -458,8 +458,8 @@ func (ra *Bitmap) Set(x uint64) bool {
 // anything is allocated. The result is allocated fully sized in a single
 // step, like the Accumulator build.
 func FromSortedList(vals []uint64) *Bitmap {
-	newKeys, sizeInitial, sizeContainers := fromSortedLayout(vals)
-	ra := initBitmapWithCap(&Bitmap{}, newKeys+2, sizeInitial, sizeContainers)
+	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
+	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
 	return buildFromSortedInto(ra, vals)
 }
 
@@ -603,10 +603,10 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 }
 
 func (ra *Bitmap) Reset() {
-	keysLen := calcInitialKeysLen(2)
-	ra.data = ra.data[:keysLen]
+	sizeKeys := calcSizeKeys(2)
+	ra.data = ra.data[:sizeKeys]
 	ra.keys = uint16To64SliceUnsafe(ra.data)
-	ra.keys.setNodeSize(keysLen)
+	ra.keys.setNodeSize(sizeKeys)
 
 	// Always generate a container for key = 0x00. Otherwise, node gets confused
 	// about whether a zero key is a new key or not.

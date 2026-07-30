@@ -143,19 +143,21 @@ const layoutScratchLen = 64
 
 // layout runs the popcount pass over the staging blocks, determining the
 // result's complete layout — per-block cardinalities and the derived key
-// and container space needs — so builds can allocate fully sized up front
-// and never reallocate or move anything. cards is scratch[:len(blocks)]
-// when it fits, a fresh slice otherwise. sizeInitial is the pre-created
-// key-0 container's size — exact when the union touches key 0, a
-// minContainerSize placeholder otherwise; sizeContainers covers all
-// remaining containers.
-func (acc *Accumulator) layout(scratch []int) (cards []int, newKeys, sizeInitial, sizeContainers int) {
+// count and container space needs — so builds can allocate fully sized up
+// front and never reallocate or move anything. cards is
+// scratch[:len(blocks)] when it fits, a fresh slice otherwise. numKeys
+// counts the always-present key-0 slot up front; sizeContainer0 is the
+// pre-created key-0 container's size — exact when the union touches key
+// 0, a minContainerSize placeholder otherwise; sizeOtherContainers covers
+// all remaining containers.
+func (acc *Accumulator) layout(scratch []int) (cards []int, numKeys, sizeContainer0, sizeOtherContainers int) {
 	if len(acc.blocks) <= len(scratch) {
 		cards = scratch[:len(acc.blocks)]
 	} else {
 		cards = make([]int, len(acc.blocks))
 	}
-	sizeInitial = minContainerSize
+	numKeys = 1 // the key-0 slot every bitmap pre-creates
+	sizeContainer0 = minContainerSize
 	for i, b := range acc.blocks {
 		card := 0
 		for _, w := range uint16To64SliceUnsafe(b) {
@@ -167,26 +169,27 @@ func (acc *Accumulator) layout(scratch []int) (cards []int, newKeys, sizeInitial
 		}
 		sz, _ := containerSizeForCard(card)
 		if acc.keys[i] != 0 {
-			newKeys++
-			sizeContainers += int(sz)
+			numKeys++
+			sizeOtherContainers += int(sz)
 		} else {
 			// Key 0 is special-cased: every fresh bitmap pre-creates its
 			// key-0 slot and container (the node cannot tell a zero key
-			// from an empty slot), so instead of counting a new key and
-			// appending a duplicate container, the pre-created one is made
-			// exactly this size and filled in place by buildInto.
-			sizeInitial = int(sz)
+			// from an empty slot), so its slot is already counted and,
+			// instead of appending a duplicate container, the pre-created
+			// one is made exactly this size and filled in place by
+			// buildInto.
+			sizeContainer0 = int(sz)
 		}
 	}
-	return cards, newKeys, sizeInitial, sizeContainers
+	return cards, numKeys, sizeContainer0, sizeOtherContainers
 }
 
 // Bitmap assembles and returns the union. The accumulator keeps its staging
 // state afterwards; call Reset to reuse it for a new union.
 func (acc *Accumulator) Bitmap() *Bitmap {
 	var scratch [layoutScratchLen]int
-	cards, newKeys, sizeInitial, sizeContainers := acc.layout(scratch[:])
-	ra := initBitmapWithCap(&Bitmap{}, newKeys+2, sizeInitial, sizeContainers)
+	cards, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
+	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
 	acc.buildInto(ra, cards)
 	return ra
 }
@@ -218,25 +221,24 @@ func (acc *Accumulator) BitmapToBuf(get func(sizeBytes int) []byte) *Bitmap {
 // size panics, as in BitmapToBuf.
 func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
 	var scratch [layoutScratchLen]int
-	cards, newKeys, sizeInitial, sizeContainers := acc.layout(scratch[:])
-	// The +2 keys are the always-present key 0 and the spare buildInto
-	// relies on.
-	keysLen := calcInitialKeysLen(newKeys + 2)
-	need := keysLen + sizeInitial + sizeContainers
+	cards, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
+	// +1 is the spare slot buildInto relies on.
+	sizeKeys := calcSizeKeys(numKeys + 1)
+	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
 
 	gen := acc.gen
-	dst, buf := get(need * 2)
+	dst, buf := get(sizeTotal * 2)
 	if acc.gen != gen {
 		panic("Accumulator: mutated during build — get must not use the accumulator")
 	}
-	initBitmapToBufExact("Accumulator.InitBitmapToBuf", dst, buf, keysLen, sizeInitial, need)
+	initBitmapToBufExact("Accumulator.InitBitmapToBuf", dst, buf, sizeKeys, sizeContainer0, sizeTotal)
 	acc.buildInto(dst, cards)
 	return dst
 }
 
 // buildInto builds the result containers into ra, whose data array must
 // already have capacity for the full layout and whose keys node must be
-// sized with one spare slot beyond the result's keys (the newKeys+2 at the
+// sized with one spare slot beyond the result's keys (the numKeys+1 at the
 // call sites): setKey's return (a possibly shifted offset) is discarded
 // below, which is safe only because the spare keeps the node from ever
 // filling mid-build, so setKey never expands the node or moves containers.
@@ -252,7 +254,7 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 		var off uint64
 		if acc.keys[i] == 0 {
 			// Key 0's container pre-exists at exactly sz (layout sized it
-			// via sizeInitial) with its key slot already set — fill it in
+			// via sizeContainer0) with its key slot already set — fill it in
 			// place; appending would orphan it as dead space in ra.data.
 			off = ra.keys.val(0)
 		} else {

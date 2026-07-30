@@ -306,30 +306,30 @@ func FromSortedListToBuf(vals []uint64, get func(sizeBytes int) []byte) *Bitmap 
 // own anything the caller still needs. A buffer smaller than the
 // requested size panics, as in FromSortedListToBuf.
 func InitFromSortedListToBuf(vals []uint64, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
-	newKeys, sizeInitial, sizeContainers := fromSortedLayout(vals)
-	// The +2 keys are the always-present key 0 and the spare
-	// buildFromSortedInto relies on.
-	keysLen := calcInitialKeysLen(newKeys + 2)
-	need := keysLen + sizeInitial + sizeContainers
+	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
+	// +1 is the spare slot buildFromSortedInto relies on.
+	sizeKeys := calcSizeKeys(numKeys + 1)
+	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
 
-	dst, buf := get(need * 2)
-	initBitmapToBufExact("InitFromSortedListToBuf", dst, buf, keysLen, sizeInitial, need)
+	dst, buf := get(sizeTotal * 2)
+	initBitmapToBufExact("InitFromSortedListToBuf", dst, buf, sizeKeys, sizeContainer0, sizeTotal)
 	return buildFromSortedInto(dst, vals)
 }
 
 // fromSortedLayout is the counting pass shared by the FromSortedList
-// constructors: new keys and container sizes per key segment, panicking on
-// descending input. Containers are sized by segment length — for
-// duplicate-free input, the common case, that is the distinct cardinality
-// and the layout is final. Duplicates are discovered for free during the
-// fill, which corrects the affected containers in place (truncate or
-// rewrite, without moving them); keeping this pass oblivious to them
-// keeps it off the critical path. Key 0 is special-cased
-// like in Accumulator.layout: its slot and container always exist, so its
-// segment sizes the pre-created container via sizeInitial instead of
-// counting a new key.
-func fromSortedLayout(vals []uint64) (newKeys, sizeInitial, sizeContainers int) {
-	sizeInitial = minContainerSize
+// constructors: the result's key count and container space, accumulated
+// per key segment, panicking on descending input. Containers are sized by segment
+// length — for duplicate-free input, the common case, that is the
+// distinct cardinality and the layout is final. Duplicates are discovered
+// for free during the fill, which corrects the affected containers in
+// place (truncate or rewrite, without moving them); keeping this pass
+// oblivious to them keeps it off the critical path. Key 0 is
+// special-cased like in Accumulator.layout: its slot and container always
+// exist — numKeys counts that slot up front, and its segment sizes the
+// pre-created container via sizeContainer0 instead of counting a key.
+func fromSortedLayout(vals []uint64) (numKeys, sizeContainer0, sizeOtherContainers int) {
+	numKeys = 1 // the key-0 slot every bitmap pre-creates
+	sizeContainer0 = minContainerSize
 	if len(vals) == 0 {
 		return
 	}
@@ -337,10 +337,10 @@ func fromSortedLayout(vals []uint64) (newKeys, sizeInitial, sizeContainers int) 
 	accountSeg := func(card int, key uint64) {
 		sz, _ := containerSizeForCard(card)
 		if key != 0 {
-			newKeys++
-			sizeContainers += int(sz)
+			numKeys++
+			sizeOtherContainers += int(sz)
 		} else {
-			sizeInitial = int(sz)
+			sizeContainer0 = int(sz)
 		}
 	}
 	segKey := vals[0] & mask
@@ -363,7 +363,7 @@ func fromSortedLayout(vals []uint64) (newKeys, sizeInitial, sizeContainers int) 
 
 // buildFromSortedInto builds the containers into ra, whose data array must
 // already have capacity for the full layout and whose keys node must be
-// sized with one spare slot beyond the result's keys (the newKeys+2 at the
+// sized with one spare slot beyond the result's keys (the numKeys+1 at the
 // call sites), so setKey never expands the node or moves containers.
 // Containers are first sized by segment length, matching fromSortedLayout;
 // when the fill finds duplicates, the just-filled container — still the
@@ -1194,12 +1194,12 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		if maxRemainingCount > 0 {
 			minimalContainersCount++
 		}
-		minimalKeysLen := calcInitialKeysLen(minimalContainersCount + 1)
-		minimalLen := minimalKeysLen + minimalContainersCount*maxContainerSize
+		minimalSizeKeys := calcSizeKeys(minimalContainersCount + 1)
+		minimalSizeTotal := minimalSizeKeys + minimalContainersCount*maxContainerSize
 
 		bm := &Bitmap{}
-		if minimalLen <= cap(ra.data) {
-			initBitmapCore(bm, minimalKeysLen, maxContainerSize, ra.data)
+		if minimalSizeTotal <= cap(ra.data) {
+			initBitmapCore(bm, minimalSizeKeys, maxContainerSize, ra.data)
 		} else {
 			initBitmapWithCap(bm, int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
 		}
