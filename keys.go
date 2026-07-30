@@ -210,35 +210,36 @@ func (n node) getValue(k uint64) (uint64, bool) {
 
 // set returns true if it added a new key.
 func (n node) set(k, v uint64) bool {
+	var idx int
 	N := n.numKeys()
-	idx := n.search(k)
-	if idx == N {
-		n.setNumKeys(N + 1)
-		n.setAt(keyOffset(idx), k)
-		n.setAt(valOffset(idx), v)
-		return true
+	if N > 0 && k > n.key(N-1) {
+		// Ascending inserts append past the last key; skip the binary search.
+		idx = N
+	} else {
+		idx = n.search(k)
 	}
 
-	ki := n.key(idx)
-	if N == n.maxKeys() {
-		// This happens during split of non-root node, when we are updating the child pointer of
-		// right node. Hence, the key should already exist.
-		assert(ki == k)
+	if idx < N {
+		ki := n.key(idx)
+		if N == n.maxKeys() {
+			// This happens during split of non-root node, when we are updating the child pointer of
+			// right node. Hence, the key should already exist.
+			assert(ki == k)
+		}
+		if ki == k {
+			n.setAt(valOffset(idx), v)
+			return false
+		}
+		assert(ki > k)
+		// Found the first entry which is greater than k. So, we need to fit k
+		// just before it. For that, we should move the rest of the data in the
+		// node to the right to make space for k.
+		n.moveRight(idx)
 	}
-	if ki == k {
-		n.setAt(valOffset(idx), v)
-		return false
-	}
-	assert(ki > k)
-	// Found the first entry which is greater than k. So, we need to fit k
-	// just before it. For that, we should move the rest of the data in the
-	// node to the right to make space for k.
-	n.moveRight(idx)
 	n.setNumKeys(N + 1)
 	n.setAt(keyOffset(idx), k)
 	n.setAt(valOffset(idx), v)
 	return true
-	// panic("shouldn't reach here")
 }
 
 func (n node) updateOffsets(beyond, by uint64, add bool) {
