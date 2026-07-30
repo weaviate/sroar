@@ -20,6 +20,8 @@ import (
 // skipping ranges the accumulator never touched — so Or and AndNot can
 // interleave freely (e.g. per source layer: subtract its deletions, then
 // deposit its additions). The result reflects every call applied in order.
+// OrAcc and AndNotAcc do the same with another accumulator's staged state
+// as the source, so partial accumulators built separately can be merged.
 //
 // Total cost is O(total input elements + touched key ranges); staging
 // memory is one 8KB block per touched key range — proportional to the
@@ -69,15 +71,15 @@ type Accumulator struct {
 	// skips the binary search on runs of same-range deposits.
 	lastIdx int
 
-	// gen counts every non-nil Or, AndNot, and Reset call. Builds compare
-	// it across the get callback to catch a get that uses the accumulator
-	// mid-build — the layout snapshot would no longer match the staged
-	// bits.
+	// gen counts every non-nil Or/OrAcc/AndNot/AndNotAcc and Reset call.
+	// Builds compare it across the get callback to catch a get that uses
+	// the accumulator mid-build — the layout snapshot would no longer
+	// match the staged bits.
 	gen uint64
 
-	// maxConc caps the goroutines a single Or or AndNot call may fan out
-	// to. Zero (the zero Accumulator) stays serial; see concCap for the
-	// full encoding.
+	// maxConc caps the goroutines a single deposit call (Or, OrAcc,
+	// AndNot, AndNotAcc) may fan out to. Zero (the zero Accumulator)
+	// stays serial; see concCap for the full encoding.
 	maxConc int
 }
 
@@ -92,13 +94,14 @@ func NewAccumulator() *Accumulator {
 	return &Accumulator{}
 }
 
-// WithConc sets the cap on goroutines a single Or or AndNot call may split
-// its work across, and returns the accumulator so it chains with
-// construction: NewAccumulator().WithConc(8). Values <= 0 remove the cap —
-// the same convention as the concurrent Bitmap operations' maxConcurrency —
-// and 1 keeps every call serial. The cap engages only when there is enough
-// work to pay for the fan-out (Or gates on the source's container count,
-// AndNot on the smaller of the two key sets) and survives Reset — pool
+// WithConc sets the cap on goroutines a single deposit call (Or, OrAcc,
+// AndNot, AndNotAcc) may split its work across, and returns the
+// accumulator so it chains with construction: NewAccumulator().WithConc(8).
+// Values <= 0 remove the cap — the same convention as the concurrent
+// Bitmap operations' maxConcurrency — and 1 keeps every call serial. The
+// cap engages only when there is enough work to pay for the fan-out (the
+// Or variants gate on the source's container or range count, the AndNot
+// variants on the smaller of the two key sets) and survives Reset — pool
 // users may reconfigure a checked-out accumulator between calls.
 func (acc *Accumulator) WithConc(maxConcurrency int) *Accumulator {
 	if maxConcurrency <= 0 {
@@ -121,30 +124,37 @@ func (acc *Accumulator) concCap() int {
 	return acc.maxConc
 }
 
-// blockIdx returns the index of key's staging block in keys and true, or
-// the index at which the untouched range would be inserted and false.
-func (acc *Accumulator) blockIdx(key uint64) (int, bool) {
-	if acc.lastIdx < len(acc.keys) && acc.keys[acc.lastIdx] == key {
-		return acc.lastIdx, true
+// stageBlock returns the staging block for the 64K range of key, creating
+// it on first touch; created reports a fresh all-zero block. The single
+// lookup keeps the deposit loops at one call per container.
+func (acc *Accumulator) stageBlock(key uint64) (b []uint16, created bool) {
+	keys := acc.keys
+	if acc.lastIdx < len(keys) && keys[acc.lastIdx] == key {
+		return acc.blocks[acc.lastIdx], false
 	}
-	lo, ok := slices.BinarySearch(acc.keys, key)
-	if ok {
+	// A local binary search keeps the hot deposit path free of the
+	// generic slices.BinarySearch call.
+	lo, hi := 0, len(keys)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		if keys[mid] < key {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo < len(keys) && keys[lo] == key {
 		acc.lastIdx = lo
+		return acc.blocks[lo], false
 	}
-	return lo, ok
+	return acc.blocks[acc.insertBlockAt(lo, key)], true
 }
 
-// stageBlockIdx returns the index of the staging block for the 64K range
-// of key, creating the block on first touch.
-func (acc *Accumulator) stageBlockIdx(key uint64) int {
-	lo, ok := acc.blockIdx(key)
-	if ok {
-		return lo
-	}
-
-	// New range: insert at lo, keeping keys sorted. Ranges are few (they
-	// track the spread of the union, not the number of sources), so the
-	// insertion copy is rare and small.
+// insertBlockAt inserts a zeroed staging block for key at index lo (the
+// insertion point stageBlock computed), keeping keys sorted, and returns lo.
+// Ranges are few (they track the spread of the union, not the number of
+// sources), so the insertion copy is rare and small.
+func (acc *Accumulator) insertBlockAt(lo int, key uint64) int {
 	var b []uint16
 	if n := len(acc.free) - 1; n >= 0 {
 		// Take a spare; nil the vacated slot so the backing array never
@@ -215,7 +225,28 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 			if getCardinality(bm.data[off:]) == 0 {
 				continue
 			}
-			acc.depositOr(acc.stageBlockIdx(bm.keys.key(i)), bm.getContainer(off))
+			src := bm.getContainer(off)
+			dst, created := acc.stageBlock(bm.keys.key(i))
+			if created && src[indexType] == typeBitmap {
+				// Fresh block: adopting the dense payload is a plain copy
+				// — cheaper than OR-ing into zeros.
+				copy(dst, src[startIdx:maxContainerSize])
+				continue
+			}
+			switch src[indexType] {
+			case typeArray:
+				for _, lo := range array(src).all() {
+					dst[lo>>4] |= bitmapMask[lo&0xF]
+				}
+			case typeBitmap:
+				d64 := uint16To64SliceUnsafe(dst)
+				s64 := uint16To64SliceUnsafe(src[startIdx:maxContainerSize])
+				for j, w := range s64 {
+					d64[j] |= w
+				}
+			default:
+				panic(fmt.Sprintf("Accumulator.Or: unknown container type %d", src[indexType]))
+			}
 		}
 		return
 	}
@@ -228,7 +259,7 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 	isEmpty := true
 	for i := 0; i < n; i++ {
 		if getCardinality(bm.data[bm.keys.val(i):]) > 0 {
-			acc.stageBlockIdx(bm.keys.key(i))
+			acc.stageBlock(bm.keys.key(i)) // only ensuring the block exists
 			isEmpty = false
 		}
 	}
@@ -238,6 +269,65 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 	concurrentlyInRanges(n, conc, func(from, to, _ int) {
 		acc.orRange(bm, from, to)
 	})
+}
+
+// OrAcc deposits everything staged in other into the accumulator — the
+// merge step for partial accumulators built separately. The receiver is
+// the destination; other is only read, never retained, and must stay
+// unmodified for the duration of the call. Its blocks are copied or
+// OR-merged in, both accumulators stay independently usable, and OrAcc on
+// itself is a no-op. Ranges other has staged but emptied (via AndNot) are
+// staged here too, contributing nothing to the result.
+func (acc *Accumulator) OrAcc(other *Accumulator) {
+	if other == nil {
+		return
+	}
+	acc.gen++
+	n := len(other.keys)
+	conc := calcConcurrency(n, minContainersPerRoutine, acc.concCap())
+	if conc <= 1 {
+		for i, key := range other.keys {
+			dst, created := acc.stageBlock(key)
+			if created {
+				// Untouched range: adopting the source bits is a plain copy
+				// — cheaper than OR-ing into a zeroed block.
+				copy(dst, other.blocks[i])
+				continue
+			}
+			d64 := uint16To64SliceUnsafe(dst)
+			for j, w := range uint16To64SliceUnsafe(other.blocks[i]) {
+				d64[j] |= w
+			}
+		}
+		return
+	}
+	// Concurrent: create all missing staging blocks up front on the
+	// calling goroutine, so workers only read the keys/blocks index; and
+	// each of other's keys is unique, so workers write disjoint blocks —
+	// no locks or atomics are needed.
+	for _, key := range other.keys {
+		acc.stageBlock(key) // only ensuring the block exists
+	}
+	concurrentlyInRanges(n, conc, func(from, to, _ int) {
+		acc.orAccRange(other, from, to)
+	})
+}
+
+// orAccRange ORs other's blocks [from, to) into their staging blocks,
+// which must already exist. Lookup-only (lastIdx is never touched), so
+// disjoint ranges may run concurrently.
+func (acc *Accumulator) orAccRange(other *Accumulator, from, to int) {
+	ai := -1 // so the first gallop may land on index 0
+	for i := from; i < to; i++ {
+		// other's keys ascend, so each lookup gallops forward from the
+		// last hit; the key is guaranteed present (blocks were
+		// pre-created).
+		ai = acc.searchFrom(ai, len(acc.keys), other.keys[i])
+		d64 := uint16To64SliceUnsafe(acc.blocks[ai])
+		for j, w := range uint16To64SliceUnsafe(other.blocks[i]) {
+			d64[j] |= w
+		}
+	}
 }
 
 // orRange deposits bm's containers [from, to) into their staging blocks,
@@ -253,26 +343,22 @@ func (acc *Accumulator) orRange(bm *Bitmap, from, to int) {
 		// bm's keys ascend, so each lookup gallops forward from the last
 		// hit; the key is guaranteed present (blocks were pre-created).
 		ai = acc.searchFrom(ai, len(acc.keys), bm.keys.key(i))
-		acc.depositOr(ai, bm.getContainer(off))
-	}
-}
-
-// depositOr ORs a source container's bits into the staging block at index i.
-func (acc *Accumulator) depositOr(i int, src []uint16) {
-	dst := acc.blocks[i]
-	switch src[indexType] {
-	case typeArray:
-		for _, lo := range array(src).all() {
-			dst[lo>>4] |= bitmapMask[lo&0xF]
+		src := bm.getContainer(off)
+		dst := acc.blocks[ai]
+		switch src[indexType] {
+		case typeArray:
+			for _, lo := range array(src).all() {
+				dst[lo>>4] |= bitmapMask[lo&0xF]
+			}
+		case typeBitmap:
+			d64 := uint16To64SliceUnsafe(dst)
+			s64 := uint16To64SliceUnsafe(src[startIdx:maxContainerSize])
+			for j, w := range s64 {
+				d64[j] |= w
+			}
+		default:
+			panic(fmt.Sprintf("Accumulator.Or: unknown container type %d", src[indexType]))
 		}
-	case typeBitmap:
-		d64 := uint16To64SliceUnsafe(dst)
-		s64 := uint16To64SliceUnsafe(src[startIdx:maxContainerSize])
-		for j, w := range s64 {
-			d64[j] |= w
-		}
-	default:
-		panic(fmt.Sprintf("Accumulator.Or: unknown container type %d", src[indexType]))
 	}
 }
 
@@ -301,6 +387,75 @@ func (acc *Accumulator) AndNot(bm *Bitmap) {
 	concurrentlyInRanges(an, conc, func(from, to, _ int) {
 		acc.andNotRange(bm, from, to)
 	})
+}
+
+// AndNotAcc removes everything staged in other from the accumulator. The
+// receiver is the destination; other is only read, never retained, and
+// must stay unmodified for the duration of the call. Only ranges staged
+// on both sides do any work — no staging block is ever created — and the
+// key walk gallops over whichever side is much larger. AndNotAcc on
+// itself empties every staged range.
+func (acc *Accumulator) AndNotAcc(other *Accumulator) {
+	if other == nil {
+		return
+	}
+	acc.gen++
+	an, bn := len(acc.keys), len(other.keys)
+	if an == 0 || bn == 0 {
+		return
+	}
+	// The work is bounded by ranges present on both sides, so the
+	// concurrency gate uses the smaller key count.
+	conc := calcConcurrency(min(an, bn), minContainersPerRoutine, acc.concCap())
+	if conc <= 1 {
+		acc.andNotAccRange(other, 0, an)
+		return
+	}
+	concurrentlyInRanges(an, conc, func(from, to, _ int) {
+		acc.andNotAccRange(other, from, to)
+	})
+}
+
+// andNotAccRange clears other's staged bits from acc's blocks [from, to):
+// the accumulator-source sibling of andNotRange, with the same two-pointer
+// walk and gallop rules. It never mutates the shared index (lastIdx
+// included) and writes only its own blocks, so disjoint ranges may run
+// concurrently.
+func (acc *Accumulator) andNotAccRange(other *Accumulator, from, to int) {
+	if from >= to {
+		return
+	}
+	bn := len(other.keys)
+	useGallopAcc := shouldGallop(to-from, bn)
+	useGallopOther := shouldGallop(bn, to-from)
+
+	ai := from
+	bi, _ := slices.BinarySearch(other.keys, acc.keys[from])
+	for ai < to && bi < bn {
+		ak, bk := acc.keys[ai], other.keys[bi]
+		if ak < bk {
+			if useGallopAcc {
+				ai = acc.searchFrom(ai, to, bk)
+			} else {
+				ai++
+			}
+			continue
+		}
+		if ak > bk {
+			if useGallopOther {
+				bi = other.searchFrom(bi, bn, ak)
+			} else {
+				bi++
+			}
+			continue
+		}
+		d64 := uint16To64SliceUnsafe(acc.blocks[ai])
+		for j, w := range uint16To64SliceUnsafe(other.blocks[bi]) {
+			d64[j] &^= w
+		}
+		ai++
+		bi++
+	}
 }
 
 // andNotRange clears bm's elements from acc's staging blocks [from, to): a
@@ -338,30 +493,24 @@ func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 		}
 		src := bm.getContainer(bm.keys.val(bi))
 		if getCardinality(src) > 0 {
-			acc.depositAndNot(ai, src)
+			dst := acc.blocks[ai]
+			switch src[indexType] {
+			case typeArray:
+				for _, lo := range array(src).all() {
+					dst[lo>>4] &^= bitmapMask[lo&0xF]
+				}
+			case typeBitmap:
+				d64 := uint16To64SliceUnsafe(dst)
+				s64 := uint16To64SliceUnsafe(src[startIdx:maxContainerSize])
+				for j, w := range s64 {
+					d64[j] &^= w
+				}
+			default:
+				panic(fmt.Sprintf("Accumulator.AndNot: unknown container type %d", src[indexType]))
+			}
 		}
 		ai++
 		bi++
-	}
-}
-
-// depositAndNot clears a source container's bits from the staging block at
-// index i.
-func (acc *Accumulator) depositAndNot(i int, src []uint16) {
-	dst := acc.blocks[i]
-	switch src[indexType] {
-	case typeArray:
-		for _, lo := range array(src).all() {
-			dst[lo>>4] &^= bitmapMask[lo&0xF]
-		}
-	case typeBitmap:
-		d64 := uint16To64SliceUnsafe(dst)
-		s64 := uint16To64SliceUnsafe(src[startIdx:maxContainerSize])
-		for j, w := range s64 {
-			d64[j] &^= w
-		}
-	default:
-		panic(fmt.Sprintf("Accumulator.AndNot: unknown container type %d", src[indexType]))
 	}
 }
 
