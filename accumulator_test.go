@@ -40,7 +40,7 @@ var accConstructors = []struct {
 }{
 	{"serial", NewAccumulator},
 	{"conc", func() *Accumulator { return NewAccumulator().WithConc(4) }},
-	{"unbounded", func() *Accumulator { return NewAccumulator().WithConc(0) }},
+	{"unbounded", func() *Accumulator { return NewAccumulator().WithConc(math.MaxInt) }},
 }
 
 func TestAccumulator(t *testing.T) {
@@ -877,19 +877,20 @@ func TestAccumulatorWithConcRetuning(t *testing.T) {
 }
 
 func TestAccumulatorConcCap(t *testing.T) {
-	// calcConcurrency reads a cap of 0 as "no limit", so the translation
-	// must keep the never-configured accumulator serial while explicit
-	// WithConc(<=0) lifts the cap.
+	// concCap resolves to a concrete goroutine limit >= 1: the
+	// never-configured accumulator and any value <= 1 stay serial, and
+	// unbounded fan-out is requested with a large value, not a sentinel.
 	tests := []struct {
 		name string
 		acc  func() *Accumulator
 		want int
 	}{
 		{"zero value", func() *Accumulator { return &Accumulator{} }, 1},
-		{"WithConc(0)", func() *Accumulator { return NewAccumulator().WithConc(0) }, 0},
-		{"WithConc(-3)", func() *Accumulator { return NewAccumulator().WithConc(-3) }, 0},
+		{"WithConc(0)", func() *Accumulator { return NewAccumulator().WithConc(0) }, 1},
+		{"WithConc(-3)", func() *Accumulator { return NewAccumulator().WithConc(-3) }, 1},
 		{"WithConc(1)", func() *Accumulator { return NewAccumulator().WithConc(1) }, 1},
 		{"WithConc(8)", func() *Accumulator { return NewAccumulator().WithConc(8) }, 8},
+		{"WithConc(MaxInt)", func() *Accumulator { return NewAccumulator().WithConc(math.MaxInt) }, math.MaxInt},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -914,9 +915,12 @@ func TestAccumulatorReset(t *testing.T) {
 }
 
 func TestAccumulatorResetRetainsSpareBlocks(t *testing.T) {
-	// Spares survive Reset key-independently: a following union over a
-	// completely different id range must reuse them instead of allocating.
-	acc := NewAccumulator()
+	const retain = 16
+
+	// With retention configured, spares survive Reset key-independently: a
+	// following union over a completely different id range reuses them
+	// instead of allocating.
+	acc := NewAccumulator().WithRetainedBlocks(retain)
 	acc.Or(bitmapOf(42))
 	spare := &acc.blocks[0][0]
 	acc.Reset()
@@ -924,20 +928,20 @@ func TestAccumulatorResetRetainsSpareBlocks(t *testing.T) {
 	require.Equal(t, spare, &acc.blocks[0][0])
 	require.Equal(t, []uint64{1 << 40}, acc.Bitmap().ToArray())
 
-	// Spare retention is capped: after a union over many ranges, only
-	// maxRetainedBlocks blocks may stay resident.
+	// Spare retention is capped at the configured count: after a union over
+	// many ranges, only `retain` blocks stay resident.
 	acc.Reset()
 	for i := 0; i < 100; i++ {
 		acc.Or(bitmapOf(uint64(i) << 16))
 	}
 	acc.Reset()
 	require.Empty(t, acc.keys)
-	require.LessOrEqual(t, len(acc.free), maxRetainedBlocks)
+	require.LessOrEqual(t, len(acc.free), retain)
 	acc.Or(bitmapOf(5, 1<<16|7, 1<<40))
 	require.Equal(t, []uint64{5, 1<<16 | 7, 1 << 40}, acc.Bitmap().ToArray())
 
 	// The keys/blocks slices themselves are dropped once a union pushed
-	// their capacity past maxRetainedSlots.
+	// their capacity past the slot floor.
 	acc.Reset()
 	for i := 0; i < maxRetainedSlots+1; i++ {
 		acc.Or(bitmapOf(uint64(i) << 16))
@@ -947,6 +951,54 @@ func TestAccumulatorResetRetainsSpareBlocks(t *testing.T) {
 	require.Nil(t, acc.keys)
 	acc.Or(bitmapOf(7))
 	require.Equal(t, []uint64{7}, acc.Bitmap().ToArray())
+}
+
+func TestAccumulatorWithRetainedBlocks(t *testing.T) {
+	blockPtr := func(acc *Accumulator) *uint16 { return &acc.blocks[0][0] }
+
+	t.Run("default retains nothing", func(t *testing.T) {
+		// A never-configured accumulator frees its blocks on Reset, so the
+		// next union allocates fresh rather than reusing.
+		acc := NewAccumulator()
+		acc.Or(bitmapOf(42))
+		acc.Reset()
+		require.Empty(t, acc.free)
+	})
+
+	t.Run("explicit zero retains nothing", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(0)
+		acc.Or(bitmapOf(42))
+		acc.Reset()
+		require.Empty(t, acc.free)
+	})
+
+	t.Run("negative retains nothing", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(-5)
+		require.Equal(t, 0, acc.maxRetained)
+	})
+
+	t.Run("retains up to the cap and reuses", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(2)
+		for i := 0; i < 5; i++ {
+			acc.Or(bitmapOf(uint64(i) << 16))
+		}
+		acc.Reset()
+		require.Len(t, acc.free, 2)
+
+		// The retained spare backs the next union's first range.
+		acc.Or(bitmapOf(1 << 40))
+		require.NotEmpty(t, acc.blocks)
+	})
+
+	t.Run("survives Reset", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(4)
+		acc.Or(bitmapOf(1))
+		spare := blockPtr(acc)
+		acc.Reset()
+		require.Equal(t, 4, acc.maxRetained)
+		acc.Or(bitmapOf(1 << 40))
+		require.Equal(t, spare, blockPtr(acc))
+	})
 }
 
 func TestAccumulatorBitmapToBuf(t *testing.T) {
@@ -1269,7 +1321,9 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 		buf := make([]byte, 4096)
 		get := func(int) (*Bitmap, []byte) { return &bm, buf }
 
-		acc := NewAccumulator()
+		// Reuse is opt-in: retention must be configured for a warm pooled
+		// accumulator to allocate nothing across Reset.
+		acc := NewAccumulator().WithRetainedBlocks(16)
 		allocs := testing.AllocsPerRun(100, func() {
 			acc.Reset()
 			for _, s := range sources {

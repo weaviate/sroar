@@ -60,8 +60,8 @@ type Accumulator struct {
 	blocks [][]uint16
 
 	// free holds cleared spare blocks carried across Reset (at most
-	// maxRetainedBlocks). Unlike blocks, entries are not bound to any key:
-	// the next union's ranges — whatever they are — claim them before
+	// maxRetained). Unlike blocks, entries are not bound to any key: the
+	// next union's ranges — whatever they are — claim them before
 	// allocating anew.
 	free [][]uint16
 
@@ -78,18 +78,20 @@ type Accumulator struct {
 	gen uint64
 
 	// maxConc caps the goroutines a single deposit call (Or, OrAcc,
-	// AndNot, AndNotAcc) may fan out to. Zero (the zero Accumulator)
-	// stays serial; see concCap for the full encoding.
+	// AndNot, AndNotAcc) may fan out to; concCap resolves it. Values <= 1
+	// (including the zero Accumulator) stay serial.
 	maxConc int
+
+	// maxRetained caps the staging blocks Reset keeps as spares for reuse.
+	// 0 (including the zero Accumulator) retains nothing; block reuse is
+	// opt-in via WithRetainedBlocks.
+	maxRetained int
 }
 
-// concUnbounded marks an explicit WithConc(<=0). Distinct from 0 so the
-// never-configured zero Accumulator stays serial.
-const concUnbounded = -1
-
 // NewAccumulator returns an accumulator whose calls run entirely on the
-// calling goroutine; chain WithConc to let single calls parallelize
-// internally.
+// calling goroutine and whose Reset retains no staging blocks; chain
+// WithConc and WithRetainedBlocks to enable in-call parallelism and
+// cross-Reset block reuse.
 func NewAccumulator() *Accumulator {
 	return &Accumulator{}
 }
@@ -97,31 +99,34 @@ func NewAccumulator() *Accumulator {
 // WithConc sets the cap on goroutines a single deposit call (Or, OrAcc,
 // AndNot, AndNotAcc) may split its work across, and returns the
 // accumulator so it chains with construction: NewAccumulator().WithConc(8).
-// Values <= 0 remove the cap — the same convention as the concurrent
-// Bitmap operations' maxConcurrency — and 1 keeps every call serial. The
-// cap engages only when there is enough work to pay for the fan-out (the
+// Values <= 1 keep every call serial; there is no unbounded sentinel — pass
+// a large value (e.g. math.MaxInt) to let fan-out track the available work.
+// The cap engages only when there is enough work to pay for the fan-out (the
 // Or variants gate on the source's container or range count, the AndNot
 // variants on the smaller of the two key sets) and survives Reset — pool
 // users may reconfigure a checked-out accumulator between calls.
 func (acc *Accumulator) WithConc(maxConcurrency int) *Accumulator {
-	if maxConcurrency <= 0 {
-		maxConcurrency = concUnbounded
-	}
 	acc.maxConc = maxConcurrency
 	return acc
 }
 
-// concCap translates maxConc into calcConcurrency's cap convention, where
-// 0 means uncapped: an unset maxConc (0) becomes a cap of 1 (serial),
-// concUnbounded becomes 0 (no cap), any other value is the cap itself.
+// concCap resolves the configured cap to a concrete goroutine limit of at
+// least 1: the never-configured accumulator and any value <= 1 stay serial,
+// a large value lets calcConcurrency size the fan-out to the work.
 func (acc *Accumulator) concCap() int {
-	switch acc.maxConc {
-	case 0:
-		return 1
-	case concUnbounded:
-		return 0
-	}
-	return acc.maxConc
+	return max(1, acc.maxConc)
+}
+
+// WithRetainedBlocks caps how many staging blocks Reset keeps as spares for
+// the next union to reuse (each is one touched 64K range, ~8KB), and returns
+// the accumulator so it chains with construction. Values <= 0 retain nothing
+// — the default, so a pooled accumulator opts into block reuse explicitly;
+// pass a large value to retain every block a union touched. The setting
+// survives Reset, so pool users configure it once. Retention bounds carried
+// memory only; the peak during a single union is whatever its spread demands.
+func (acc *Accumulator) WithRetainedBlocks(blocks int) *Accumulator {
+	acc.maxRetained = max(0, blocks)
+	return acc
 }
 
 // stageBlock returns the staging block for the 64K range of key, creating
@@ -657,39 +662,37 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 	}
 }
 
-// maxRetainedBlocks bounds the staging blocks Reset carries over to the
-// next union as spares: enough to serve typical pooled reuse without
-// re-allocating, while capping a long-lived accumulator's footprint (and
-// Reset's clearing cost) at maxRetainedBlocks * 8KB no matter how many
-// ranges past unions touched.
-const maxRetainedBlocks = 16
-
-// maxRetainedSlots bounds the capacity of the keys/blocks slices kept
-// across Reset. Their per-entry cost is tiny next to the 8KB blocks, but a
-// single union over an abnormal number of ranges would otherwise pin its
-// full-size backing arrays for the accumulator's lifetime.
+// maxRetainedSlots is the floor for the capacity of the keys/blocks slices
+// kept across Reset. Their per-entry cost is tiny next to the 8KB blocks, so
+// a small backing array is always worth keeping; a single union over an
+// abnormal number of ranges would otherwise pin its full-size backing arrays
+// for the accumulator's lifetime. A larger WithRetainedBlocks lifts this
+// floor so retained blocks keep their slots (see Reset).
 const maxRetainedSlots = 1024
 
-// Reset clears the accumulator for reuse. Up to maxRetainedBlocks staging
-// blocks are cleared and kept as key-independent spares for the next
-// union's ranges, whatever they are; everything else is released, so a
-// pooled accumulator's memory and per-union cost stay bounded by the
-// current union, not by every range it has ever served. Reset bounds
-// retained memory only — the peak during a union is whatever its spread
-// demands.
+// Reset clears the accumulator for reuse. Up to WithRetainedBlocks staging
+// blocks are cleared and kept as key-independent spares for the next union's
+// ranges, whatever they are; everything else is released, so a pooled
+// accumulator's memory and per-union cost stay bounded by the current union,
+// not by every range it has ever served. Reset bounds retained memory only —
+// the peak during a union is whatever its spread demands.
 func (acc *Accumulator) Reset() {
 	acc.gen++
-	if acc.free == nil {
-		acc.free = make([][]uint16, 0, maxRetainedBlocks)
-	}
-	for _, b := range acc.blocks {
-		if len(acc.free) == maxRetainedBlocks {
-			break
+	if n := acc.maxRetained; n > 0 {
+		// Append to any spares still unclaimed from a prior Reset; the slice
+		// settles at ~n after the first fill.
+		for _, b := range acc.blocks {
+			if len(acc.free) >= n {
+				break
+			}
+			clear(b)
+			acc.free = append(acc.free, b)
 		}
-		clear(b)
-		acc.free = append(acc.free, b)
 	}
-	if cap(acc.keys) > maxRetainedSlots {
+	// Keep the keys/blocks backing arrays if their capacity is within the
+	// slot floor or what the retained blocks need; drop an abnormally large
+	// one so a single wide union can't pin it for the accumulator's life.
+	if cap(acc.keys) > max(maxRetainedSlots, acc.maxRetained) {
 		acc.keys, acc.blocks = nil, nil
 	} else {
 		// Zero the pointer slots before truncating: a bare [:0] would keep
