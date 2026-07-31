@@ -616,21 +616,23 @@ func (b bitmap) all() []uint16 {
 // number written. Stops when out is full, so a cardinality header that
 // understates the popcount degrades deterministically rather than overrunning.
 func (b bitmap) intoArray(out []uint16) int {
-	return bitsIntoArray(b[startIdx:], out)
+	return bitsIntoArray(b[startIdx:], out, 0)
 }
 
 // bitsIntoArray writes the set values of a headerless run of bitmap words (a
 // bitmap container's data past its header, or an Accumulator staging block)
-// into out in ascending order and returns the number written. Stops when out
+// into out in ascending order and returns the number written. baseWord is
+// words' offset within its container, so callers can pass a clamped window
+// and still extract the right values; pass 0 for a full run. Stops when out
 // is full, so an out sized below the words' popcount degrades
 // deterministically rather than overrunning.
-func bitsIntoArray(words []uint16, out []uint16) int {
+func bitsIntoArray(words []uint16, out []uint16, baseWord uint16) int {
 	idx := 0
 	for w, word := range words {
 		if word == 0 {
 			continue
 		}
-		base := uint16(w) << 4
+		base := (baseWord + uint16(w)) << 4
 		// bitmapMask(pos) is 1<<(15-pos), so the smallest pos is the highest
 		// bit: LeadingZeros16 yields values in ascending order.
 		for word != 0 {

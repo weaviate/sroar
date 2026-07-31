@@ -36,6 +36,18 @@ func BenchmarkOr(b *testing.B) {
 		}
 		return sources
 	}
+	// Clustered: singletons of consecutive values, perBlock per 64K range,
+	// sitting mid-range — sequential doc-ID runs, the shape whose touched
+	// window per staging block is far narrower than the block.
+	makeClusteredTiny := func(n, perBlock int) []*Bitmap {
+		sources := make([]*Bitmap, n)
+		for i := range sources {
+			block, off := uint64(i/perBlock), uint64(i%perBlock)
+			sources[i] = NewBitmap()
+			sources[i].Set(block<<16 + 30_000 + off)
+		}
+		return sources
+	}
 
 	fixtures := []struct {
 		name    string
@@ -48,6 +60,7 @@ func BenchmarkOr(b *testing.B) {
 		{"tiny_100k_u100m", makeTiny(rand.New(rand.NewSource(8)), 100_000, 100_000_000)},
 		{"tiny_100k_u300m", makeTiny(rand.New(rand.NewSource(9)), 100_000, 300_000_000)},
 		{"tiny_100k_u1b", makeTiny(rand.New(rand.NewSource(10)), 100_000, 1_000_000_000)},
+		{"tiny_100k_clustered8", makeClusteredTiny(100_000, 8)},
 		{"mixed_10k_tiny_5_large_u10m", append(
 			makeTiny(rand.New(rand.NewSource(5)), 10_000, 10_000_000),
 			makeLarge(6, 5, 200_000, 10_000_000)...)},

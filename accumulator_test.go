@@ -146,6 +146,19 @@ func TestAccumulator(t *testing.T) {
 			},
 		},
 		{
+			name: "clustered mid-block window",
+			sources: func() []*Bitmap {
+				// Values confined to the middle of their 64K ranges: the
+				// build must clamp to an interior touched-word window on
+				// both ends without shifting the extracted values.
+				var sources []*Bitmap
+				for i := uint64(0); i < 100; i++ {
+					sources = append(sources, bitmapOf(1<<16+30_000+i), bitmapOf(5<<16+40_000+i))
+				}
+				return sources
+			},
+		},
+		{
 			name: "array-bitmap cutoff below",
 			sources: func() []*Bitmap {
 				// 2048 distinct values in one 64K range: result container
