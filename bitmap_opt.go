@@ -501,7 +501,7 @@ func fillBitmapContainer(ra *Bitmap, off uint64, c []uint16, seg []uint64) {
 			word = 0
 			wordIdx = idx
 		}
-		word |= bitmapMask[y&0xf]
+		word |= bitmapMask(y & 0xf)
 	}
 	words[wordIdx] = word
 	card := 0
@@ -1300,9 +1300,10 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 				ra.setKey(minKey, minOffset)
 
 				commonContainer = ra.fillUpBitmapContainerRange(minOffset, minY, maxY, card+newYs, nil)
+				data := commonContainer[startIdx:]
 				for i := 0; i < card; i++ {
 					y := prevContainer[startIdx+uint16(i)]
-					commonContainer[startIdx+y/16] |= bitmapMask[y%16]
+					setBit(data, y)
 				}
 			}
 		default:
@@ -1355,9 +1356,10 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 					ra.setKey(minKey, offset)
 
 					commonContainer = ra.fillUpBitmapContainerRange(offset, minY, maxCardinality-1, card+newYs, onesBitmap)
+					data := commonContainer[startIdx:]
 					for i := 0; i < card; i++ {
 						y := prevContainer[startIdx+uint16(i)]
-						commonContainer[startIdx+y/16] |= bitmapMask[y%16]
+						setBit(data, y)
 					}
 				}
 			}
@@ -1499,11 +1501,11 @@ func (b bitmap) setRange(minY, maxY int, onesBitmap bitmap) {
 	}
 	for y, mx := minY, min(minY16, maxY+1); y < mx; y++ {
 		// fmt.Printf("    ==> b16L i=%d bit=%d\n", y/16, y%16)
-		b16[y/16] |= bitmapMask[y%16]
+		setBit(b16, uint16(y))
 	}
 	for y, mx := max(minY, maxY16), maxY+1; y < mx; y++ {
 		// fmt.Printf("    ==> b16R i=%d bit=%d\n", y/16, y%16)
-		b16[y/16] |= bitmapMask[y%16]
+		setBit(b16, uint16(y))
 	}
 }
 

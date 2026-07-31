@@ -243,8 +243,8 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 		// elements of other — no scratch buffer or allocation needed.
 		// For each word, the uint64 mask is built on the fly from other's elements.
 		// Bit of value x in dst64[x>>6]: bitmapMask reverses bit order within
-		// each uint16 (bitmapMask[p]=1<<(15-p)), so the mapping is
-		// uint64(bitmapMask[pos]) << (idx*16) where idx=(x>>4)&3, pos=x&0xF.
+		// each uint16 (bitmapMask(p)=1<<(15-p)), so the mapping is
+		// uint64(bitmapMask(pos)) << (idx*16) where idx=(x>>4)&3, pos=x&0xF.
 		// Benchmarks show this is faster than the previous 1KB batch approach
 		// and avoids any allocation.
 		dst64 := uint16To64SliceUnsafe(b[startIdx:])
@@ -268,7 +268,7 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 				x := src[j]
 				idx := (x >> 4) & 3 // which uint16 within the uint64 (0-3)
 				pos := x & 0xF      // bit within that uint16
-				mask |= uint64(bitmapMask[pos]) << (idx * 16)
+				mask |= uint64(bitmapMask(pos)) << (idx * 16)
 				j++
 			}
 			dst64[i] &= mask
@@ -278,11 +278,10 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 		return nil
 	}
 
-	clear(optBuf[startIdx:])
+	data := optBuf[startIdx:]
+	clear(data)
 	for _, x := range other.all() {
-		idx := x >> 4
-		pos := x & 0xF
-		optBuf[startIdx+idx] |= bitmapMask[pos]
+		setBit(data, x)
 	}
 
 	dst64 := uint16To64SliceUnsafe(b[startIdx:])
@@ -530,11 +529,10 @@ func (b bitmap) andNotArrayAlt(other array) {
 		return
 	}
 	delnum := 0
+	data := b[startIdx:]
 	for _, x := range other.all() {
-		idx := x >> 4
-		pos := x & 0xF
-		if b[startIdx+idx]&bitmapMask[pos] > 0 {
-			b[startIdx+idx] ^= bitmapMask[pos]
+		if hasBit(data, x) {
+			clearBit(data, x)
 			delnum++
 		}
 	}
@@ -625,17 +623,14 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		// larger is ORed into an empty bitmap so every element is new —
 		// no duplicate check needed and cardinality equals larger's size.
 		num := max(cnum, onum)
+		data := out[startIdx:]
 		for _, x := range larger.all() {
-			idx := x >> 4
-			pos := x & 0xF
-			out[startIdx+idx] |= bitmapMask[pos]
+			setBit(data, x)
 		}
 		// smaller may overlap with larger so check each bit before counting.
 		for _, x := range smaller.all() {
-			idx := x >> 4
-			pos := x & 0xF
-			if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-				out[startIdx+idx] |= bitmapMask[pos]
+			if !hasBit(data, x) {
+				setBit(data, x)
 				num++
 			}
 		}
@@ -694,11 +689,10 @@ func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	out := buf
 	copy(out, other)
 	addnum := 0
+	data := out[startIdx:]
 	for _, x := range c.all() {
-		idx := x >> 4
-		pos := x & 0xF
-		if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-			out[startIdx+idx] |= bitmapMask[pos]
+		if !hasBit(data, x) {
+			setBit(data, x)
 			addnum++
 		}
 	}
@@ -740,22 +734,21 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 	}
 
 	var addnum int
+	data := out[startIdx:]
 	if bnum == 0 {
 		// Bitmap is empty — every element is new, skip the !has check.
 		// A full POPCNT sweep to recompute cardinality would cost ~500ns
 		// fixed overhead; since all bits are new, addnum == onum.
 		for _, x := range other.all() {
-			out[startIdx+x>>4] |= bitmapMask[x&0xF]
+			setBit(data, x)
 		}
 		addnum = onum
 	} else {
 		// Per-element check is faster than OR-all + POPCNT sweep for all
 		// valid array cardinalities (< 2456 before bitmap conversion).
 		for _, x := range other.all() {
-			idx := x >> 4
-			pos := x & 0xF
-			if has := out[startIdx+idx]&bitmapMask[pos] > 0; !has {
-				out[startIdx+idx] |= bitmapMask[pos]
+			if !hasBit(data, x) {
+				setBit(data, x)
 				addnum++
 			}
 		}

@@ -365,9 +365,7 @@ func (c array) toBitmapContainer(buf []uint16) []uint16 {
 
 	data := b[startIdx:]
 	for _, x := range c.all() {
-		idx := x >> 4
-		pos := x & 0xF
-		data[idx] |= bitmapMask[pos]
+		setBit(data, x)
 	}
 	return b
 }
@@ -383,24 +381,37 @@ func (c array) String() string {
 
 type bitmap []uint16
 
-var bitmapMask []uint16
+// bitmapMask returns the bit for position pos within a bitmap word. Bit
+// order is reversed within each uint16 — bitmapMask(p) == 1<<(15-p) — so the
+// smallest position holds the highest bit (see bitsIntoArray).
+func bitmapMask(pos uint16) uint16 {
+	return 0x8000 >> pos
+}
 
-func init() {
-	bitmapMask = make([]uint16, 16)
-	for i := 0; i < 16; i++ {
-		bitmapMask[i] = 1 << (15 - i)
-	}
+// setBit, clearBit and hasBit set, clear and test value x's bit in a
+// headerless run of bitmap words (a bitmap container's data past its header,
+// or an Accumulator staging block).
+func setBit(words []uint16, x uint16) {
+	words[x>>4] |= bitmapMask(x & 0xF)
+}
+
+func clearBit(words []uint16, x uint16) {
+	words[x>>4] &^= bitmapMask(x & 0xF)
+}
+
+func hasBit(words []uint16, x uint16) bool {
+	return words[x>>4]&bitmapMask(x&0xF) > 0
 }
 
 func (b bitmap) add(x uint16) bool {
 	idx := x >> 4
-	pos := x & 0xF
+	mask := bitmapMask(x & 0xF)
 
-	if has := b[startIdx+idx] & bitmapMask[pos]; has > 0 {
+	if b[startIdx+idx]&mask > 0 {
 		return false
 	}
 
-	b[startIdx+idx] |= bitmapMask[pos]
+	b[startIdx+idx] |= mask
 	incrCardinality(b)
 	return true
 }
@@ -410,8 +421,8 @@ func (b bitmap) remove(x uint16) bool {
 	pos := x & 0xF
 
 	c := getCardinality(b)
-	if has := b[startIdx+idx] & bitmapMask[pos]; has > 0 {
-		b[startIdx+idx] ^= bitmapMask[pos]
+	if has := b[startIdx+idx] & bitmapMask(pos); has > 0 {
+		b[startIdx+idx] &^= bitmapMask(pos)
 		setCardinality(b, c-1)
 		return true
 	}
@@ -434,40 +445,37 @@ func (b bitmap) removeRange(lo, hi uint16) {
 
 	if loIdx == hiIdx {
 		for p := loPos; p <= hiPos; p++ {
-			if b[startIdx+loIdx]&bitmapMask[p] > 0 {
+			if b[startIdx+loIdx]&bitmapMask(p) > 0 {
 				removed++
 			}
-			b[startIdx+loIdx] &= ^bitmapMask[p]
+			b[startIdx+loIdx] &= ^bitmapMask(p)
 		}
 		setCardinality(b, N-removed)
 		return
 	}
 	for p := loPos; p < 1<<4; p++ {
-		if b[startIdx+loIdx]&bitmapMask[p] > 0 {
+		if b[startIdx+loIdx]&bitmapMask(p) > 0 {
 			removed++
 		}
-		b[startIdx+loIdx] &= ^bitmapMask[p]
+		b[startIdx+loIdx] &= ^bitmapMask(p)
 	}
 	for p := uint16(0); p <= hiPos; p++ {
-		if b[startIdx+hiIdx]&bitmapMask[p] > 0 {
+		if b[startIdx+hiIdx]&bitmapMask(p) > 0 {
 			removed++
 		}
-		b[startIdx+hiIdx] &= ^bitmapMask[p]
+		b[startIdx+hiIdx] &= ^bitmapMask(p)
 	}
 	setCardinality(b, N-removed)
 }
 
 func (b bitmap) has(x uint16) bool {
-	idx := x >> 4
-	pos := x & 0xF
-	has := b[startIdx+idx] & bitmapMask[pos]
-	return has > 0
+	return hasBit(b[startIdx:], x)
 }
 
 func (b bitmap) rank(x uint16) int {
 	idx := x >> 4
 	pos := x & 0xF
-	if b[startIdx+idx]&bitmapMask[pos] == 0 {
+	if !hasBit(b[startIdx:], x) {
 		return -1
 	}
 
@@ -476,7 +484,7 @@ func (b bitmap) rank(x uint16) int {
 		rank += bits.OnesCount16(b[int(startIdx)+i])
 	}
 	for p := uint16(0); p <= pos; p++ {
-		if b[startIdx+idx]&bitmapMask[p] > 0 {
+		if b[startIdx+idx]&bitmapMask(p) > 0 {
 			rank++
 		}
 	}
@@ -563,15 +571,15 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 
 	} else if runMode&runLazy > 0 || num == invalidCardinality {
 		// Avoid calculating the cardinality to speed up operations.
+		data := buf[startIdx:]
 		for _, x := range other.all() {
-			idx := x / 16
-			pos := x % 16
-
-			buf[startIdx+idx] |= bitmapMask[pos]
+			setBit(data, x)
 		}
 		setCardinality(buf, invalidCardinality)
 
 	} else {
+		// Branchless new-bit counting via popcount diff: kept over
+		// hasBit/setBit to stay insensitive to the overlap distribution.
 		num := getCardinality(buf)
 		for _, x := range other.all() {
 			idx := x / 16
@@ -579,7 +587,7 @@ func (b bitmap) orArray(other array, buf []uint16, runMode int) []uint16 {
 
 			val := &buf[4+idx]
 			before := bits.OnesCount16(*val)
-			*val |= bitmapMask[pos]
+			*val |= bitmapMask(pos)
 			after := bits.OnesCount16(*val)
 			num += after - before
 		}
@@ -616,7 +624,7 @@ func bitsIntoArray(words []uint16, out []uint16) int {
 			continue
 		}
 		base := uint16(w) << 4
-		// bitmapMask[pos] is 1<<(15-pos), so the smallest pos is the highest
+		// bitmapMask(pos) is 1<<(15-pos), so the smallest pos is the highest
 		// bit: LeadingZeros16 yields values in ascending order.
 		for word != 0 {
 			if idx == len(out) {
@@ -694,10 +702,10 @@ func (b bitmap) selectAt(idx int) uint16 {
 		c := bits.OnesCount16(x)
 		if idx < c {
 			for pos := uint16(0); pos < 16; pos++ {
-				if idx == 0 && x&bitmapMask[pos] > 0 {
+				if idx == 0 && x&bitmapMask(pos) > 0 {
 					return i*16 + pos
 				}
-				if x&bitmapMask[pos] > 0 {
+				if x&bitmapMask(pos) > 0 {
 					idx--
 				}
 			}
@@ -877,7 +885,7 @@ func containerAndNot(ac, bc, buf []uint16) []uint16 {
 func (b bitmap) nextGeq(y uint16) (uint16, bool) {
 	data := b[startIdx:]
 	w := int(y >> 4)
-	// bitmapMask[pos] is 1<<(15-pos), so positions >= y&15 occupy the low bits
+	// bitmapMask(pos) is 1<<(15-pos), so positions >= y&15 occupy the low bits
 	// of the word: keep them, drop the earlier (higher) bits.
 	word := data[w] & (0xFFFF >> (y & 0xF))
 	for {

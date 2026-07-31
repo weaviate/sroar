@@ -251,7 +251,7 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 			switch src[indexType] {
 			case typeArray:
 				for _, lo := range array(src).all() {
-					dst[lo>>4] |= bitmapMask[lo&0xF]
+					setBit(dst, lo)
 				}
 			case typeBitmap:
 				d64 := uint16To64SliceUnsafe(dst)
@@ -353,7 +353,7 @@ func (acc *Accumulator) orRange(bm *Bitmap, from, to int) {
 		switch src[indexType] {
 		case typeArray:
 			for _, lo := range array(src).all() {
-				dst[lo>>4] |= bitmapMask[lo&0xF]
+				setBit(dst, lo)
 			}
 		case typeBitmap:
 			d64 := uint16To64SliceUnsafe(dst)
@@ -497,7 +497,7 @@ func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 			switch src[indexType] {
 			case typeArray:
 				for _, lo := range array(src).all() {
-					dst[lo>>4] &^= bitmapMask[lo&0xF]
+					clearBit(dst, lo)
 				}
 			case typeBitmap:
 				d64 := uint16To64SliceUnsafe(dst)
