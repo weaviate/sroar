@@ -93,7 +93,14 @@ func setArrayHeader(c []uint16, card int) {
 	setCardinality(c, card)
 }
 
+// zeroOutContainer empties c. A zero cardinality header implies the payload
+// is already zero — every writer that zeroes the header also zeroes the
+// payload — so the 8KB clear is skipped then (And-style passes re-zero the
+// same emptied containers repeatedly).
 func zeroOutContainer(c []uint16) {
+	if isEmpty(c) {
+		return
+	}
 	c[indexCardinality] = 0
 	c[indexCardinality+1] = 0
 	if c[indexType] == typeBitmap {
