@@ -999,6 +999,93 @@ func TestAccumulatorWithRetainedBlocks(t *testing.T) {
 		acc.Or(bitmapOf(1 << 40))
 		require.Equal(t, spare, blockPtr(acc))
 	})
+
+	t.Run("reused dirty spare is zeroed for an OR-in deposit", func(t *testing.T) {
+		// Array sources OR into the block, so a reused spare must be zeroed on
+		// claim (overwrite=false) — none of its old bits may survive.
+		acc := NewAccumulator().WithRetainedBlocks(4)
+		for i := uint64(0); i < 100; i++ {
+			acc.Or(bitmapOf(i))
+		}
+		spare := blockPtr(acc)
+		acc.Reset()
+		acc.Or(bitmapOf(7))
+		require.Equal(t, spare, blockPtr(acc)) // the same block is reused
+		require.Equal(t, []uint64{7}, acc.Bitmap().ToArray())
+	})
+
+	t.Run("reused dirty spare is overwritten cleanly by a bitmap copy", func(t *testing.T) {
+		// A dense (bitmap-container) source into a fresh block is adopted by a
+		// full copy, so the spare is claimed dirty (overwrite=true, no clear);
+		// the copy must still leave exactly the new bits, no stale ones.
+		dense := func(base uint64) []uint64 {
+			vals := make([]uint64, 3000) // > array/bitmap cutoff → bitmap container
+			for i := range vals {
+				vals[i] = base + uint64(i)
+			}
+			return vals
+		}
+		acc := NewAccumulator().WithRetainedBlocks(2)
+		first := dense(0)
+		acc.Or(bitmapOf(first...))
+		spare := blockPtr(acc)
+		acc.Reset()
+
+		second := dense(10_000) // different bits, same 64K range
+		acc.Or(bitmapOf(second...))
+		require.Equal(t, spare, blockPtr(acc)) // the dirty spare is reused
+		require.Equal(t, second, acc.Bitmap().ToArray())
+	})
+
+	t.Run("lowering the cap shrinks the free list", func(t *testing.T) {
+		// The cap bounds retained memory both ways: a downward reconfigure
+		// must release spares beyond the new cap on the next Reset, and 0
+		// must drop them all.
+		acc := NewAccumulator().WithRetainedBlocks(8)
+		for i := uint64(0); i < 8; i++ {
+			acc.Or(bitmapOf(i << 16)) // 8 distinct ranges
+		}
+		acc.Reset()
+		require.Len(t, acc.free, 8)
+
+		acc.WithRetainedBlocks(2)
+		acc.Reset()
+		require.Len(t, acc.free, 2)
+
+		acc.WithRetainedBlocks(0)
+		acc.Reset()
+		require.Empty(t, acc.free)
+	})
+
+	t.Run("reuses a spare emptied by AndNot", func(t *testing.T) {
+		// A range emptied by AndNot keeps its (now all-zero) block until
+		// Reset; retained and reused for a different range, it must behave
+		// like any other spare.
+		acc := NewAccumulator().WithRetainedBlocks(4)
+		acc.Or(bitmapOf(1, 2, 3))
+		acc.AndNot(bitmapOf(1, 2, 3)) // range 0 now dirty-but-all-zero
+		require.Equal(t, 0, acc.Bitmap().GetCardinality())
+		spare := blockPtr(acc)
+		acc.Reset()
+		acc.Or(bitmapOf(1 << 40)) // different range, reuses the emptied spare
+		require.Equal(t, spare, blockPtr(acc))
+		require.Equal(t, []uint64{1 << 40}, acc.Bitmap().ToArray())
+	})
+
+	t.Run("large retention keeps the keys/blocks backing arrays", func(t *testing.T) {
+		// A union wider than maxRetainedSlots would drop its slices under the
+		// plain floor; a large WithRetainedBlocks lifts the floor to
+		// max(maxRetainedSlots, retained) so they are kept instead.
+		const ranges = maxRetainedSlots + 100
+		acc := NewAccumulator().WithRetainedBlocks(8 * maxRetainedSlots)
+		for i := uint64(0); i < ranges; i++ {
+			acc.Or(bitmapOf(i << 16))
+		}
+		require.Greater(t, cap(acc.keys), maxRetainedSlots) // union pushed past the plain floor
+		acc.Reset()
+		require.NotZero(t, cap(acc.keys)) // kept, not nil'd
+		require.NotZero(t, cap(acc.blocks))
+	})
 }
 
 func TestAccumulatorBitmapToBuf(t *testing.T) {

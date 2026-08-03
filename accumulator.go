@@ -59,10 +59,10 @@ type Accumulator struct {
 	keys   []uint64
 	blocks [][]uint16
 
-	// free holds cleared spare blocks carried across Reset (at most
-	// maxRetained). Unlike blocks, entries are not bound to any key: the
-	// next union's ranges — whatever they are — claim them before
-	// allocating anew.
+	// free holds spare blocks carried across Reset (at most maxRetained),
+	// kept dirty — insertBlockAt zeroes one when it is claimed. Unlike
+	// blocks, entries are not bound to any key: the next union's ranges —
+	// whatever they are — claim them before allocating anew.
 	free [][]uint16
 
 	// lastIdx caches the most recently hit index into keys/blocks: sources
@@ -129,10 +129,13 @@ func (acc *Accumulator) WithRetainedBlocks(blocks int) *Accumulator {
 	return acc
 }
 
-// stageBlock returns the staging block for the 64K range of key, creating
-// it on first touch; created reports a fresh all-zero block. The single
-// lookup keeps the deposit loops at one call per container.
-func (acc *Accumulator) stageBlock(key uint64) (b []uint16, created bool) {
+// stageBlock returns the staging block for the 64K range of key, creating it
+// on first touch; created reports a fresh block. A created block is zeroed
+// unless overwrite is set — which promises the caller will fully overwrite it
+// (a dense copy), letting a reused spare be handed back dirty and skip the
+// clear. overwrite is ignored when the block already exists (never a fresh
+// spare). The single lookup keeps the deposit loops at one call per container.
+func (acc *Accumulator) stageBlock(key uint64, overwrite bool) (b []uint16, created bool) {
 	keys := acc.keys
 	if acc.lastIdx < len(keys) && keys[acc.lastIdx] == key {
 		return acc.blocks[acc.lastIdx], false
@@ -152,19 +155,26 @@ func (acc *Accumulator) stageBlock(key uint64) (b []uint16, created bool) {
 		acc.lastIdx = lo
 		return acc.blocks[lo], false
 	}
-	return acc.blocks[acc.insertBlockAt(lo, key)], true
+	return acc.blocks[acc.insertBlockAt(lo, key, overwrite)], true
 }
 
-// insertBlockAt inserts a zeroed staging block for key at index lo (the
-// insertion point stageBlock computed), keeping keys sorted, and returns lo.
-// Ranges are few (they track the spread of the union, not the number of
-// sources), so the insertion copy is rare and small.
-func (acc *Accumulator) insertBlockAt(lo int, key uint64) int {
+// insertBlockAt inserts a staging block for key at index lo (the insertion
+// point stageBlock computed), keeping keys sorted, and returns lo. The block
+// is zeroed unless overwrite is set, in which case a reused spare is left
+// dirty for the caller to overwrite. Ranges are few (they track the spread of
+// the union, not the number of sources), so the insertion copy is rare and
+// small.
+func (acc *Accumulator) insertBlockAt(lo int, key uint64, overwrite bool) int {
 	var b []uint16
 	if n := len(acc.free) - 1; n >= 0 {
-		// Take a spare; nil the vacated slot so the backing array never
-		// keeps a claimed block reachable on its own.
+		// Take a spare; nil the vacated slot so the backing array never keeps
+		// a claimed block reachable on its own. Retained blocks are kept dirty
+		// across Reset, so zero it now only when the caller won't overwrite it
+		// — the clear is thus paid only when actually needed.
 		b, acc.free[n], acc.free = acc.free[n], nil, acc.free[:n]
+		if !overwrite {
+			clear(b)
+		}
 	} else {
 		b = make([]uint16, maxContainerSize-int(startIdx))
 	}
@@ -231,7 +241,9 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 				continue
 			}
 			src := bm.getContainer(off)
-			dst, created := acc.stageBlock(bm.keys.key(i))
+			// A bitmap source into a fresh block is adopted by a full copy
+			// below, so let stageBlock skip zeroing a reused spare.
+			dst, created := acc.stageBlock(bm.keys.key(i), src[indexType] == typeBitmap)
 			if created && src[indexType] == typeBitmap {
 				// Fresh block: adopting the dense payload is a plain copy
 				// — cheaper than OR-ing into zeros.
@@ -264,7 +276,9 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 	isEmpty := true
 	for i := 0; i < n; i++ {
 		if getCardinality(bm.data[bm.keys.val(i):]) > 0 {
-			acc.stageBlock(bm.keys.key(i)) // only ensuring the block exists
+			// Workers OR into the block (orRange never copies), so it must be
+			// zeroed — overwrite is false.
+			acc.stageBlock(bm.keys.key(i), false) // only ensuring the block exists
 			isEmpty = false
 		}
 	}
@@ -292,7 +306,9 @@ func (acc *Accumulator) OrAcc(other *Accumulator) {
 	conc := calcConcurrency(n, minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
 		for i, key := range other.keys {
-			dst, created := acc.stageBlock(key)
+			// A fresh block is adopted by a full copy below, so let stageBlock
+			// skip zeroing a reused spare.
+			dst, created := acc.stageBlock(key, true)
 			if created {
 				// Untouched range: adopting the source bits is a plain copy
 				// — cheaper than OR-ing into a zeroed block.
@@ -311,7 +327,9 @@ func (acc *Accumulator) OrAcc(other *Accumulator) {
 	// each of other's keys is unique, so workers write disjoint blocks —
 	// no locks or atomics are needed.
 	for _, key := range other.keys {
-		acc.stageBlock(key) // only ensuring the block exists
+		// Workers OR into the block (orAccRange never copies), so it must be
+		// zeroed — overwrite is false.
+		acc.stageBlock(key, false) // only ensuring the block exists
 	}
 	concurrentlyInRanges(n, conc, func(from, to, _ int) {
 		acc.orAccRange(other, from, to)
@@ -671,23 +689,29 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 const maxRetainedSlots = 1024
 
 // Reset clears the accumulator for reuse. Up to WithRetainedBlocks staging
-// blocks are cleared and kept as key-independent spares for the next union's
-// ranges, whatever they are; everything else is released, so a pooled
-// accumulator's memory and per-union cost stay bounded by the current union,
-// not by every range it has ever served. Reset bounds retained memory only —
+// blocks are kept as key-independent spares for the next union's ranges,
+// whatever they are; everything else is released, so a pooled accumulator's
+// memory and per-union cost stay bounded by the current union, not by every
+// range it has ever served. Retained blocks are kept dirty and zeroed only
+// when a later union actually claims one (insertBlockAt), so a spare that is
+// dropped before reuse costs no clear. Reset bounds retained memory only —
 // the peak during a union is whatever its spread demands.
 func (acc *Accumulator) Reset() {
 	acc.gen++
-	if n := acc.maxRetained; n > 0 {
-		// Append to any spares still unclaimed from a prior Reset; the slice
-		// settles at ~n after the first fill.
-		for _, b := range acc.blocks {
-			if len(acc.free) >= n {
-				break
-			}
-			clear(b)
-			acc.free = append(acc.free, b)
+	// Keep at most maxRetained spares: release any excess a downward
+	// WithRetainedBlocks left behind (0 drops them all), then top up from this
+	// union's blocks. Retained blocks stay dirty — insertBlockAt zeroes one
+	// when it is claimed.
+	n := acc.maxRetained
+	if len(acc.free) > n {
+		clear(acc.free[n:]) // nil the dropped entries so their 8KB blocks are GC'd
+		acc.free = acc.free[:n]
+	}
+	for _, b := range acc.blocks {
+		if len(acc.free) >= n {
+			break
 		}
+		acc.free = append(acc.free, b)
 	}
 	// Keep the keys/blocks backing arrays if their capacity is within the
 	// slot floor or what the retained blocks need; drop an abnormally large

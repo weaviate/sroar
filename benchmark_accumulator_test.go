@@ -111,3 +111,58 @@ func BenchmarkOr(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkAccumulatorReuse measures a warm, retention-configured accumulator
+// reused across unions (the pooled shape): Reset then rebuild, so staging
+// blocks are claimed from the free list rather than allocated fresh. The dense
+// and sparse variants exercise the two claim paths — a bitmap-container source
+// adopts a fresh block by copy (the spare is claimed dirty, no clear), while an
+// array/singleton source ORs in (the spare is zeroed on claim).
+func BenchmarkAccumulatorReuse(b *testing.B) {
+	makeDense := func(nRanges, perRange int) []*Bitmap {
+		sources := make([]*Bitmap, nRanges)
+		for k := 0; k < nRanges; k++ {
+			vals := make([]uint64, perRange)
+			base := uint64(k) << 16
+			for i := range vals {
+				vals[i] = base + uint64(i)
+			}
+			sources[k] = bitmapOf(vals...)
+		}
+		return sources
+	}
+	makeSparse := func(nRanges int) []*Bitmap {
+		sources := make([]*Bitmap, nRanges)
+		for k := 0; k < nRanges; k++ {
+			sources[k] = bitmapOf(uint64(k)<<16 | 7)
+		}
+		return sources
+	}
+
+	fixtures := []struct {
+		name    string
+		sources []*Bitmap
+	}{
+		{"dense_64x3000", makeDense(64, 3000)},   // bitmap-container copy path
+		{"sparse_64x1", makeSparse(64)},          // array OR-in / clear path
+		{"dense_512x3000", makeDense(512, 3000)}, // wider spread, more spares
+	}
+
+	for _, fx := range fixtures {
+		b.Run(fx.name, func(b *testing.B) {
+			acc := NewAccumulator().WithRetainedBlocks(len(fx.sources))
+			for _, s := range fx.sources { // warm the free list
+				acc.Or(s)
+			}
+			acc.Reset()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				acc.Reset()
+				for _, s := range fx.sources {
+					acc.Or(s)
+				}
+			}
+		})
+	}
+}
