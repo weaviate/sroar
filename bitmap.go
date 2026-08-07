@@ -469,9 +469,21 @@ func (ra *Bitmap) Set(x uint64) bool {
 // FromSortedList builds a bitmap from a sorted list of values; duplicates
 // are allowed and deduplicated. It panics on unsorted input, before
 // anything is allocated. The result is allocated fully sized in a single
-// step, like the Accumulator build.
+// step, like the Accumulator build. See [FromSortedList32] for callers whose
+// values fit in 32 bits.
 func FromSortedList(vals []uint64) *Bitmap {
-	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
+	return fromSortedList("FromSortedList", vals)
+}
+
+// FromSortedList32 is [FromSortedList] for values that fit in 32 bits,
+// letting a caller hold them in a slice half the size. It builds the same
+// bitmap the equivalent []uint64 would.
+func FromSortedList32(vals []uint32) *Bitmap {
+	return fromSortedList("FromSortedList32", vals)
+}
+
+func fromSortedList[T sortedListVal](name string, vals []T) *Bitmap {
+	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(name, vals)
 	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
 	return buildFromSortedInto(ra, vals, false)
 }
