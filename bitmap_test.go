@@ -540,11 +540,11 @@ func TestFromSortedListContainerAlignment(t *testing.T) {
 }
 
 func TestSetIntoCompactedArrayContainer(t *testing.T) {
-	// containerSizeForCard can leave as little as one spare slot in a fresh
-	// array container (e.g. cardinality 2047); growing past the spares and
-	// across the 2048 array-bitmap cutoff must work for containers built by
-	// both exact-size constructors.
-	for _, n := range []int{2046, 2047, 2048} {
+	// containerSizeForCard sizes an array to its cardinality alone, so a
+	// fresh container can arrive full (2044, the largest array that fits
+	// maxArrayContainerSize); growing past it and across the array-bitmap
+	// cutoff must work for containers built by both exact-size constructors.
+	for _, n := range []int{2043, 2044, 2045} {
 		vals := make([]uint64, n)
 		for i := range vals {
 			vals[i] = uint64(i) * 2 // even values: odd ones stay free to Set

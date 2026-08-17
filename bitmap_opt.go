@@ -256,23 +256,44 @@ func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 	}
 }
 
-// compactedArraySize is the arena footprint of an array container of
-// cardinality n: header, values, one spare slot, padded to a multiple of 4
-// uint16s so every later container keeps the 8-byte alignment the
-// uint16To64SliceUnsafe views rely on. A full 4096-value array drops the spare
-// rather than exceed maxContainerSize.
+// arraySize is the arena footprint of an array container holding exactly n
+// values: header and values, padded to a multiple of 4 uint16s so every later
+// container keeps the 8-byte alignment the uint16To64SliceUnsafe views rely
+// on.
+func arraySize(n int) int {
+	return (int(startIdx) + n + 3) &^ 3
+}
+
+// compactedArraySize is arraySize with one spare slot, so a container built at
+// this size takes one insert before it has to grow. A full 4096-value array
+// drops the spare rather than exceed maxContainerSize.
 func compactedArraySize(n int) int {
-	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
+	return min(arraySize(n+1), maxContainerSize)
 }
 
 // containerSizeForCard returns the size and type of the container that
-// materializes cardinality n within one key range: a compacted array up to
-// 2048 values, a bitmap container above. Shared by the exact-size
-// constructors (FromSortedList, Accumulator) so identical content gets
-// identical container layout regardless of which built it.
+// materializes cardinality n within one key range: an array while it fits
+// maxArrayContainerSize (up to 2044 values), a bitmap container above.
+//
+// The array is sized to hold n, with no slot held back for later inserts. The
+// growth path fills a container to its last slot - a 2048-uint16 array holds
+// 2044 values before expandContainer converts it - so a reserved slot here
+// would make a rebuild of a full container larger than the container it
+// rebuilds, and at the cap would turn it into a bitmap twice the size.
+//
+// Arrays are floored at minContainerSize, the size the growth path gives a
+// fresh container: below 57 values that leaves four or more slots free, and an
+// empty key-0 container is sized like any other small one. Above it the only
+// slack is the nought to three slots of alignment padding, so a container can
+// arrive full - and a full one in an exact-size build has no capacity to grow
+// into, making its first insert reallocate the whole bitmap.
+//
+// Shared by the exact-size constructors (FromSortedList, Accumulator) so
+// identical content gets identical container layout regardless of which built
+// it.
 func containerSizeForCard(n int) (sz uint16, typ uint16) {
-	if n <= 2048 {
-		return uint16(compactedArraySize(n)), typeArray
+	if s := arraySize(n); s <= maxArrayContainerSize {
+		return uint16(max(s, minContainerSize)), typeArray
 	}
 	return maxContainerSize, typeBitmap
 }

@@ -3898,6 +3898,53 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 	})
 }
 
+func TestContainerSizeForCard(t *testing.T) {
+	// Array containers hold their cardinality and nothing more, floored at
+	// minContainerSize and capped at maxArrayContainerSize. 2044 is the
+	// largest cardinality that still fits the cap (4 header + 2044 values),
+	// and it is what the growth path fills a 2048-uint16 array to.
+	testCases := []struct {
+		card    int
+		expSize uint16
+		expType uint16
+	}{
+		{card: 0, expSize: minContainerSize, expType: typeArray},
+		{card: 1, expSize: minContainerSize, expType: typeArray},
+		{card: 56, expSize: minContainerSize, expType: typeArray},
+		{card: 60, expSize: minContainerSize, expType: typeArray},
+		{card: 61, expSize: 68, expType: typeArray},
+		{card: 1020, expSize: 1024, expType: typeArray},
+		{card: 2043, expSize: maxArrayContainerSize, expType: typeArray},
+		{card: 2044, expSize: maxArrayContainerSize, expType: typeArray},
+		{card: 2045, expSize: maxContainerSize, expType: typeBitmap},
+		{card: maxCardinality, expSize: maxContainerSize, expType: typeBitmap},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("card %d", tc.card), func(t *testing.T) {
+			sz, typ := containerSizeForCard(tc.card)
+			require.Equal(t, tc.expSize, sz)
+			require.Equal(t, tc.expType, typ)
+		})
+	}
+}
+
+func TestFromSortedListSmallContainersAreMinSized(t *testing.T) {
+	// The floor gives the pre-created empty key-0 container and a filled
+	// small one the same size, and leaves a fresh container room to grow
+	// before expandContainer has to move everything behind it.
+	bm := FromSortedList([]uint64{1 << 20, 1<<20 + 1})
+	require.Equal(t, 2, bm.keys.numKeys())
+
+	zeroCont := bm.getContainer(bm.keys.val(0))
+	valsCont := bm.getContainer(bm.keys.val(1))
+	require.Equal(t, uint64(0), bm.keys.key(0))
+	require.Equal(t, 0, getCardinality(zeroCont))
+	require.Equal(t, 2, getCardinality(valsCont))
+	require.Equal(t, uint16(minContainerSize), zeroCont[indexSize])
+	require.Equal(t, uint16(minContainerSize), valsCont[indexSize])
+}
+
 func TestFromSortedList(t *testing.T) {
 	rnd := rand.New(rand.NewSource(1724861525311))
 
@@ -3927,8 +3974,8 @@ func TestFromSortedList(t *testing.T) {
 		"few values in key 0":           {1, 2, 3},
 		"container boundaries":          {1, 2, 3, 1 << 20, 1<<20 + 1, 1 << 40},
 		"not starting at key 0":         {1 << 20, 1<<20 + 5, 1 << 33},
-		"array/bitmap threshold 2048":   genSeq(2048, 3),
-		"array/bitmap threshold 2049":   genSeq(2049, 3),
+		"array/bitmap threshold 2044":   genSeq(2044, 3),
+		"array/bitmap threshold 2045":   genSeq(2045, 3),
 		"one full container":            genSeq(65536, 1),
 		"dense across containers":       genSeq(1_000_000, 1),
 		"sparse arrays":                 genSeq(100_000, 1000),

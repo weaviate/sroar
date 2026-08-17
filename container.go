@@ -46,7 +46,12 @@ const (
 	// Given that our data is represented in []uint16s, that'd mean the size of container to store
 	// it would be divided by 16.
 	// 4 for header and 4096 for storing bitmap container. In Uint16.
-	maxContainerSize = 4 + (1<<16)/16
+	maxContainerSize = 4 + (1<<16)/16 // 4100
+	// An array container never grows past half a bitmap container's payload.
+	// That is the size expandContainer converts at, so the sizes the
+	// exact-size constructors emit and the sizes the growth path produces
+	// stop at the same boundary. In Uint16.
+	maxArrayContainerSize = (1 << 16) / 16 / 2 // 2048
 )
 
 func incrCardinality(data []uint16) {
