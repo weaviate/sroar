@@ -460,7 +460,7 @@ func (ra *Bitmap) Set(x uint64) bool {
 func FromSortedList(vals []uint64) *Bitmap {
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
 	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
-	return buildFromSortedInto(ra, vals)
+	return buildFromSortedInto(ra, vals, false)
 }
 
 // TODO: Potentially this can be optimized.

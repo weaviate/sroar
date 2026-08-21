@@ -311,8 +311,13 @@ func containerSizeForCard(n int) (sz uint16, typ uint16) {
 // result exposes. It must not alias the memory backing vals: the build
 // writes containers while still reading later values. The returned bitmap
 // holds a reference to the buffer, so the buffer must not be reused until
-// the bitmap is released. Mutating the result stays within the buffer's
-// capacity until it needs to grow, at which point it migrates to the heap.
+// the bitmap is released — duplicate-heavy input pins the full requested
+// size. Mutating the result stays within the buffer's capacity until it
+// needs to grow, at which point it migrates to the heap.
+// get must not modify vals: a change breaking the ascending order would
+// lose values silently, so it panics mid-build, leaving the buffer and the
+// bitmap unusable; a change preserving it still builds correctly, but may
+// outgrow the buffer and migrate to the heap.
 func FromSortedListToBuf(vals []uint64, get func(sizeBytes int) []byte) *Bitmap {
 	return InitFromSortedListToBuf(vals, func(sizeBytes int) (*Bitmap, []byte) {
 		return &Bitmap{}, get(sizeBytes)
@@ -325,7 +330,8 @@ func FromSortedListToBuf(vals []uint64, get func(sizeBytes int) []byte) *Bitmap 
 // building into pooled memory allocates nothing. The struct must be
 // non-nil; its previous fields are overwritten, never freed — it must not
 // own anything the caller still needs. A buffer smaller than the
-// requested size panics, as in FromSortedListToBuf.
+// requested size panics, and get must not modify vals, both as in
+// FromSortedListToBuf.
 func InitFromSortedListToBuf(vals []uint64, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
 	// +1 is the spare slot buildFromSortedInto relies on.
@@ -334,7 +340,7 @@ func InitFromSortedListToBuf(vals []uint64, get func(sizeBytes int) (*Bitmap, []
 
 	dst, buf := get(sizeTotal * 2)
 	initBitmapToBufExact("InitFromSortedListToBuf", dst, buf, sizeKeys, sizeContainer0, sizeTotal)
-	return buildFromSortedInto(dst, vals)
+	return buildFromSortedInto(dst, vals, true)
 }
 
 // fromSortedLayout is the counting pass shared by the FromSortedList
@@ -392,7 +398,12 @@ func fromSortedLayout(vals []uint64) (numKeys, sizeContainer0, sizeOtherContaine
 // the array a bitmap collapses into) before the next append, so the final
 // layout always matches a duplicate-free build's. Only the padded
 // capacity remains. Returns ra.
-func buildFromSortedInto(ra *Bitmap, vals []uint64) *Bitmap {
+//
+// checkOrder re-validates the ascending order as vals is consumed, for the
+// ToBuf constructors: their get runs between the two passes and may have
+// changed vals since. FromSortedList leaves it off; the loop is unswitched
+// so that path pays nothing for it.
+func buildFromSortedInto(ra *Bitmap, vals []uint64, checkOrder bool) *Bitmap {
 	if len(vals) == 0 {
 		return ra
 	}
@@ -426,14 +437,34 @@ func buildFromSortedInto(ra *Bitmap, vals []uint64) *Bitmap {
 
 	segKey := vals[0] & mask
 	segStart := 0
-	for i, x := range vals {
-		if key := x & mask; key != segKey {
-			finalize(vals[segStart:i], segKey)
-			segStart, segKey = i, key
+	if checkOrder {
+		prev := vals[0]
+		for i, x := range vals {
+			if x < prev {
+				panicMutatedDuringBuild(i, x, prev)
+			}
+			prev = x
+			if key := x & mask; key != segKey {
+				finalize(vals[segStart:i], segKey)
+				segStart, segKey = i, key
+			}
+		}
+	} else {
+		for i, x := range vals {
+			if key := x & mask; key != segKey {
+				finalize(vals[segStart:i], segKey)
+				segStart, segKey = i, key
+			}
 		}
 	}
 	finalize(vals[segStart:], segKey)
 	return ra
+}
+
+// panicMutatedDuringBuild is out of line: inlining the formatting into the
+// fill loop costs it ~20%, even though the branch is never taken.
+func panicMutatedDuringBuild(i int, x, prev uint64) {
+	panic(fmt.Sprintf("FromSortedList: vals mutated during build (index %d: %d after %d)", i, x, prev))
 }
 
 // fillArrayContainer writes seg's distinct values into the array container

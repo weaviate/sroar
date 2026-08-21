@@ -4258,3 +4258,103 @@ func TestFromSortedListToBufMutation(t *testing.T) {
 	require.Equal(t, oracle.GetCardinality(), bm.GetCardinality())
 	require.Equal(t, oracle.ToArray(), bm.ToArray())
 }
+
+func TestFromSortedListToBufGetMutatesVals(t *testing.T) {
+	// Unchecked, these make the build revisit a key it already finalized,
+	// silently losing the values written the first time.
+	rejected := map[string]struct {
+		vals   []uint64
+		mutate func(vals []uint64)
+		panics string
+	}{
+		"value moved to a later key": {
+			vals:   []uint64{0, 1, 2},
+			mutate: func(vals []uint64) { vals[1] = 1 << 16 },
+			panics: "FromSortedList: vals mutated during build (index 2: 2 after 65536)",
+		},
+		"values swapped within a key": {
+			vals:   []uint64{0, 1, 2},
+			mutate: func(vals []uint64) { vals[1], vals[2] = vals[2], vals[1] },
+			panics: "FromSortedList: vals mutated during build (index 2: 1 after 2)",
+		},
+		"value moved to an earlier key": {
+			vals:   []uint64{0, 1 << 16, 2 << 16},
+			mutate: func(vals []uint64) { vals[2] = 1 },
+			panics: "FromSortedList: vals mutated during build (index 2: 1 after 65536)",
+		},
+	}
+	for name, tc := range rejected {
+		t.Run(name, func(t *testing.T) {
+			require.PanicsWithValue(t, tc.panics, func() {
+				FromSortedListToBuf(tc.vals, func(sizeBytes int) []byte {
+					tc.mutate(tc.vals)
+					return make([]byte, sizeBytes)
+				})
+			})
+		})
+	}
+
+	// Still ascending, so not rejected: the values are always right. Changing
+	// the key set leaves the keys node sized as the layout pass predicted,
+	// costing byte-canonicality — documented, not enforced.
+	tolerated := map[string]struct {
+		vals      []uint64
+		mutate    func(vals []uint64)
+		expect    []uint64
+		canonical bool
+	}{
+		"value replaced within the same key": {
+			vals:      []uint64{0, 1, 2},
+			mutate:    func(vals []uint64) { vals[2] = 1000 },
+			expect:    []uint64{0, 1, 1000},
+			canonical: true,
+		},
+		"value moved into a new key": {
+			vals:   []uint64{0, 1, 2},
+			mutate: func(vals []uint64) { vals[2] = 1 << 16 },
+			expect: []uint64{0, 1, 1 << 16},
+		},
+		"values collapsed into fewer keys": {
+			vals:   []uint64{0, 1 << 16, 2 << 16},
+			mutate: func(vals []uint64) { vals[1], vals[2] = 1, 2 },
+			expect: []uint64{0, 1, 2},
+		},
+	}
+	for name, tc := range tolerated {
+		t.Run(name, func(t *testing.T) {
+			var bm *Bitmap
+			require.NotPanics(t, func() {
+				bm = FromSortedListToBuf(tc.vals, func(sizeBytes int) []byte {
+					tc.mutate(tc.vals)
+					return make([]byte, sizeBytes)
+				})
+			})
+			require.Equal(t, tc.expect, bm.ToArray())
+			require.Equal(t, tc.expect, FromBuffer(bm.ToBuffer()).ToArray())
+
+			direct := FromSortedList(tc.expect).ToBuffer()
+			if tc.canonical {
+				require.Equal(t, direct, bm.ToBuffer())
+			} else {
+				require.NotEqual(t, direct, bm.ToBuffer())
+			}
+		})
+	}
+
+	// Duplicates only ever make the requested size an upper bound, so they
+	// stay in the buffer rather than tripping the check.
+	t.Run("duplicates do not trip the check", func(t *testing.T) {
+		vals := make([]uint64, 0, 2049)
+		for i := 0; i < 2049; i++ {
+			vals = append(vals, uint64(i/683))
+		}
+		var bm *Bitmap
+		require.NotPanics(t, func() {
+			bm = FromSortedListToBuf(vals, func(sizeBytes int) []byte {
+				return make([]byte, sizeBytes)
+			})
+		})
+		require.Equal(t, []uint64{0, 1, 2}, bm.ToArray())
+		require.NotNil(t, bm._ptr)
+	})
+}
