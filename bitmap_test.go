@@ -1644,6 +1644,29 @@ func TestReset(t *testing.T) {
 		require.Equal(t, bmTemplate.GetCardinality(), bm.GetCardinality())
 		require.ElementsMatch(t, bmTemplate.ToArray(), bm.ToArray())
 	})
+
+	t.Run("reused bitmap serializes like a fresh one", func(t *testing.T) {
+		refilled := map[string][]uint64{
+			"single value":     {1},
+			"nothing":          {},
+			"spanning keys":    {2, 3},
+			"beyond first key": {1 << 16},
+		}
+		for name, vals := range refilled {
+			t.Run(name, func(t *testing.T) {
+				bm := bmTemplate.Clone()
+				bm.Reset()
+				fresh := NewBitmap()
+				for _, v := range vals {
+					bm.Set(v)
+					fresh.Set(v)
+				}
+
+				require.Equal(t, fresh.ToArray(), bm.ToArray())
+				require.Equal(t, fresh.ToBuffer(), bm.ToBuffer())
+			})
+		}
+	})
 }
 
 func TestZeroOut(t *testing.T) {

@@ -605,6 +605,7 @@ func (ra *Bitmap) RemoveRange(lo, hi uint64) {
 func (ra *Bitmap) Reset() {
 	sizeKeys := calcSizeKeys(2)
 	ra.data = ra.data[:sizeKeys]
+	clear(ra.data)
 	ra.keys = uint16To64SliceUnsafe(ra.data)
 	ra.keys.setNodeSize(sizeKeys)
 
