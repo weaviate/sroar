@@ -119,11 +119,14 @@ func (acc *Accumulator) concCap() int {
 
 // WithRetainedBlocks caps how many staging blocks Reset keeps as spares for
 // the next union to reuse (each is one touched 64K range, ~8KB), and returns
-// the accumulator so it chains with construction. Values <= 0 retain nothing
-// — the default, so a pooled accumulator opts into block reuse explicitly;
-// pass a large value to retain every block a union touched. The setting
-// survives Reset, so pool users configure it once. Retention bounds carried
-// memory only; the peak during a single union is whatever its spread demands.
+// the accumulator so it chains with construction. The slices indexing those
+// blocks are bounded by the same budget (see retainedSlotFactor), so a union
+// within it carries its whole staging layout across Reset. Values <= 0 retain
+// nothing — the default, so a pooled accumulator opts into block reuse
+// explicitly; pass a large value to retain every block a union touched. The
+// setting survives Reset, so pool users configure it once. Retention bounds
+// carried memory only; the peak during a single union is whatever its spread
+// demands.
 func (acc *Accumulator) WithRetainedBlocks(blocks int) *Accumulator {
 	acc.maxRetained = max(0, blocks)
 	return acc
@@ -158,19 +161,16 @@ func (acc *Accumulator) stageBlock(key uint64, overwrite bool) (b []uint16, crea
 	return acc.blocks[acc.insertBlockAt(lo, key, overwrite)], true
 }
 
-// insertBlockAt inserts a staging block for key at index lo (the insertion
-// point stageBlock computed), keeping keys sorted, and returns lo. The block
-// is zeroed unless overwrite is set, in which case a reused spare is left
-// dirty for the caller to overwrite. Ranges are few (they track the spread of
-// the union, not the number of sources), so the insertion copy is rare and
-// small.
+// insertBlockAt inserts a staging block for key at lo, the insertion point
+// stageBlock computed, and returns lo. The block is zeroed unless overwrite
+// promises the caller will fill it. Ranges track the union's spread, not its
+// source count, so the shift that keeps keys sorted stays small.
 func (acc *Accumulator) insertBlockAt(lo int, key uint64, overwrite bool) int {
 	var b []uint16
 	if n := len(acc.free) - 1; n >= 0 {
-		// Take a spare; nil the vacated slot so the backing array never keeps
-		// a claimed block reachable on its own. Retained blocks are kept dirty
-		// across Reset, so zero it now only when the caller won't overwrite it
-		// — the clear is thus paid only when actually needed.
+		// Nil the vacated slot so the backing array stops referencing a claimed
+		// block. Spares are carried dirty, so the clear is paid here — and only
+		// when the caller isn't about to overwrite the block anyway.
 		b, acc.free[n], acc.free = acc.free[n], nil, acc.free[:n]
 		if !overwrite {
 			clear(b)
@@ -241,12 +241,10 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 				continue
 			}
 			src := bm.getContainer(off)
-			// A bitmap source into a fresh block is adopted by a full copy
-			// below, so let stageBlock skip zeroing a reused spare.
+			// A dense source into a fresh block is adopted by copy — cheaper
+			// than OR-ing into zeros, and it makes the zeroing pointless.
 			dst, created := acc.stageBlock(bm.keys.key(i), src[indexType] == typeBitmap)
 			if created && src[indexType] == typeBitmap {
-				// Fresh block: adopting the dense payload is a plain copy
-				// — cheaper than OR-ing into zeros.
 				copy(dst, src[startIdx:maxContainerSize])
 				continue
 			}
@@ -267,18 +265,13 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 		}
 		return
 	}
-	// Concurrent: create all missing staging blocks up front on the
-	// calling goroutine, so workers only read the keys/blocks index; and
-	// each of bm's keys is unique, so workers write disjoint blocks — no
-	// locks or atomics are needed. A source with only empty containers
-	// (its elements were all removed) deposits nothing, so the fan-out is
-	// skipped.
+	// Create every missing block here, so workers only read the index; bm's
+	// keys are unique, so they write disjoint blocks and need no locking. A
+	// source of only emptied containers deposits nothing — skip the fan-out.
 	isEmpty := true
 	for i := 0; i < n; i++ {
 		if getCardinality(bm.data[bm.keys.val(i):]) > 0 {
-			// Workers OR into the block (orRange never copies), so it must be
-			// zeroed — overwrite is false.
-			acc.stageBlock(bm.keys.key(i), false) // only ensuring the block exists
+			acc.stageBlock(bm.keys.key(i), false) // orRange ORs, so it must be zeroed
 			isEmpty = false
 		}
 	}
@@ -306,12 +299,9 @@ func (acc *Accumulator) OrAcc(other *Accumulator) {
 	conc := calcConcurrency(n, minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
 		for i, key := range other.keys {
-			// A fresh block is adopted by a full copy below, so let stageBlock
-			// skip zeroing a reused spare.
+			// A fresh block is adopted by copy, so the zeroing would be wasted.
 			dst, created := acc.stageBlock(key, true)
 			if created {
-				// Untouched range: adopting the source bits is a plain copy
-				// — cheaper than OR-ing into a zeroed block.
 				copy(dst, other.blocks[i])
 				continue
 			}
@@ -322,29 +312,23 @@ func (acc *Accumulator) OrAcc(other *Accumulator) {
 		}
 		return
 	}
-	// Concurrent: create all missing staging blocks up front on the
-	// calling goroutine, so workers only read the keys/blocks index; and
-	// each of other's keys is unique, so workers write disjoint blocks —
-	// no locks or atomics are needed.
+	// As in Or: pre-create every block here, so workers only read the index
+	// and write disjoint blocks.
 	for _, key := range other.keys {
-		// Workers OR into the block (orAccRange never copies), so it must be
-		// zeroed — overwrite is false.
-		acc.stageBlock(key, false) // only ensuring the block exists
+		acc.stageBlock(key, false) // orAccRange ORs, so it must be zeroed
 	}
 	concurrentlyInRanges(n, conc, func(from, to, _ int) {
 		acc.orAccRange(other, from, to)
 	})
 }
 
-// orAccRange ORs other's blocks [from, to) into their staging blocks,
-// which must already exist. Lookup-only (lastIdx is never touched), so
-// disjoint ranges may run concurrently.
+// orAccRange ORs other's blocks [from, to) into their staging blocks, which
+// must already exist. Reads the index without touching lastIdx and writes only
+// its own blocks, so disjoint ranges may run concurrently.
 func (acc *Accumulator) orAccRange(other *Accumulator, from, to int) {
 	ai := -1 // so the first gallop may land on index 0
 	for i := from; i < to; i++ {
-		// other's keys ascend, so each lookup gallops forward from the
-		// last hit; the key is guaranteed present (blocks were
-		// pre-created).
+		// Keys ascend, so each lookup gallops on from the last hit.
 		ai = acc.searchFrom(ai, len(acc.keys), other.keys[i])
 		d64 := uint16To64SliceUnsafe(acc.blocks[ai])
 		for j, w := range uint16To64SliceUnsafe(other.blocks[i]) {
@@ -353,9 +337,8 @@ func (acc *Accumulator) orAccRange(other *Accumulator, from, to int) {
 	}
 }
 
-// orRange deposits bm's containers [from, to) into their staging blocks,
-// which must already exist. Lookup-only (lastIdx is never touched), so
-// disjoint ranges may run concurrently.
+// orRange deposits bm's containers [from, to) into their staging blocks, which
+// must already exist. Concurrency-safe on disjoint ranges, as orAccRange.
 func (acc *Accumulator) orRange(bm *Bitmap, from, to int) {
 	ai := -1 // so the first gallop may land on index 0
 	for i := from; i < to; i++ {
@@ -363,8 +346,7 @@ func (acc *Accumulator) orRange(bm *Bitmap, from, to int) {
 		if getCardinality(bm.data[off:]) == 0 {
 			continue
 		}
-		// bm's keys ascend, so each lookup gallops forward from the last
-		// hit; the key is guaranteed present (blocks were pre-created).
+		// Keys ascend, so each lookup gallops on from the last hit.
 		ai = acc.searchFrom(ai, len(acc.keys), bm.keys.key(i))
 		src := bm.getContainer(off)
 		dst := acc.blocks[ai]
@@ -400,8 +382,7 @@ func (acc *Accumulator) AndNot(bm *Bitmap) {
 	if an == 0 || bn == 0 {
 		return
 	}
-	// The work is bounded by ranges present on both sides, so the
-	// concurrency gate uses the smaller key count.
+	// Only ranges on both sides do work, so gate on the smaller side.
 	conc := calcConcurrency(min(an, bn), minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
 		acc.andNotRange(bm, 0, an)
@@ -427,8 +408,7 @@ func (acc *Accumulator) AndNotAcc(other *Accumulator) {
 	if an == 0 || bn == 0 {
 		return
 	}
-	// The work is bounded by ranges present on both sides, so the
-	// concurrency gate uses the smaller key count.
+	// Only ranges on both sides do work, so gate on the smaller side.
 	conc := calcConcurrency(min(an, bn), minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
 		acc.andNotAccRange(other, 0, an)
@@ -439,11 +419,9 @@ func (acc *Accumulator) AndNotAcc(other *Accumulator) {
 	})
 }
 
-// andNotAccRange clears other's staged bits from acc's blocks [from, to):
-// the accumulator-source sibling of andNotRange, with the same two-pointer
-// walk and gallop rules. It never mutates the shared index (lastIdx
-// included) and writes only its own blocks, so disjoint ranges may run
-// concurrently.
+// andNotAccRange clears other's staged bits from acc's blocks [from, to): the
+// accumulator-source sibling of andNotRange, same walk, same concurrency
+// rules.
 func (acc *Accumulator) andNotAccRange(other *Accumulator, from, to int) {
 	if from >= to {
 		return
@@ -482,10 +460,9 @@ func (acc *Accumulator) andNotAccRange(other *Accumulator, from, to int) {
 }
 
 // andNotRange clears bm's elements from acc's staging blocks [from, to): a
-// two-pointer walk over both ascending key sets, advancing a side
-// exponentially when it is much larger than the other. It never mutates
-// the shared index (lastIdx included) and writes only its own blocks, so
-// disjoint ranges may run concurrently.
+// two-pointer walk over both ascending key sets, galloping whichever side is
+// much larger. Reads the index without touching lastIdx and writes only its
+// own blocks, so disjoint ranges may run concurrently.
 func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 	if from >= to {
 		return
@@ -542,15 +519,11 @@ func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 // allocation for the slice.
 const layoutScratchLen = 64
 
-// layout runs the popcount pass over the staging blocks, determining the
-// result's complete layout — per-block cardinalities and the derived key
-// count and container space needs — so builds can allocate fully sized up
-// front and never reallocate or move anything. cards is
-// scratch[:len(blocks)] when it fits, a fresh slice otherwise. numKeys
-// counts the always-present key-0 slot up front; sizeContainer0 is the
-// pre-created key-0 container's size — exact when the union touches key
-// 0, a minContainerSize placeholder otherwise; sizeOtherContainers covers
-// all remaining containers.
+// layout popcounts the staging blocks into the result's complete layout, so a
+// build can allocate fully sized and never reallocate or move anything. cards
+// is scratch[:len(blocks)] when it fits, a fresh slice otherwise. numKeys
+// includes the always-present key-0 slot; sizeContainer0 is that container's
+// size, a minContainerSize placeholder when the union misses key 0.
 func (acc *Accumulator) layout(scratch []int) (cards []int, numKeys, sizeContainer0, sizeOtherContainers int) {
 	if len(acc.blocks) <= len(scratch) {
 		cards = scratch[:len(acc.blocks)]
@@ -573,12 +546,9 @@ func (acc *Accumulator) layout(scratch []int) (cards []int, numKeys, sizeContain
 			numKeys++
 			sizeOtherContainers += int(sz)
 		} else {
-			// Key 0 is special-cased: every fresh bitmap pre-creates its
-			// key-0 slot and container (the node cannot tell a zero key
-			// from an empty slot), so its slot is already counted and,
-			// instead of appending a duplicate container, the pre-created
-			// one is made exactly this size and filled in place by
-			// buildInto.
+			// Every bitmap pre-creates key 0 (the node cannot tell a zero key
+			// from an empty slot), so size that container rather than count a
+			// second one; buildInto fills it in place.
 			sizeContainer0 = int(sz)
 		}
 	}
@@ -637,14 +607,12 @@ func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte
 	return dst
 }
 
-// buildInto builds the result containers into ra, whose data array must
-// already have capacity for the full layout and whose keys node must be
-// sized with one spare slot beyond the result's keys (the numKeys+1 at the
-// call sites): setKey's return (a possibly shifted offset) is discarded
-// below, which is safe only because the spare keeps the node from ever
-// filling mid-build, so setKey never expands the node or moves containers.
-// Containers are built in ascending key order (acc.keys is sorted), so
-// each is appended once and never moved, and no append can reallocate.
+// buildInto builds the result containers into ra, which must already have
+// capacity for the full layout plus one spare key slot (the numKeys+1 at the
+// call sites). The spare is what lets setKey's return — a possibly shifted
+// offset — be discarded: the node never fills mid-build, so it never expands
+// and never moves containers. acc.keys is sorted, so containers are appended
+// in key order and no append can reallocate.
 func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 	for i, b := range acc.blocks {
 		card := cards[i]
@@ -654,9 +622,8 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 		sz, typ := containerSizeForCard(card)
 		var off uint64
 		if acc.keys[i] == 0 {
-			// Key 0's container pre-exists at exactly sz (layout sized it
-			// via sizeContainer0) with its key slot already set — fill it in
-			// place; appending would orphan it as dead space in ra.data.
+			// Pre-created at exactly sz by layout, key slot already set:
+			// appending here would orphan it as dead space in ra.data.
 			off = ra.keys.val(0)
 		} else {
 			off = ra.newContainerNoClr(sz)
@@ -667,9 +634,8 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 		setCardinality(c, card)
 		if typ == typeArray {
 			bitsIntoArray(b, c[startIdx:])
-			// The padding tail is never read by lookups, but ToBuffer
-			// serializes the whole data array — clear it so a dirty pooled
-			// buffer cannot leak into the serialized bytes.
+			// Lookups never read the padding, but ToBuffer serializes it —
+			// clear it so a dirty pooled buffer cannot leak into the bytes.
 			clear(c[int(startIdx)+card:])
 		} else {
 			copy(c[startIdx:], b)
@@ -680,13 +646,12 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 	}
 }
 
-// maxRetainedSlots is the floor for the capacity of the keys/blocks slices
-// kept across Reset. Their per-entry cost is tiny next to the 8KB blocks, so
-// a small backing array is always worth keeping; a single union over an
-// abnormal number of ranges would otherwise pin its full-size backing arrays
-// for the accumulator's lifetime. A larger WithRetainedBlocks lifts this
-// floor so retained blocks keep their slots (see Reset).
-const maxRetainedSlots = 1024
+// retainedSlotFactor bounds the keys/blocks/free capacities kept across Reset,
+// as a multiple of WithRetainedBlocks. A slot costs 56 bytes against a block's
+// 8KB, so the slack is ~2%; a tighter bound would hand the slices back on every
+// union, since append overshoots the budget while building them — by up to
+// ~2.3x for [][]uint16.
+const retainedSlotFactor = 3
 
 // Reset clears the accumulator for reuse. Up to WithRetainedBlocks staging
 // blocks are kept as key-independent spares for the next union's ranges,
@@ -698,31 +663,40 @@ const maxRetainedSlots = 1024
 // the peak during a union is whatever its spread demands.
 func (acc *Accumulator) Reset() {
 	acc.gen++
-	// Keep at most maxRetained spares: release any excess a downward
-	// WithRetainedBlocks left behind (0 drops them all), then top up from this
-	// union's blocks. Retained blocks stay dirty — insertBlockAt zeroes one
-	// when it is claimed.
+	// Bound free before refilling it, so the top-up never writes into an array
+	// about to be handed back. Only a lowered WithRetainedBlocks gets here:
+	// free never outgrows n on its own.
 	n := acc.maxRetained
-	if len(acc.free) > n {
-		clear(acc.free[n:]) // nil the dropped entries so their 8KB blocks are GC'd
+	slots := retainedSlotFactor * n
+	if cap(acc.free) > slots {
+		// Rebuilding at the budget releases the array and, with it, the spares
+		// past n — nothing else references their blocks.
+		free := make([][]uint16, min(len(acc.free), n), n)
+		copy(free, acc.free)
+		acc.free = free
+	}
+	if flen := len(acc.free); flen < n {
+		if blen := len(acc.blocks); blen > 0 {
+			// Spares are kept dirty; insertBlockAt zeroes one when it is claimed.
+			acc.free = append(acc.free, acc.blocks[:min(n-flen, blen)]...)
+		}
+	} else if flen > n {
+		// Array is within bound, only the spares are surplus: no need to copy.
+		clear(acc.free[n:])
 		acc.free = acc.free[:n]
 	}
-	for _, b := range acc.blocks {
-		if len(acc.free) >= n {
-			break
-		}
-		acc.free = append(acc.free, b)
-	}
-	// Keep the keys/blocks backing arrays if their capacity is within the
-	// slot floor or what the retained blocks need; drop an abnormally large
-	// one so a single wide union can't pin it for the accumulator's life.
-	if cap(acc.keys) > max(maxRetainedSlots, acc.maxRetained) {
-		acc.keys, acc.blocks = nil, nil
+
+	// keys and blocks are bounded the same way but judged separately: they grow
+	// on different size classes, so one can be over while the other is not.
+	if cap(acc.keys) > slots {
+		acc.keys = nil
 	} else {
-		// Zero the pointer slots before truncating: a bare [:0] would keep
-		// every dropped block reachable through the backing array.
-		clear(acc.blocks)
 		acc.keys = acc.keys[:0]
+	}
+	if cap(acc.blocks) > slots {
+		acc.blocks = nil
+	} else {
+		clear(acc.blocks) // a bare [:0] would leave the dropped blocks reachable
 		acc.blocks = acc.blocks[:0]
 	}
 	acc.lastIdx = 0

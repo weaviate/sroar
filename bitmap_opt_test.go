@@ -4358,3 +4358,88 @@ func TestFromSortedListToBufGetMutatesVals(t *testing.T) {
 		require.NotNil(t, bm._ptr)
 	})
 }
+
+// makeMaskedEntriesForSearch builds entries whose masked keys are distinct, so
+// "first index >= target" has a single unambiguous answer.
+func makeMaskedEntriesForSearch(numKeys int) []keyedMaskedEntry {
+	bm := NewBitmap()
+	for i := 0; i < numKeys; i++ {
+		bm.Set(uint64(i+1) << 16)
+	}
+	return buildKeyedMaskedEntries(bm, ^uint64(0))
+}
+
+func linearMaskedSearchFrom(entries []keyedMaskedEntry, from int, target uint64) int {
+	lower := from + 1
+	if lower >= len(entries) {
+		return lower
+	}
+	for i := lower; i < len(entries); i++ {
+		if entries[i].maskedKey >= target {
+			return i
+		}
+	}
+	return len(entries)
+}
+
+func TestSearchKeyedMaskedFrom(t *testing.T) {
+	t.Run("from -1 can land on index 0", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(10)
+		require.Equal(t, 0, searchKeyedMaskedFrom(e, -1, e[0].maskedKey))
+	})
+
+	t.Run("gap of 1 returns from+1 immediately", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(10)
+		require.Equal(t, 1, searchKeyedMaskedFrom(e, 0, e[1].maskedKey))
+	})
+
+	t.Run("exact match within range", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(100)
+		for _, from := range []int{-1, 0, 10, 50} {
+			for target := from + 1; target < len(e); target++ {
+				require.Equal(t, target, searchKeyedMaskedFrom(e, from, e[target].maskedKey),
+					"from=%d target=%d", from, target)
+			}
+		}
+	})
+
+	t.Run("between two keys returns first key >= target", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(50)
+		require.Equal(t, 6, searchKeyedMaskedFrom(e, 4, e[5].maskedKey+1))
+	})
+
+	t.Run("target beyond all keys returns len", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(20)
+		require.Equal(t, len(e), searchKeyedMaskedFrom(e, 0, e[len(e)-1].maskedKey+1))
+	})
+
+	t.Run("from+1 >= len returns from+1", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(5)
+		last := len(e) - 1
+		require.Equal(t, len(e), searchKeyedMaskedFrom(e, last, e[last].maskedKey+1))
+	})
+
+	t.Run("large gap exercises the exponential path", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(1000)
+		require.Equal(t, len(e)-1, searchKeyedMaskedFrom(e, -1, e[len(e)-1].maskedKey))
+		require.Equal(t, 901, searchKeyedMaskedFrom(e, 0, e[900].maskedKey+1))
+	})
+
+	t.Run("agrees with a linear walk across positions and targets", func(t *testing.T) {
+		e := makeMaskedEntriesForSearch(200)
+		for from := -1; from < len(e); from++ {
+			for _, offset := range []int{1, 2, 8, 16, 64, 128} {
+				target := from + offset
+				if target >= len(e) {
+					break
+				}
+				for _, k := range []uint64{
+					e[target].maskedKey, e[target].maskedKey + 1, e[target].maskedKey - 1,
+				} {
+					require.Equal(t, linearMaskedSearchFrom(e, from, k),
+						searchKeyedMaskedFrom(e, from, k), "from=%d k=%d", from, k)
+				}
+			}
+		}
+	})
+}

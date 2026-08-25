@@ -940,13 +940,14 @@ func TestAccumulatorResetRetainsSpareBlocks(t *testing.T) {
 	acc.Or(bitmapOf(5, 1<<16|7, 1<<40))
 	require.Equal(t, []uint64{5, 1<<16 | 7, 1 << 40}, acc.Bitmap().ToArray())
 
-	// The keys/blocks slices themselves are dropped once a union pushed
-	// their capacity past the slot floor.
+	// The keys/blocks slices themselves are dropped once a union spread far
+	// enough past the budget to push them beyond retainedSlotFactor.
 	acc.Reset()
-	for i := 0; i < maxRetainedSlots+1; i++ {
+	const wide = retainedSlotFactor * retain * 4
+	for i := 0; i < wide; i++ {
 		acc.Or(bitmapOf(uint64(i) << 16))
 	}
-	require.Equal(t, maxRetainedSlots+1, acc.Bitmap().GetCardinality())
+	require.Equal(t, wide, acc.Bitmap().GetCardinality())
 	acc.Reset()
 	require.Nil(t, acc.keys)
 	acc.Or(bitmapOf(7))
@@ -1072,19 +1073,135 @@ func TestAccumulatorWithRetainedBlocks(t *testing.T) {
 		require.Equal(t, []uint64{1 << 40}, acc.Bitmap().ToArray())
 	})
 
-	t.Run("large retention keeps the keys/blocks backing arrays", func(t *testing.T) {
-		// A union wider than maxRetainedSlots would drop its slices under the
-		// plain floor; a large WithRetainedBlocks lifts the floor to
-		// max(maxRetainedSlots, retained) so they are kept instead.
-		const ranges = maxRetainedSlots + 100
-		acc := NewAccumulator().WithRetainedBlocks(8 * maxRetainedSlots)
-		for i := uint64(0); i < ranges; i++ {
-			acc.Or(bitmapOf(i << 16))
+	// A union of exactly the configured size is the natural way to use the
+	// knob, and append overshoots the budget building it. The slices must
+	// still be kept, or every cycle would rebuild them.
+	t.Run("a union of the configured size keeps its slices and reallocates nothing", func(t *testing.T) {
+		for _, ranges := range []int{17, 75, 100, 1024, 5000} {
+			acc := NewAccumulator().WithRetainedBlocks(ranges)
+			src := NewBitmap()
+			for i := uint64(0); i < uint64(ranges); i++ {
+				src.Set(i << 16)
+			}
+			acc.Or(src)
+			acc.Bitmap()
+			acc.Reset()
+
+			require.NotNil(t, acc.keys, "ranges=%d", ranges)
+			require.Len(t, acc.free, ranges, "ranges=%d", ranges)
+
+			// Depositing and resetting reuses every block and every slot, so
+			// the cycle allocates nothing. (Building the result is excluded:
+			// a union over more than layoutScratchLen ranges allocates its
+			// cardinalities slice regardless of retention.)
+			allocs := testing.AllocsPerRun(3, func() {
+				acc.Or(src)
+				acc.Reset()
+			})
+			require.Zero(t, allocs, "ranges=%d", ranges)
 		}
-		require.Greater(t, cap(acc.keys), maxRetainedSlots) // union pushed past the plain floor
+	})
+
+	// Lowering the budget must hand back the arrays the wider setting grew,
+	// including free's own backing array — the retained blocks move to a
+	// right-sized one rather than staying reachable through the old.
+	t.Run("lowering the budget releases the oversized slices", func(t *testing.T) {
+		const wide = 4000
+		acc := NewAccumulator().WithRetainedBlocks(wide)
+		src := NewBitmap()
+		for i := uint64(0); i < wide; i++ {
+			src.Set(i << 16)
+		}
+		acc.Or(src)
+		acc.Bitmap()
 		acc.Reset()
-		require.NotZero(t, cap(acc.keys)) // kept, not nil'd
-		require.NotZero(t, cap(acc.blocks))
+		require.Len(t, acc.free, wide)
+		require.Greater(t, cap(acc.free), wide/2)
+
+		acc.WithRetainedBlocks(8)
+		acc.Or(bitmapOf(1, 1<<16, 1<<32))
+		acc.Bitmap()
+		acc.Reset()
+
+		require.Len(t, acc.free, 8)
+		require.LessOrEqual(t, cap(acc.free), retainedSlotFactor*8)
+		require.LessOrEqual(t, cap(acc.keys), retainedSlotFactor*8)
+		require.LessOrEqual(t, cap(acc.blocks), retainedSlotFactor*8)
+
+		// Still usable, and the retained spares still work.
+		acc.Or(bitmapOf(7, 1<<40))
+		require.Equal(t, []uint64{7, 1 << 40}, acc.Bitmap().ToArray())
+	})
+
+	// A union can drain free below a lowered budget, so its length never
+	// exceeds the new one — the oversized array must still be handed back.
+	t.Run("a drained free list still releases its oversized array", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(5000)
+		src := NewBitmap()
+		for i := uint64(0); i < 5000; i++ {
+			src.Set(i << 16)
+		}
+		acc.Or(src)
+		acc.Bitmap()
+		acc.Reset()
+		require.Greater(t, cap(acc.free), 5000)
+
+		acc.WithRetainedBlocks(100)
+		drain := NewBitmap()
+		for i := uint64(0); i < 4950; i++ {
+			drain.Set(i << 16)
+		}
+		acc.Or(drain) // claims all but ~50 of the spares
+		require.Less(t, len(acc.free), 100)
+		acc.Bitmap()
+		acc.Reset()
+
+		require.LessOrEqual(t, cap(acc.free), retainedSlotFactor*100)
+	})
+
+	// keys and blocks grow on different size classes, so one can be within
+	// the bound while the other is past it; each is judged on its own.
+	t.Run("keys and blocks are bounded independently", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(100)
+		src := NewBitmap()
+		for i := uint64(0); i < 200; i++ {
+			src.Set(i << 16)
+		}
+		acc.Or(src)
+		bound := retainedSlotFactor * 100
+		require.LessOrEqual(t, cap(acc.keys), bound)
+		require.Greater(t, cap(acc.blocks), bound)
+		acc.Bitmap()
+		acc.Reset()
+
+		require.NotNil(t, acc.keys) // within bound, kept
+		require.Nil(t, acc.blocks)  // past it, released
+
+		acc.Or(bitmapOf(1, 1<<20))
+		require.Equal(t, []uint64{1, 1 << 20}, acc.Bitmap().ToArray())
+	})
+
+	// Retention off means off: nothing is carried, including the arrays a
+	// previous wide union grew.
+	t.Run("retention off carries no slices", func(t *testing.T) {
+		acc := NewAccumulator().WithRetainedBlocks(2000)
+		src := NewBitmap()
+		for i := uint64(0); i < 2000; i++ {
+			src.Set(i << 16)
+		}
+		acc.Or(src)
+		acc.Bitmap()
+		acc.Reset()
+
+		acc.WithRetainedBlocks(0)
+		acc.Or(bitmapOf(5))
+		acc.Bitmap()
+		acc.Reset()
+
+		require.Empty(t, acc.free)
+		require.Zero(t, cap(acc.free))
+		require.Nil(t, acc.keys)
+		require.Nil(t, acc.blocks)
 	})
 }
 
@@ -1437,4 +1554,117 @@ func TestAccumulatorResultIsMutable(t *testing.T) {
 	second := acc.Bitmap()
 	require.Equal(t, []uint64{1, 2, 3}, second.ToArray())
 	require.True(t, first.Contains(99))
+}
+
+// linearSearchFrom is the obvious O(n) reading of searchFrom's contract:
+// the smallest index in (from, to) whose key is >= k, else to.
+func linearSearchFrom(keys []uint64, from, to int, k uint64) int {
+	lower := from + 1
+	if lower >= to {
+		return lower
+	}
+	for i := lower; i < to; i++ {
+		if keys[i] >= k {
+			return i
+		}
+	}
+	return to
+}
+
+func makeAccForSearch(numKeys int) *Accumulator {
+	bm := NewBitmap()
+	for i := 0; i < numKeys; i++ {
+		bm.Set(uint64(i+1) << 16)
+	}
+	acc := NewAccumulator()
+	acc.Or(bm)
+	return acc
+}
+
+func TestAccumulatorSearchFrom(t *testing.T) {
+	t.Run("from -1 can land on index 0", func(t *testing.T) {
+		acc := makeAccForSearch(10)
+		require.Equal(t, 0, acc.searchFrom(-1, len(acc.keys), acc.keys[0]))
+	})
+
+	t.Run("gap of 1 returns from+1 immediately", func(t *testing.T) {
+		acc := makeAccForSearch(10)
+		require.Equal(t, 1, acc.searchFrom(0, len(acc.keys), acc.keys[1]))
+	})
+
+	t.Run("exact match within range", func(t *testing.T) {
+		acc := makeAccForSearch(100)
+		to := len(acc.keys)
+		for _, from := range []int{-1, 0, 10, 50} {
+			for target := from + 1; target < to; target++ {
+				got := acc.searchFrom(from, to, acc.keys[target])
+				require.Equal(t, target, got, "from=%d target=%d", from, target)
+			}
+		}
+	})
+
+	t.Run("between two keys returns first key >= k", func(t *testing.T) {
+		acc := makeAccForSearch(50)
+		require.Equal(t, 6, acc.searchFrom(4, len(acc.keys), acc.keys[5]+1))
+	})
+
+	t.Run("k beyond all keys returns to", func(t *testing.T) {
+		acc := makeAccForSearch(20)
+		to := len(acc.keys)
+		require.Equal(t, to, acc.searchFrom(0, to, acc.keys[to-1]+1))
+	})
+
+	t.Run("from+1 >= to returns from+1", func(t *testing.T) {
+		acc := makeAccForSearch(5)
+		to := len(acc.keys)
+		require.Equal(t, to, acc.searchFrom(to-1, to, acc.keys[to-1]+1))
+	})
+
+	t.Run("large gap exercises the exponential path", func(t *testing.T) {
+		acc := makeAccForSearch(1000)
+		to := len(acc.keys)
+		require.Equal(t, to-1, acc.searchFrom(-1, to, acc.keys[to-1]))
+		require.Equal(t, 901, acc.searchFrom(0, to, acc.keys[900]+1))
+	})
+
+	// to is a partition bound, not just the slice length: the concurrent
+	// paths hand each worker a sub-range and the walk must stop at it.
+	t.Run("stops at to rather than the end of keys", func(t *testing.T) {
+		acc := makeAccForSearch(200)
+		for _, to := range []int{1, 2, 37, 100, 199, 200} {
+			for _, from := range []int{-1, 0, 5, 50} {
+				if from >= to {
+					continue
+				}
+				beyond := acc.keys[len(acc.keys)-1] + 1
+				require.Equal(t, to, acc.searchFrom(from, to, beyond),
+					"from=%d to=%d", from, to)
+				// A key that exists past to must not be found.
+				if to < len(acc.keys) {
+					require.Equal(t, to, acc.searchFrom(from, to, acc.keys[to]),
+						"from=%d to=%d", from, to)
+				}
+			}
+		}
+	})
+
+	t.Run("agrees with a linear walk across positions, targets and bounds", func(t *testing.T) {
+		acc := makeAccForSearch(200)
+		keys := acc.keys
+		for _, to := range []int{1, 17, 128, len(keys)} {
+			for from := -1; from < to; from++ {
+				for _, offset := range []int{1, 2, 8, 16, 64, 128} {
+					target := from + offset
+					if target >= len(keys) {
+						break
+					}
+					for _, k := range []uint64{keys[target], keys[target] + 1, keys[target] - 1} {
+						require.Equal(t, linearSearchFrom(keys, from, to, k),
+							acc.searchFrom(from, to, k),
+							"from=%d to=%d k=%d", from, to, k)
+					}
+				}
+			}
+		}
+	})
 }
