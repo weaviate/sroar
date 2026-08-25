@@ -169,6 +169,19 @@ func initBitmapToBufExact(name string, dst *Bitmap, buf []byte, sizeKeys, sizeCo
 	return dst
 }
 
+// wrapGetToBuf adapts a buffer-only get to the struct-and-buffer form the Init
+// constructors take, heap-allocating the result Bitmap. nil is passed through
+// rather than wrapped, so a shared body can name the constructor instead of
+// leaving a nil call to fail as a plain nil dereference.
+func wrapGetToBuf(get func(sizeBytes int) []byte) func(sizeBytes int) (*Bitmap, []byte) {
+	if get == nil {
+		return nil
+	}
+	return func(sizeBytes int) (*Bitmap, []byte) {
+		return &Bitmap{}, get(sizeBytes)
+	}
+}
+
 // setKey sets a key and container offset.
 func (ra *Bitmap) setKey(k uint64, offset uint64) uint64 {
 	if added := ra.keys.set(k, offset); !added {

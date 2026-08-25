@@ -578,9 +578,7 @@ func (acc *Accumulator) Bitmap() *Bitmap {
 // bitmap is released. Mutating the result stays within the buffer's
 // capacity until it needs to grow, at which point it migrates to the heap.
 func (acc *Accumulator) BitmapToBuf(get func(sizeBytes int) []byte) *Bitmap {
-	return acc.InitBitmapToBuf(func(sizeBytes int) (*Bitmap, []byte) {
-		return &Bitmap{}, get(sizeBytes)
-	})
+	return acc.bitmapToBuf("Accumulator.BitmapToBuf", wrapGetToBuf(get))
 }
 
 // InitBitmapToBuf is BitmapToBuf for callers that pool the result Bitmap
@@ -591,6 +589,15 @@ func (acc *Accumulator) BitmapToBuf(get func(sizeBytes int) []byte) *Bitmap {
 // own anything the caller still needs. A buffer smaller than the requested
 // size panics, as in BitmapToBuf.
 func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	return acc.bitmapToBuf("Accumulator.InitBitmapToBuf", get)
+}
+
+// bitmapToBuf is the shared body of the ToBuf builds; name is the exported
+// constructor the caller reached it through, so panics name that one.
+func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	if get == nil {
+		panic(name + ": get is nil")
+	}
 	var scratch [layoutScratchLen]int
 	cards, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
 	// +1 is the spare slot buildInto relies on.
@@ -600,9 +607,9 @@ func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte
 	gen := acc.gen
 	dst, buf := get(sizeTotal * 2)
 	if acc.gen != gen {
-		panic("Accumulator: mutated during build — get must not use the accumulator")
+		panic(name + ": mutated during build — get must not use the accumulator")
 	}
-	initBitmapToBufExact("Accumulator.InitBitmapToBuf", dst, buf, sizeKeys, sizeContainer0, sizeTotal)
+	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
 	acc.buildInto(dst, cards)
 	return dst
 }

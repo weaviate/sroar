@@ -1,6 +1,7 @@
 package sroar
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -1355,13 +1356,37 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		})
 	})
 
+	// Misuse names the constructor the caller reached, not the shared body
+	// both of them delegate to.
+	t.Run("panics name the calling constructor", func(t *testing.T) {
+		require.PanicsWithValue(t, "Accumulator.BitmapToBuf: get is nil",
+			func() { build().BitmapToBuf(nil) })
+		require.PanicsWithValue(t, "Accumulator.InitBitmapToBuf: get is nil",
+			func() { build().InitBitmapToBuf(nil) })
+
+		acc := build()
+		need := len(acc.Bitmap().ToBuffer())
+		require.PanicsWithValue(t,
+			fmt.Sprintf("Accumulator.BitmapToBuf: buf too small: need %d bytes, got 4", need),
+			func() {
+				build().BitmapToBuf(func(int) []byte { return make([]byte, 4) })
+			})
+		require.PanicsWithValue(t,
+			fmt.Sprintf("Accumulator.InitBitmapToBuf: buf too small: need %d bytes, got 4", need),
+			func() {
+				build().InitBitmapToBuf(func(int) (*Bitmap, []byte) {
+					return &Bitmap{}, make([]byte, 4)
+				})
+			})
+	})
+
 	t.Run("get using the accumulator panics", func(t *testing.T) {
 		// A deposit inside get would desync the staged bits from the layout
 		// snapshot the build was sized with, silently corrupting the result.
 		acc := NewAccumulator()
 		acc.Or(bitmapOf(100, 200, 300))
 		require.PanicsWithValue(t,
-			"Accumulator: mutated during build — get must not use the accumulator",
+			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
 			func() {
 				acc.BitmapToBuf(func(n int) []byte {
 					acc.Or(bitmapOf(1, 2, 3))
@@ -1374,7 +1399,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		acc := NewAccumulator()
 		acc.Or(bitmapOf(100, 200, 300))
 		require.PanicsWithValue(t,
-			"Accumulator: mutated during build — get must not use the accumulator",
+			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
 			func() {
 				acc.BitmapToBuf(func(n int) []byte {
 					acc.AndNot(bitmapOf(100))
@@ -1389,7 +1414,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		acc := NewAccumulator()
 		acc.Or(bitmapOf(100, 200, 300))
 		require.PanicsWithValue(t,
-			"Accumulator: mutated during build — get must not use the accumulator",
+			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
 			func() {
 				acc.BitmapToBuf(func(n int) []byte {
 					acc.OrAcc(other)
@@ -1404,7 +1429,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		acc := NewAccumulator()
 		acc.Or(bitmapOf(100, 200, 300))
 		require.PanicsWithValue(t,
-			"Accumulator: mutated during build — get must not use the accumulator",
+			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
 			func() {
 				acc.BitmapToBuf(func(n int) []byte {
 					acc.AndNotAcc(other)
