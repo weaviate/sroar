@@ -1188,7 +1188,7 @@ func (ra *Bitmap) capInBytes() int {
 }
 
 func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
-	return ra.InitCloneToBuf(&Bitmap{}, buf)
+	return ra.initCloneToBuf("CloneToBuf", &Bitmap{}, buf)
 }
 
 // InitCloneToBuf re-initializes dst over buf with a clone of src — the
@@ -1197,6 +1197,13 @@ func (ra *Bitmap) CloneToBuf(buf []byte) *Bitmap {
 // buf too small for the clone panics, too small for even the empty bitmap
 // falls back to a heap allocation. Returns dst.
 func (src *Bitmap) InitCloneToBuf(dst *Bitmap, buf []byte) *Bitmap {
+	return src.initCloneToBuf("InitCloneToBuf", dst, buf)
+}
+
+// initCloneToBuf is the shared body of the clone-to-buffer constructors; name
+// is the exported one the caller reached it through, so a panic names that
+// rather than this.
+func (src *Bitmap) initCloneToBuf(name string, dst *Bitmap, buf []byte) *Bitmap {
 	// Nothing to clone — parsing an empty src would fail.
 	srcLen := src.LenInBytes()
 	if srcLen == 0 {
@@ -1210,7 +1217,7 @@ func (src *Bitmap) InitCloneToBuf(dst *Bitmap, buf []byte) *Bitmap {
 	if srcLen > len(buf) {
 		// Report cap: it matches what the caller passed, and with srcLen
 		// always even the rounded-down len could only confuse.
-		panic(fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", srcLen, cap(buf)))
+		panic(fmt.Sprintf("%s: buf too small: need at least %d bytes, got %d", name, srcLen, cap(buf)))
 	}
 
 	// Copy at the uint16 level into the destination buffer, then trim data

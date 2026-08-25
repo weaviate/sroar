@@ -1211,13 +1211,20 @@ func TestCloneToBuf(t *testing.T) {
 			"at most the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
 	})
 
+	// The panic names the constructor the caller reached it through, not the
+	// shared body both of them delegate to.
 	t.Run("panic on smaller buffer size", func(t *testing.T) {
 		bm := NewBitmap()
 		bm.Set(1)
 		buf := make([]byte, 0, bm.LenInBytes()-1)
-		require.PanicsWithValue(t,
-			fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
-			func() { bm.CloneToBuf(buf) })
+		want := func(name string) string {
+			return fmt.Sprintf("%s: buf too small: need at least %d bytes, got %d",
+				name, bm.LenInBytes(), cap(buf))
+		}
+		require.PanicsWithValue(t, want("CloneToBuf"), func() { bm.CloneToBuf(buf) })
+		require.PanicsWithValue(t, want("InitCloneToBuf"), func() {
+			bm.InitCloneToBuf(&Bitmap{}, buf)
+		})
 	})
 
 	t.Run("allow buffer of odd size", func(t *testing.T) {
