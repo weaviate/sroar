@@ -3949,6 +3949,7 @@ func TestFromSortedListSmallContainersAreMinSized(t *testing.T) {
 // fromSortedListFamily is one width's entry points plus the fixtures the
 // shared drivers need, so both widths are exercised by the same tables.
 type fromSortedListFamily[T sortedListVal] struct {
+	buildName  string
 	initName   string
 	build      func([]T) *Bitmap
 	buildToBuf func([]T, func(sizeBytes int) []byte) *Bitmap
@@ -3961,6 +3962,7 @@ type fromSortedListFamily[T sortedListVal] struct {
 }
 
 var family64 = fromSortedListFamily[uint64]{
+	buildName:  "FromSortedListToBuf",
 	initName:   "InitFromSortedListToBuf",
 	build:      FromSortedList,
 	buildToBuf: FromSortedListToBuf,
@@ -3972,6 +3974,7 @@ var family64 = fromSortedListFamily[uint64]{
 }
 
 var family32 = fromSortedListFamily[uint32]{
+	buildName:  "FromSortedList32ToBuf",
 	initName:   "InitFromSortedList32ToBuf",
 	build:      FromSortedList32,
 	buildToBuf: FromSortedList32ToBuf,
@@ -4181,6 +4184,21 @@ func runFromSortedListToBufContract[T sortedListVal](t *testing.T, f fromSortedL
 	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
 		bm := f.buildToBuf(f.sample, func(sizeBytes int) []byte { return make([]byte, 0, sizeBytes) })
 		require.Equal(t, f.build(f.sample).ToArray(), bm.ToArray())
+	})
+
+	// A nil get is a caller error like any other on this path, so it names
+	// the constructor rather than surfacing as a bare nil dereference — and
+	// it is reported before the input is walked.
+	t.Run("panics on nil get", func(t *testing.T) {
+		require.PanicsWithValue(t, f.buildName+": get is nil", func() {
+			f.buildToBuf(f.sample, nil)
+		})
+		require.PanicsWithValue(t, f.initName+": get is nil", func() {
+			f.initToBuf(f.sample, nil)
+		})
+		require.PanicsWithValue(t, f.buildName+": get is nil", func() {
+			f.buildToBuf(f.unsorted, nil)
+		})
 	})
 
 	t.Run("init panics on nil struct from get", func(t *testing.T) {
@@ -4515,17 +4533,17 @@ func TestFromSortedListToBufGetMutatesVals(t *testing.T) {
 		"value moved to a later key": {
 			vals:   []uint64{0, 1, 2},
 			mutate: func(vals []uint64) { vals[1] = 1 << 16 },
-			panics: "FromSortedList: vals mutated during build (index 2: 2 after 65536)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 2 after 65536)",
 		},
 		"values swapped within a key": {
 			vals:   []uint64{0, 1, 2},
 			mutate: func(vals []uint64) { vals[1], vals[2] = vals[2], vals[1] },
-			panics: "FromSortedList: vals mutated during build (index 2: 1 after 2)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 1 after 2)",
 		},
 		"value moved to an earlier key": {
 			vals:   []uint64{0, 1 << 16, 2 << 16},
 			mutate: func(vals []uint64) { vals[2] = 1 },
-			panics: "FromSortedList: vals mutated during build (index 2: 1 after 65536)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 1 after 65536)",
 		},
 	}
 	for name, tc := range rejected {

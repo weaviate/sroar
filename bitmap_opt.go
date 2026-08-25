@@ -360,6 +360,9 @@ func InitFromSortedList32ToBuf(vals []uint32, get func(sizeBytes int) (*Bitmap, 
 // name is the exported function the caller invoked, which every panic
 // below it reports.
 func initFromSortedListToBuf[T sortedListVal](name string, vals []T, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	if get == nil {
+		panic(name + ": get is nil")
+	}
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(name, vals)
 	// +1 is the spare slot buildFromSortedInto relies on.
 	sizeKeys := calcSizeKeys(numKeys + 1)
@@ -367,7 +370,7 @@ func initFromSortedListToBuf[T sortedListVal](name string, vals []T, get func(si
 
 	dst, buf := get(sizeTotal * 2)
 	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
-	return buildFromSortedInto(dst, vals, true)
+	return buildFromSortedInto(dst, vals, name, true)
 }
 
 // sortedListVal is the element type the FromSortedList build accepts. The
@@ -437,7 +440,7 @@ func fromSortedLayout[T sortedListVal](name string, vals []T) (numKeys, sizeCont
 // ToBuf constructors: their get runs between the two passes and may have
 // changed vals since. FromSortedList leaves it off; the loop is unswitched
 // so that path pays nothing for it.
-func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T, checkOrder bool) *Bitmap {
+func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T, name string, checkOrder bool) *Bitmap {
 	if len(vals) == 0 {
 		return ra
 	}
@@ -475,7 +478,7 @@ func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T, checkOrder bool)
 		prev := vals[0]
 		for i, x := range vals {
 			if x < prev {
-				panicMutatedDuringBuild(i, uint64(x), uint64(prev))
+				panicMutatedDuringBuild(name, i, uint64(x), uint64(prev))
 			}
 			prev = x
 			if key := uint64(x) & mask; key != segKey {
@@ -497,8 +500,8 @@ func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T, checkOrder bool)
 
 // panicMutatedDuringBuild is out of line: inlining the formatting into the
 // fill loop costs it ~20%, even though the branch is never taken.
-func panicMutatedDuringBuild(i int, x, prev uint64) {
-	panic(fmt.Sprintf("FromSortedList: vals mutated during build (index %d: %d after %d)", i, x, prev))
+func panicMutatedDuringBuild(name string, i int, x, prev uint64) {
+	panic(fmt.Sprintf("%s: vals mutated during build (index %d: %d after %d)", name, i, x, prev))
 }
 
 // fillArrayContainer writes seg's distinct values into the array container

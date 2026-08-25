@@ -485,7 +485,7 @@ func FromSortedList32(vals []uint32) *Bitmap {
 func fromSortedList[T sortedListVal](name string, vals []T) *Bitmap {
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(name, vals)
 	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
-	return buildFromSortedInto(ra, vals, false)
+	return buildFromSortedInto(ra, vals, name, false)
 }
 
 // TODO: Potentially this can be optimized.
