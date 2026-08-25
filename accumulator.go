@@ -545,7 +545,7 @@ func (acc *Accumulator) layout(scratch []blockLayout) (layouts []blockLayout, nu
 	for i, b := range acc.blocks {
 		// Splitting the prefix/suffix zero-scan from the popcount beats
 		// tracking the window inside the popcount loop, which would tax every
-		// word of every block. Each word is still visited only once.
+		// word of every block; only the two boundary words are read twice.
 		b64 := uint16To64SliceUnsafe(b)
 		first := 0
 		for first < len(b64) && b64[first] == 0 {
@@ -644,7 +644,9 @@ func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitma
 // call sites). The spare is what lets setKey's return — a possibly shifted
 // offset — be discarded: the node never fills mid-build, so it never expands
 // and never moves containers. acc.keys is sorted, so containers are appended
-// in key order and no append can reallocate.
+// in key order and no append can reallocate. Each block is written from its
+// layout's window only; the words outside it are zeroed rather than copied,
+// since the container may come from newContainerNoClr over dirty memory.
 func (acc *Accumulator) buildInto(ra *Bitmap, layouts []blockLayout) {
 	for i, b := range acc.blocks {
 		bl := layouts[i]
@@ -672,7 +674,12 @@ func (acc *Accumulator) buildInto(ra *Bitmap, layouts []blockLayout) {
 			// clear it so a dirty pooled buffer cannot leak into the bytes.
 			clear(c[int(startIdx)+card:])
 		} else {
-			copy(c[startIdx:], b)
+			// Only the window holds set bits, but newContainerNoClr can hand
+			// back dirty memory, so the rest is zeroed rather than copied.
+			lo, hi := int(startIdx)+int(bl.min), int(startIdx)+int(bl.max)
+			clear(c[startIdx:lo])
+			copy(c[lo:], b[bl.min:bl.max+1])
+			clear(c[hi+1:])
 		}
 		if acc.keys[i] != 0 {
 			ra.setKey(acc.keys[i], off)

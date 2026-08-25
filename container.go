@@ -93,19 +93,20 @@ func setArrayHeader(c []uint16, card int) {
 	setCardinality(c, card)
 }
 
-// zeroOutContainer empties c. A zero cardinality header implies the payload
-// is already zero — every writer that zeroes the header also zeroes the
-// payload — so the 8KB clear is skipped then (And-style passes re-zero the
-// same emptied containers repeatedly).
+// zeroOutContainer empties c. The payload clear is bitmap-only, and a zero
+// cardinality on a bitmap implies its payload is already zero, so the clear is
+// skipped then — And-style passes re-zero the same emptied containers
+// repeatedly.
+//
+// The test is written out rather than calling isEmpty, and guards the clear
+// rather than returning early: either form costs 15 more, and this inlines
+// into ZeroOut's loop, which lands on exactly the inline budget of 80.
 func zeroOutContainer(c []uint16) {
-	if isEmpty(c) {
-		return
+	if c[indexType] == typeBitmap && c[indexCardinality]|c[indexCardinality+1] != 0 {
+		clear(c[startIdx:c[indexSize]])
 	}
 	c[indexCardinality] = 0
 	c[indexCardinality+1] = 0
-	if c[indexType] == typeBitmap {
-		clear(c[startIdx:c[indexSize]])
-	}
 }
 
 func removeRangeContainer(c []uint16, lo, hi uint16) {
