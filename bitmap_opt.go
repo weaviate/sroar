@@ -1091,7 +1091,6 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 	wg.Add(concurrency - 1)
 
 	for i := 0; i < concurrency; i++ {
-		i := i
 		var from, to int
 
 		if i < mod {
