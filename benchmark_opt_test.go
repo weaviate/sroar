@@ -488,3 +488,48 @@ func benchmark_Or_Conc(b *testing.B, concurrency int) {
 		}
 	}
 }
+
+// go test -v -bench BenchmarkFromSortedList -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkFromSortedList(b *testing.B) {
+	genSeq := func(n int, stride uint64) []uint64 {
+		vals := make([]uint64, n)
+		for i := range vals {
+			vals[i] = uint64(i) * stride
+		}
+		return vals
+	}
+
+	for _, bc := range []struct {
+		name string
+		vals []uint64
+	}{
+		{"dense_1M", genSeq(1<<20, 1)},
+		{"dense_100k", genSeq(100_000, 1)},
+		{"dense_10k", genSeq(10_000, 1)},
+		{"dense_1k", genSeq(1_000, 1)},
+		{"sparse_100k", genSeq(100_000, 1000)},
+		{"sparse_10k", genSeq(10_000, 1000)},
+		{"verysparse_10k", genSeq(10_000, 1<<16)},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				FromSortedList(bc.vals)
+			}
+		})
+		b.Run(bc.name+"/ToBuf", func(b *testing.B) {
+			var buf []byte
+			getBuf := func(sizeBytes int) []byte {
+				if cap(buf) < sizeBytes {
+					buf = make([]byte, sizeBytes)
+				}
+				return buf[:sizeBytes]
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				FromSortedListToBuf(bc.vals, getBuf)
+			}
+		})
+	}
+}

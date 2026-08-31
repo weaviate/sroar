@@ -3,6 +3,7 @@ package sroar
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 	"sync"
 )
@@ -255,25 +256,291 @@ func andNotWalk(a, b *Bitmap, visit func(ak uint64, ac, bc []uint16)) {
 	}
 }
 
-// compactedArraySize is the arena footprint of an array container of
-// cardinality n: header, values, one spare slot, padded to a multiple of 4
-// uint16s so every later container keeps the 8-byte alignment the
-// uint16To64SliceUnsafe views rely on. A full 4096-value array drops the spare
-// rather than exceed maxContainerSize.
+// arraySize is the arena footprint of an array container holding exactly n
+// values: header and values, padded to a multiple of 4 uint16s so every later
+// container keeps the 8-byte alignment the uint16To64SliceUnsafe views rely
+// on.
+func arraySize(n int) int {
+	return (int(startIdx) + n + 3) &^ 3
+}
+
+// compactedArraySize is arraySize with one spare slot, so a container built at
+// this size takes one insert before it has to grow. A full 4096-value array
+// drops the spare rather than exceed maxContainerSize.
 func compactedArraySize(n int) int {
-	return min((int(startIdx)+n+1+3)&^3, maxContainerSize)
+	return min(arraySize(n+1), maxContainerSize)
 }
 
 // containerSizeForCard returns the size and type of the container that
-// materializes cardinality n within one key range: a compacted array up to
-// 2048 values, a bitmap container above. Shared by the exact-size
-// constructors (FromSortedList, Accumulator) so identical content gets
-// identical container layout regardless of which built it.
+// materializes cardinality n within one key range: an array while it fits
+// maxArrayContainerSize (up to 2044 values), a bitmap container above.
+//
+// The array is sized to hold n, with no slot held back for later inserts. The
+// growth path fills a container to its last slot - a 2048-uint16 array holds
+// 2044 values before expandContainer converts it - so a reserved slot here
+// would make a rebuild of a full container larger than the container it
+// rebuilds, and at the cap would turn it into a bitmap twice the size.
+//
+// Arrays are floored at minContainerSize, the size the growth path gives a
+// fresh container: below 57 values that leaves four or more slots free, and an
+// empty key-0 container is sized like any other small one. Above it the only
+// slack is the nought to three slots of alignment padding, so a container can
+// arrive full - and a full one in an exact-size build has no capacity to grow
+// into, making its first insert reallocate the whole bitmap.
+//
+// Shared by the exact-size constructors (FromSortedList, Accumulator) so
+// identical content gets identical container layout regardless of which built
+// it.
 func containerSizeForCard(n int) (sz uint16, typ uint16) {
-	if n <= 2048 {
-		return uint16(compactedArraySize(n)), typeArray
+	if s := arraySize(n); s <= maxArrayContainerSize {
+		return uint16(max(s, minContainerSize)), typeArray
 	}
 	return maxContainerSize, typeBitmap
+}
+
+// FromSortedListToBuf is FromSortedList building into a buffer obtained
+// from get — for callers that pool result memory. get is called exactly
+// once, with the required size in bytes — exact for duplicate-free input;
+// an upper bound when vals carries duplicates, up to one bitmap container
+// (~8 KB) larger per key segment whose duplicates collapse it below the
+// array threshold — and only after vals has passed the sortedness check.
+// Returning a buffer smaller than the requested size panics — the caller
+// was told how much is needed.
+// The buffer is adopted to its full capacity (rounded down to even), not
+// just its length, and may arrive dirty — the build writes every byte the
+// result exposes. It must not alias the memory backing vals: the build
+// writes containers while still reading later values. The returned bitmap
+// holds a reference to the buffer, so the buffer must not be reused until
+// the bitmap is released — duplicate-heavy input pins the full requested
+// size. Mutating the result stays within the buffer's capacity until it
+// needs to grow, at which point it migrates to the heap.
+// get must not modify vals: a change breaking the ascending order would
+// lose values silently, so it panics mid-build, leaving the buffer and the
+// bitmap unusable; a change preserving it still builds correctly, but may
+// outgrow the buffer and migrate to the heap.
+func FromSortedListToBuf(vals []uint64, get func(sizeBytes int) []byte) *Bitmap {
+	return InitFromSortedListToBuf(vals, func(sizeBytes int) (*Bitmap, []byte) {
+		return &Bitmap{}, get(sizeBytes)
+	})
+}
+
+// InitFromSortedListToBuf is FromSortedListToBuf for callers that pool the
+// result Bitmap struct together with its buffer: get returns both —
+// typically from one pool entry — and the bitmap is built into them, so
+// building into pooled memory allocates nothing. The struct must be
+// non-nil; its previous fields are overwritten, never freed — it must not
+// own anything the caller still needs. A buffer smaller than the
+// requested size panics, and get must not modify vals, both as in
+// FromSortedListToBuf.
+func InitFromSortedListToBuf(vals []uint64, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(vals)
+	// +1 is the spare slot buildFromSortedInto relies on.
+	sizeKeys := calcSizeKeys(numKeys + 1)
+	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
+
+	dst, buf := get(sizeTotal * 2)
+	initBitmapToBufExact("InitFromSortedListToBuf", dst, buf, sizeKeys, sizeContainer0, sizeTotal)
+	return buildFromSortedInto(dst, vals, true)
+}
+
+// fromSortedLayout is the counting pass shared by the FromSortedList
+// constructors: the result's key count and container space, accumulated
+// per key segment, panicking on descending input. Containers are sized by segment
+// length — for duplicate-free input, the common case, that is the
+// distinct cardinality and the layout is final. Duplicates are discovered
+// for free during the fill, which corrects the affected containers in
+// place (truncate or rewrite, without moving them); keeping this pass
+// oblivious to them keeps it off the critical path. Key 0 is
+// special-cased like in Accumulator.layout: its slot and container always
+// exist — numKeys counts that slot up front, and its segment sizes the
+// pre-created container via sizeContainer0 instead of counting a key.
+func fromSortedLayout(vals []uint64) (numKeys, sizeContainer0, sizeOtherContainers int) {
+	numKeys = 1 // the key-0 slot every bitmap pre-creates
+	sizeContainer0 = minContainerSize
+	if len(vals) == 0 {
+		return
+	}
+
+	accountSeg := func(card int, key uint64) {
+		sz, _ := containerSizeForCard(card)
+		if key != 0 {
+			numKeys++
+			sizeOtherContainers += int(sz)
+		} else {
+			sizeContainer0 = int(sz)
+		}
+	}
+	segKey := vals[0] & mask
+	segStart := 0
+	prev := vals[0]
+	for i := 1; i < len(vals); i++ {
+		x := vals[i]
+		if x < prev {
+			panic(fmt.Sprintf("FromSortedList: input not sorted at index %d (%d after %d)", i, x, prev))
+		}
+		prev = x
+		if key := x & mask; key != segKey {
+			accountSeg(i-segStart, segKey)
+			segStart, segKey = i, key
+		}
+	}
+	accountSeg(len(vals)-segStart, segKey)
+	return
+}
+
+// buildFromSortedInto builds the containers into ra, whose data array must
+// already have capacity for the full layout and whose keys node must be
+// sized with one spare slot beyond the result's keys (the numKeys+1 at the
+// call sites), so setKey never expands the node or moves containers.
+// Containers are first sized by segment length, matching fromSortedLayout;
+// when the fill finds duplicates, the just-filled container — still the
+// tail of ra.data — is truncated to its canonical size (or rewritten as
+// the array a bitmap collapses into) before the next append, so the final
+// layout always matches a duplicate-free build's. Only the padded
+// capacity remains. Returns ra.
+//
+// checkOrder re-validates the ascending order as vals is consumed, for the
+// ToBuf constructors: their get runs between the two passes and may have
+// changed vals since. FromSortedList leaves it off; the loop is unswitched
+// so that path pays nothing for it.
+func buildFromSortedInto(ra *Bitmap, vals []uint64, checkOrder bool) *Bitmap {
+	if len(vals) == 0 {
+		return ra
+	}
+
+	// Every value of a segment shares one key, so the segment maps 1:1 to a
+	// container. The exact allocation guarantees the appends below never
+	// reallocate; containers are appended in ascending key order and never
+	// moved.
+	finalize := func(seg []uint64, key uint64) {
+		sz, typ := containerSizeForCard(len(seg))
+		var off uint64
+		if key == 0 {
+			// Key 0's container pre-exists at exactly sz — fill it in place;
+			// appending would orphan it as dead space in ra.data.
+			off = ra.keys.val(0)
+		} else {
+			off = ra.newContainerNoClr(sz)
+			ra.data[off] = sz
+		}
+		c := ra.data[off : off+uint64(sz)]
+		c[indexType] = typ
+		if typ == typeArray {
+			fillArrayContainer(ra, off, c, seg)
+		} else {
+			fillBitmapContainer(ra, off, c, seg)
+		}
+		if key != 0 {
+			ra.setKey(key, off)
+		}
+	}
+
+	segKey := vals[0] & mask
+	segStart := 0
+	if checkOrder {
+		prev := vals[0]
+		for i, x := range vals {
+			if x < prev {
+				panicMutatedDuringBuild(i, x, prev)
+			}
+			prev = x
+			if key := x & mask; key != segKey {
+				finalize(vals[segStart:i], segKey)
+				segStart, segKey = i, key
+			}
+		}
+	} else {
+		for i, x := range vals {
+			if key := x & mask; key != segKey {
+				finalize(vals[segStart:i], segKey)
+				segStart, segKey = i, key
+			}
+		}
+	}
+	finalize(vals[segStart:], segKey)
+	return ra
+}
+
+// panicMutatedDuringBuild is out of line: inlining the formatting into the
+// fill loop costs it ~20%, even though the branch is never taken.
+func panicMutatedDuringBuild(i int, x, prev uint64) {
+	panic(fmt.Sprintf("FromSortedList: vals mutated during build (index %d: %d after %d)", i, x, prev))
+}
+
+// fillArrayContainer writes seg's distinct values into the array container
+// at off — the current tail of ra.data — truncating it to the size the
+// distinct count warrants when duplicates shrank the content.
+func fillArrayContainer(ra *Bitmap, off uint64, c []uint16, seg []uint64) {
+	card := dedupIntoArray(seg, c)
+	if card != len(seg) {
+		sz, _ := containerSizeForCard(card)
+		c = truncateTail(ra, off, sz)
+	}
+	setCardinality(c, card)
+	clear(c[int(startIdx)+card:])
+}
+
+// fillBitmapContainer fills the bitmap container at off — the current tail
+// of ra.data — from seg. When duplicates collapse the distinct count below
+// the array threshold, the container is rewritten in place as the array a
+// duplicate-free build would produce (from seg — the popcount is the last
+// read of the words, so they can be overwritten), and truncated.
+func fillBitmapContainer(ra *Bitmap, off uint64, c []uint16, seg []uint64) {
+	words := c[startIdx:]
+	clear(words)
+	// Values are ascending, so bits of one word arrive consecutively;
+	// accumulate them and write each word once. Duplicates need no
+	// handling here — OR-ing a bit twice sets it once — and the
+	// popcount below counts distinct values by construction.
+	wordIdx := uint16(seg[0]) >> 4
+	var word uint16
+	for _, v := range seg {
+		y := uint16(v)
+		if idx := y >> 4; idx != wordIdx {
+			words[wordIdx] = word
+			word = 0
+			wordIdx = idx
+		}
+		word |= bitmapMask[y&0xf]
+	}
+	words[wordIdx] = word
+	card := 0
+	for _, w := range uint16To64SliceUnsafe(words) {
+		card += bits.OnesCount64(w)
+	}
+	if newSz, newTyp := containerSizeForCard(card); newTyp == typeArray {
+		c = truncateTail(ra, off, newSz)
+		c[indexType] = newTyp
+		dedupIntoArray(seg, c)
+		clear(c[int(startIdx)+card:])
+	}
+	setCardinality(c, card)
+}
+
+// truncateTail shrinks the container at off — the current tail of
+// ra.data — to sz and returns it resliced; the freed space is surrendered
+// to the next append.
+func truncateTail(ra *Bitmap, off uint64, sz uint16) []uint16 {
+	ra.data = ra.data[:off+uint64(sz)]
+	c := ra.data[off:]
+	c[indexSize] = sz
+	return c
+}
+
+// dedupIntoArray writes seg's distinct values into c's array payload and
+// returns their count. prev starts unequal to every value
+// (^seg[0] != seg[0]), so the first value is never skipped as a duplicate.
+func dedupIntoArray(seg []uint64, c []uint16) (card int) {
+	prev := ^seg[0]
+	for _, v := range seg {
+		if v == prev {
+			continue
+		}
+		prev = v
+		c[int(startIdx)+card] = uint16(v)
+		card++
+	}
+	return card
 }
 
 // andNotResultSize returns the uint16s the result for source ac occupies in
@@ -979,12 +1246,12 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 		if maxRemainingCount > 0 {
 			minimalContainersCount++
 		}
-		minimalKeysLen := calcInitialKeysLen(minimalContainersCount + 1)
-		minimalLen := minimalKeysLen + minimalContainersCount*maxContainerSize
+		minimalSizeKeys := calcSizeKeys(minimalContainersCount + 1)
+		minimalSizeTotal := minimalSizeKeys + minimalContainersCount*maxContainerSize
 
 		bm := &Bitmap{}
-		if minimalLen <= cap(ra.data) {
-			initBitmapCore(bm, minimalKeysLen, maxContainerSize, ra.data)
+		if minimalSizeTotal <= cap(ra.data) {
+			initBitmapCore(bm, minimalSizeKeys, maxContainerSize, ra.data)
 		} else {
 			initBitmapWithCap(bm, int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
 		}
