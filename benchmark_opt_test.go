@@ -491,25 +491,50 @@ func benchmark_Or_Conc(b *testing.B, concurrency int) {
 
 // go test -v -bench BenchmarkFromSortedList -benchmem -run ^$ github.com/weaviate/sroar
 func BenchmarkFromSortedList(b *testing.B) {
-	genSeq := func(n int, stride uint64) []uint64 {
-		vals := make([]uint64, n)
-		for i := range vals {
-			vals[i] = uint64(i) * stride
+	// Containers are sized for distinct*reps, so the fill has to shrink or
+	// rewrite them — the path these cases measure.
+	genDupSeg := func(keys, distinct, reps int) []uint64 {
+		vals := make([]uint64, 0, keys*distinct*reps)
+		for k := 0; k < keys; k++ {
+			base := uint64(k) << 16
+			for i := 0; i < distinct; i++ {
+				for r := 0; r < reps; r++ {
+					vals = append(vals, base+uint64(i))
+				}
+			}
 		}
 		return vals
+	}
+
+	// newGetBuf hands each sub-benchmark its own buffer, grown once and
+	// reused across iterations so the build is measured, not the allocation.
+	newGetBuf := func() func(sizeBytes int) []byte {
+		var buf []byte
+		return func(sizeBytes int) []byte {
+			if cap(buf) < sizeBytes {
+				buf = make([]byte, sizeBytes)
+			}
+			return buf[:sizeBytes]
+		}
 	}
 
 	for _, bc := range []struct {
 		name string
 		vals []uint64
 	}{
-		{"dense_1M", genSeq(1<<20, 1)},
-		{"dense_100k", genSeq(100_000, 1)},
-		{"dense_10k", genSeq(10_000, 1)},
-		{"dense_1k", genSeq(1_000, 1)},
-		{"sparse_100k", genSeq(100_000, 1000)},
-		{"sparse_10k", genSeq(10_000, 1000)},
-		{"verysparse_10k", genSeq(10_000, 1<<16)},
+		{"dense_1M", sortedSeq(1<<20, 1)},
+		{"dense_100k", sortedSeq(100_000, 1)},
+		{"dense_10k", sortedSeq(10_000, 1)},
+		{"dense_1k", sortedSeq(1_000, 1)},
+		{"sparse_100k", sortedSeq(100_000, 1000)},
+		{"sparse_10k", sortedSeq(10_000, 1000)},
+		{"verysparse_10k", sortedSeq(10_000, 1<<16)},
+		// sized as a bitmap, collapses to an array
+		{"dup_collapse_40k", genDupSeg(10, 1_000, 4)},
+		// sized as an array, truncated
+		{"dup_array_10k", genDupSeg(10, 500, 2)},
+		// stays a bitmap
+		{"dup_bitmap_100k", genDupSeg(10, 5_000, 2)},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			b.ReportAllocs()
@@ -518,17 +543,29 @@ func BenchmarkFromSortedList(b *testing.B) {
 			}
 		})
 		b.Run(bc.name+"/ToBuf", func(b *testing.B) {
-			var buf []byte
-			getBuf := func(sizeBytes int) []byte {
-				if cap(buf) < sizeBytes {
-					buf = make([]byte, sizeBytes)
-				}
-				return buf[:sizeBytes]
-			}
+			getBuf := newGetBuf()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				FromSortedListToBuf(bc.vals, getBuf)
+			}
+		})
+
+		// Every case above fits in 32 bits, so the 32 variants do the same
+		// work over half the input bytes.
+		vals32 := narrow(b, bc.vals)
+		b.Run(bc.name+"/32", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				FromSortedList32(vals32)
+			}
+		})
+		b.Run(bc.name+"/32/ToBuf", func(b *testing.B) {
+			getBuf := newGetBuf()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				FromSortedList32ToBuf(vals32, getBuf)
 			}
 		})
 	}

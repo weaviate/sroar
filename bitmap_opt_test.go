@@ -6,6 +6,7 @@ import (
 	"math/bits"
 	"math/rand"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -1210,13 +1211,20 @@ func TestCloneToBuf(t *testing.T) {
 			"at most the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
 	})
 
+	// The panic names the constructor the caller reached it through, not the
+	// shared body both of them delegate to.
 	t.Run("panic on smaller buffer size", func(t *testing.T) {
 		bm := NewBitmap()
 		bm.Set(1)
 		buf := make([]byte, 0, bm.LenInBytes()-1)
-		require.PanicsWithValue(t,
-			fmt.Sprintf("InitCloneToBuf: buf too small: need at least %d bytes, got %d", bm.LenInBytes(), cap(buf)),
-			func() { bm.CloneToBuf(buf) })
+		want := func(name string) string {
+			return fmt.Sprintf("%s: buf too small: need at least %d bytes, got %d",
+				name, bm.LenInBytes(), cap(buf))
+		}
+		require.PanicsWithValue(t, want("CloneToBuf"), func() { bm.CloneToBuf(buf) })
+		require.PanicsWithValue(t, want("InitCloneToBuf"), func() {
+			bm.InitCloneToBuf(&Bitmap{}, buf)
+		})
 	})
 
 	t.Run("allow buffer of odd size", func(t *testing.T) {
@@ -3945,53 +3953,135 @@ func TestFromSortedListSmallContainersAreMinSized(t *testing.T) {
 	require.Equal(t, uint16(minContainerSize), valsCont[indexSize])
 }
 
-func TestFromSortedList(t *testing.T) {
-	rnd := rand.New(rand.NewSource(1724861525311))
+// fromSortedListFamily is one width's entry points plus the fixtures the
+// shared drivers need, so both widths are exercised by the same tables.
+type fromSortedListFamily[T sortedListVal] struct {
+	buildName  string
+	initName   string
+	build      func([]T) *Bitmap
+	buildToBuf func([]T, func(sizeBytes int) []byte) *Bitmap
+	initToBuf  func([]T, func(sizeBytes int) (*Bitmap, []byte)) *Bitmap
 
-	genSeq := func(n int, stride uint64) []uint64 {
-		vals := make([]uint64, n)
-		for i := range vals {
-			vals[i] = uint64(i) * stride
-		}
-		return vals
-	}
-	genRandom := func(n int, max int64) []uint64 {
-		unique := map[uint64]struct{}{}
-		for len(unique) < n {
-			unique[uint64(rnd.Int63n(max))] = struct{}{}
-		}
-		vals := make([]uint64, 0, n)
-		for v := range unique {
-			vals = append(vals, v)
-		}
-		slices.Sort(vals)
-		return vals
-	}
+	sample   []T // small sorted input
+	unsorted []T // must panic before get is called
+	other    []T // distinct content, proves Init overwrites the struct
+	pooled   []T // spans several keys, for the zero-alloc check
+}
 
-	testCases := map[string][]uint64{
+var family64 = fromSortedListFamily[uint64]{
+	buildName:  "FromSortedListToBuf",
+	initName:   "InitFromSortedListToBuf",
+	build:      FromSortedList,
+	buildToBuf: FromSortedListToBuf,
+	initToBuf:  InitFromSortedListToBuf,
+	sample:     []uint64{1, 2, 3},
+	unsorted:   []uint64{2, 1},
+	other:      []uint64{99, 100_000},
+	pooled:     []uint64{1, 2, 3, 1 << 20, 1 << 40},
+}
+
+var family32 = fromSortedListFamily[uint32]{
+	buildName:  "FromSortedList32ToBuf",
+	initName:   "InitFromSortedList32ToBuf",
+	build:      FromSortedList32,
+	buildToBuf: FromSortedList32ToBuf,
+	initToBuf:  InitFromSortedList32ToBuf,
+	sample:     []uint32{1, 2, 3},
+	unsorted:   []uint32{2, 1},
+	other:      []uint32{99, 100_000},
+	pooled:     []uint32{1, 2, 3, 1 << 20, 1 << 28},
+}
+
+func sortedSeq(n int, stride uint64) []uint64 {
+	vals := make([]uint64, n)
+	for i := range vals {
+		vals[i] = uint64(i) * stride
+	}
+	return vals
+}
+
+func sortedRandom(rnd *rand.Rand, n int, max int64) []uint64 {
+	unique := map[uint64]struct{}{}
+	for len(unique) < n {
+		unique[uint64(rnd.Int63n(max))] = struct{}{}
+	}
+	vals := make([]uint64, 0, n)
+	for v := range unique {
+		vals = append(vals, v)
+	}
+	slices.Sort(vals)
+	return vals
+}
+
+// offsetBy shifts vals into a higher key, so a case exercises a container
+// the build appends rather than the pre-created one at key 0.
+func offsetBy(vals []uint64, base uint64) []uint64 {
+	out := make([]uint64, len(vals))
+	for i, v := range vals {
+		out[i] = base + v
+	}
+	return out
+}
+
+func sortedDup(n int, stride uint64, repeat int) []uint64 {
+	vals := make([]uint64, 0, n*repeat)
+	for i := 0; i < n; i++ {
+		for j := 0; j < repeat; j++ {
+			vals = append(vals, uint64(i)*stride)
+		}
+	}
+	return vals
+}
+
+// fromSortedListCases are the shapes both widths must handle. Every value
+// fits in uint32 so one table drives both runs; width-specific shapes are
+// added by the callers.
+func fromSortedListCases(rnd *rand.Rand) map[string][]uint64 {
+	return map[string][]uint64{
 		"empty":                         nil,
 		"single value":                  {7},
 		"few values in key 0":           {1, 2, 3},
-		"container boundaries":          {1, 2, 3, 1 << 20, 1<<20 + 1, 1 << 40},
-		"not starting at key 0":         {1 << 20, 1<<20 + 5, 1 << 33},
-		"array/bitmap threshold 2044":   genSeq(2044, 3),
-		"array/bitmap threshold 2045":   genSeq(2045, 3),
-		"one full container":            genSeq(65536, 1),
-		"dense across containers":       genSeq(1_000_000, 1),
-		"sparse arrays":                 genSeq(100_000, 1000),
-		"one value per container":       genSeq(1_000, 1<<16),
-		"random":                        genRandom(50_000, 1<<40),
-		"max uint64 values":             {1, math.MaxUint64 - 1, math.MaxUint64},
+		"container boundaries":          {1, 2, 3, 1 << 20, 1<<20 + 1, 1 << 28},
+		"not starting at key 0":         {1 << 20, 1<<20 + 5, 1 << 28},
+		"array/bitmap threshold 2044":   sortedSeq(2044, 3),
+		"array/bitmap threshold 2045":   sortedSeq(2045, 3),
+		"one full container":            sortedSeq(65536, 1),
+		"dense across containers":       sortedSeq(1_000_000, 1),
+		"sparse arrays":                 sortedSeq(100_000, 1000),
+		"one value per container":       sortedSeq(1_000, 1<<16),
+		"random":                        sortedRandom(rnd, 50_000, 1<<32),
 		"last value of first container": {65534, 65535, 65536},
+		"duplicates in array container": {1, 1, 2, 3, 3, 3},
+		"duplicates collapsing bitmap":  append(offsetBy(sortedDup(1500, 2, 2), 1<<16), 1<<20, 1<<28),
 	}
+}
 
-	for name, vals := range testCases {
+// narrow converts a shared case to 32-bit width.
+func narrow(t testing.TB, vals []uint64) []uint32 {
+	t.Helper()
+	out := make([]uint32, len(vals))
+	for i, v := range vals {
+		if v > math.MaxUint32 {
+			t.Fatalf("shared case value %d does not fit in uint32", v)
+		}
+		out[i] = uint32(v)
+	}
+	return out
+}
+
+// runFromSortedListCases checks one width's constructors against a bitmap
+// built with Set, and requires the same bytes the Accumulator produces for
+// that content.
+func runFromSortedListCases[T sortedListVal](t *testing.T, f fromSortedListFamily[T], cases map[string][]T) {
+	t.Helper()
+	for name, vals := range cases {
 		t.Run(name, func(t *testing.T) {
 			expected := NewBitmap()
 			for _, v := range vals {
-				expected.Set(v)
+				expected.Set(uint64(v))
 			}
-			bm := FromSortedList(vals)
+
+			bm := f.build(vals)
 			require.Equal(t, expected.GetCardinality(), bm.GetCardinality())
 			require.Equal(t, expected.ToArray(), bm.ToArray())
 
@@ -4008,70 +4098,76 @@ func TestFromSortedList(t *testing.T) {
 
 			// ToBuf must produce the identical bitmap from a dirty,
 			// oversized buffer.
-			var askedBytes int
-			bmBuf := FromSortedListToBuf(vals, func(sizeBytes int) []byte {
-				askedBytes = sizeBytes
+			var askedBytes, getCalls int
+			bmBuf := f.buildToBuf(vals, func(sizeBytes int) []byte {
+				askedBytes, getCalls = sizeBytes, getCalls+1
 				buf := make([]byte, sizeBytes+100)
 				for i := range buf {
 					buf[i] = 0xff
 				}
 				return buf
 			})
-			if !bm.IsEmpty() {
-				// The requested size is exactly what the result serializes to.
-				require.Equal(t, len(bm.ToBuffer()), askedBytes)
-			} else {
+			switch {
+			case bm.IsEmpty():
 				// Empty input still asks for a buffer (the minimal live
 				// bitmap); its exact size is an implementation detail.
 				require.Positive(t, askedBytes)
+			case len(vals) == bm.GetCardinality():
+				// The requested size is exact for duplicate-free input.
+				require.Equal(t, len(bm.ToBuffer()), askedBytes)
+			default:
+				// Duplicates make it an upper bound.
+				require.GreaterOrEqual(t, askedBytes, len(bm.ToBuffer()))
 			}
-			require.Equal(t, bm.GetCardinality(), bmBuf.GetCardinality())
 			require.Equal(t, bm.ToBuffer(), bmBuf.ToBuffer())
+			require.Equal(t, 1, getCalls, "get must be called exactly once")
+
+			pooled := &Bitmap{}
+			initCalls := 0
+			bmInit := f.initToBuf(vals, func(sizeBytes int) (*Bitmap, []byte) {
+				initCalls++
+				return pooled, make([]byte, sizeBytes)
+			})
+			require.Equal(t, 1, initCalls, "get must be called exactly once")
+			require.Same(t, pooled, bmInit)
+			require.Equal(t, bm.ToBuffer(), bmInit.ToBuffer())
 		})
 	}
 }
 
-func TestFromSortedListPanicsOnUnsortedInput(t *testing.T) {
-	panics := map[string][]uint64{
-		"unsorted":               {1, 3, 2},
-		"unsorted at first pair": {3, 1},
-		"unsorted across key":    {1 << 20, 1},
-	}
-	for name, vals := range panics {
-		t.Run(name, func(t *testing.T) {
-			require.Panics(t, func() { FromSortedList(vals) })
-		})
-	}
+type toleratedCase[T sortedListVal] struct {
+	vals     []T
+	expected []uint64
+}
 
-	tolerated := map[string]struct {
-		vals     []uint64
-		expected []uint64
-	}{
-		"duplicate":          {vals: []uint64{1, 2, 2}, expected: []uint64{1, 2}},
-		"duplicate at start": {vals: []uint64{0, 0, 1}, expected: []uint64{0, 1}},
+func runFromSortedListPanicCases[T sortedListVal](t *testing.T, f fromSortedListFamily[T],
+	unsorted map[string][]T, tolerated map[string]toleratedCase[T],
+) {
+	t.Helper()
+	for name, vals := range unsorted {
+		t.Run(name, func(t *testing.T) {
+			require.Panics(t, func() { f.build(vals) })
+			require.Panics(t, func() {
+				f.buildToBuf(vals, func(sizeBytes int) []byte { return make([]byte, sizeBytes) })
+			})
+		})
 	}
 	for name, tc := range tolerated {
 		t.Run(name, func(t *testing.T) {
 			var bm *Bitmap
-			require.NotPanics(t, func() { bm = FromSortedList(tc.vals) })
+			require.NotPanics(t, func() { bm = f.build(tc.vals) })
 			require.Equal(t, tc.expected, bm.ToArray())
 		})
 	}
 }
 
-func TestFromSortedListToBufContract(t *testing.T) {
-	t.Run("panics on too small buffer", func(t *testing.T) {
-		require.Panics(t, func() {
-			FromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) []byte {
-				return make([]byte, sizeBytes-2)
-			})
-		})
-	})
+func runFromSortedListToBufContract[T sortedListVal](t *testing.T, f fromSortedListFamily[T]) {
+	t.Helper()
 
 	t.Run("input checked before get is called", func(t *testing.T) {
 		called := false
 		require.Panics(t, func() {
-			FromSortedListToBuf([]uint64{2, 1}, func(sizeBytes int) []byte {
+			f.buildToBuf(f.unsorted, func(sizeBytes int) []byte {
 				called = true
 				return make([]byte, sizeBytes)
 			})
@@ -4079,116 +4175,151 @@ func TestFromSortedListToBufContract(t *testing.T) {
 		require.False(t, called)
 	})
 
-	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
-		bm := FromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) []byte {
-			return make([]byte, 0, sizeBytes)
+	t.Run("input checked before init get is called", func(t *testing.T) {
+		// The Init form hands over a pooled struct and buffer, so calling get
+		// before the check would consume a pool entry the panic then strands.
+		called := false
+		require.Panics(t, func() {
+			f.initToBuf(f.unsorted, func(sizeBytes int) (*Bitmap, []byte) {
+				called = true
+				return &Bitmap{}, make([]byte, sizeBytes)
+			})
 		})
-		require.Equal(t, []uint64{1, 2, 3}, bm.ToArray())
+		require.False(t, called)
+	})
+
+	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
+		bm := f.buildToBuf(f.sample, func(sizeBytes int) []byte { return make([]byte, 0, sizeBytes) })
+		require.Equal(t, f.build(f.sample).ToArray(), bm.ToArray())
+	})
+
+	// A nil get is a caller error like any other on this path, so it names
+	// the constructor rather than surfacing as a bare nil dereference — and
+	// it is reported before the input is walked.
+	t.Run("panics on nil get", func(t *testing.T) {
+		require.PanicsWithValue(t, f.buildName+": get is nil", func() {
+			f.buildToBuf(f.sample, nil)
+		})
+		require.PanicsWithValue(t, f.initName+": get is nil", func() {
+			f.initToBuf(f.sample, nil)
+		})
+		require.PanicsWithValue(t, f.buildName+": get is nil", func() {
+			f.buildToBuf(f.unsorted, nil)
+		})
 	})
 
 	t.Run("init panics on nil struct from get", func(t *testing.T) {
-		require.PanicsWithValue(t, "InitFromSortedListToBuf: get returned a nil *Bitmap", func() {
-			InitFromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) (*Bitmap, []byte) {
+		require.PanicsWithValue(t, f.initName+": get returned a nil *Bitmap", func() {
+			f.initToBuf(f.sample, func(sizeBytes int) (*Bitmap, []byte) {
 				return nil, make([]byte, sizeBytes)
 			})
 		})
 	})
 
 	t.Run("init builds into provided struct", func(t *testing.T) {
-		reused := FromSortedList([]uint64{99, 100_000})
-		bm := InitFromSortedListToBuf([]uint64{1, 2, 3}, func(sizeBytes int) (*Bitmap, []byte) {
+		reused := f.build(f.other)
+		bm := f.initToBuf(f.sample, func(sizeBytes int) (*Bitmap, []byte) {
 			return reused, make([]byte, sizeBytes)
 		})
 		require.Same(t, reused, bm)
-		require.Equal(t, []uint64{1, 2, 3}, bm.ToArray())
-		require.Equal(t, FromSortedList([]uint64{1, 2, 3}).ToBuffer(), bm.ToBuffer())
+		require.Equal(t, f.build(f.sample).ToBuffer(), bm.ToBuffer())
 	})
 
 	t.Run("init allocates nothing with pooled struct and buffer", func(t *testing.T) {
-		vals := []uint64{1, 2, 3, 1 << 20, 1 << 40}
 		pooled := &Bitmap{}
 		buf := make([]byte, 1<<12)
-		get := func(sizeBytes int) (*Bitmap, []byte) {
-			return pooled, buf[:sizeBytes]
-		}
-		allocs := testing.AllocsPerRun(10, func() {
-			InitFromSortedListToBuf(vals, get)
-		})
+		get := func(sizeBytes int) (*Bitmap, []byte) { return pooled, buf[:sizeBytes] }
+		allocs := testing.AllocsPerRun(10, func() { f.initToBuf(f.pooled, get) })
 		require.Zero(t, allocs)
 	})
 }
 
-func TestFromSortedListDuplicates(t *testing.T) {
-	genDup := func(n int, stride uint64, repeat int) []uint64 {
-		vals := make([]uint64, 0, n*repeat)
-		for i := 0; i < n; i++ {
-			for j := 0; j < repeat; j++ {
-				vals = append(vals, uint64(i)*stride)
-			}
-		}
-		return vals
-	}
+func TestFromSortedList(t *testing.T) {
+	rnd := rand.New(rand.NewSource(1724861525311))
+	cases := fromSortedListCases(rnd)
+	// Shapes only the 64-bit width can express.
+	cases["max uint64 values"] = []uint64{1, math.MaxUint64 - 1, math.MaxUint64}
+	cases["keys beyond uint32"] = []uint64{1, 2, 3, 1 << 40, 1<<40 + 1, 1 << 48}
+	cases["not starting at a low key"] = []uint64{1 << 20, 1<<20 + 5, 1 << 33}
+	cases["random across 40 bits"] = sortedRandom(rnd, 50_000, 1<<40)
+	runFromSortedListCases(t, family64, cases)
+}
 
-	testCases := map[string]struct {
-		vals     []uint64
-		expected []uint64
-	}{
-		"duplicates in array container": {
-			vals:     []uint64{1, 1, 2, 3, 3, 3},
-			expected: []uint64{1, 2, 3},
-		},
+// fromSortedListUnsortedCases must panic; fromSortedListToleratedCases must
+// not. Every value fits uint32, so one pair of tables drives both widths.
+func fromSortedListUnsortedCases() map[string][]uint64 {
+	return map[string][]uint64{
+		"unsorted":               {1, 3, 2},
+		"unsorted at first pair": {3, 1},
+		"unsorted across key":    {1 << 20, 1},
+	}
+}
+
+func fromSortedListToleratedCases() map[string]toleratedCase[uint64] {
+	return map[string]toleratedCase[uint64]{
+		"duplicate":          {vals: []uint64{1, 2, 2}, expected: []uint64{1, 2}},
+		"duplicate at start": {vals: []uint64{0, 0, 1}, expected: []uint64{0, 1}},
+	}
+}
+
+func TestFromSortedListPanicsOnUnsortedInput(t *testing.T) {
+	runFromSortedListPanicCases(t, family64,
+		fromSortedListUnsortedCases(), fromSortedListToleratedCases())
+}
+
+func TestFromSortedListToBufContract(t *testing.T) {
+	runFromSortedListToBufContract(t, family64)
+}
+
+// fromSortedListDuplicateCases are duplicate shapes both widths must handle;
+// every value fits in uint32. Shapes already covered by the shared case table
+// (duplicates in an array container, and a collapse in a non-zero key) are not
+// repeated here.
+func fromSortedListDuplicateCases() map[string]toleratedCase[uint64] {
+	return map[string]toleratedCase[uint64]{
 		"duplicates across container boundary": {
 			vals:     []uint64{1 << 16, 1 << 16, 1<<16 + 1},
 			expected: []uint64{1 << 16, 1<<16 + 1},
 		},
 		"all same value": {
-			vals:     genDup(1, 1, 5000),
+			vals:     sortedDup(1, 1, 5000),
 			expected: []uint64{0},
 		},
 		"duplicates in bitmap container": {
 			// 3000 distinct values repeated twice: a bitmap container whose
 			// cardinality counts distinct only.
-			vals: genDup(3000, 2, 2),
-			expected: func() []uint64 {
-				v := make([]uint64, 3000)
-				for i := range v {
-					v[i] = uint64(i) * 2
-				}
-				return v
-			}(),
-		},
-		"duplicates straddling bitmap threshold": {
-			// 1500 distinct values repeated twice: 3000 raw elements, but the
-			// container type follows the 1500 distinct — an array, same as a
-			// duplicate-free build.
-			vals: genDup(1500, 2, 2),
-			expected: func() []uint64 {
-				v := make([]uint64, 1500)
-				for i := range v {
-					v[i] = uint64(i) * 2
-				}
-				return v
-			}(),
+			vals:     sortedDup(3000, 2, 2),
+			expected: sortedSeq(3000, 2),
 		},
 		"key 0 collapses then more keys follow": {
-			// Key 0's segment: 2500 distinct values duplicated to 5000 raw —
-			// the pre-created container is filled as a bitmap, then rewritten
-			// in place as an array; containers for higher keys must append
-			// correctly after the truncated tail.
-			vals: append(genDup(2500, 2, 2), 1<<16, 1<<20, 1<<40),
-			expected: func() []uint64 {
-				v := make([]uint64, 2500)
-				for i := range v {
-					v[i] = uint64(i) * 2
-				}
-				return append(v, 1<<16, 1<<20, 1<<40)
-			}(),
+			// Key 0's segment: 1500 distinct values duplicated to 3000 raw.
+			// 3000 sizes the pre-created container as a bitmap, 1500 is under
+			// the array threshold, so it is rewritten in place as an array —
+			// containers for higher keys must then append correctly after the
+			// truncated tail.
+			vals:     append(sortedDup(1500, 2, 2), 1<<16, 1<<20, 1<<28),
+			expected: append(sortedSeq(1500, 2), 1<<16, 1<<20, 1<<28),
+		},
+		"duplicates straddling bitmap threshold": {
+			// 1500 distinct repeated twice: 3000 raw elements, but the
+			// container type follows the 1500 distinct — an array, same as a
+			// duplicate-free build.
+			vals:     sortedDup(1500, 2, 2),
+			expected: sortedSeq(1500, 2),
 		},
 	}
+}
 
-	for name, tc := range testCases {
+// runFromSortedListDuplicateCases checks that duplicates are collapsed and
+// that the resulting layout is the one a duplicate-free build of the same
+// distinct values would produce.
+func runFromSortedListDuplicateCases[T sortedListVal](t *testing.T, f fromSortedListFamily[T],
+	cases map[string]toleratedCase[T],
+) {
+	t.Helper()
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			bm := FromSortedList(tc.vals)
+			bm := f.build(tc.vals)
 			require.Equal(t, len(tc.expected), bm.GetCardinality())
 			require.Equal(t, tc.expected, bm.ToArray())
 
@@ -4204,7 +4335,7 @@ func TestFromSortedListDuplicates(t *testing.T) {
 			// where the requested size is an upper bound for duplicate
 			// input.
 			var askedBytes int
-			bmBuf := FromSortedListToBuf(tc.vals, func(sizeBytes int) []byte {
+			bmBuf := f.buildToBuf(tc.vals, func(sizeBytes int) []byte {
 				askedBytes = sizeBytes
 				buf := make([]byte, sizeBytes)
 				for i := range buf {
@@ -4216,6 +4347,145 @@ func TestFromSortedListDuplicates(t *testing.T) {
 			require.Equal(t, bm.ToBuffer(), bmBuf.ToBuffer())
 		})
 	}
+}
+
+// TestFromSortedListContainerTypeAtThreshold pins the array/bitmap threshold
+// absolutely. Nothing else can: the Set oracle is container-type agnostic,
+// and both the Accumulator comparison and the requested-size check route
+// through the same containerSizeForCard, so they move with it when it
+// changes. Without this, shifting the cutoff by one cardinality passes the
+// suite.
+func TestFromSortedListContainerTypeAtThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		distinct int
+		wantType uint16
+	}{
+		{"below the threshold", 2043, typeArray},
+		{"at the threshold", 2044, typeArray},
+		{"past the threshold", 2045, typeBitmap},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vals := sortedSeq(tc.distinct, 1) // one key, so one container
+			for width, bm := range map[string]*Bitmap{
+				"64": FromSortedList(vals),
+				"32": FromSortedList32(narrow(t, vals)),
+			} {
+				c := bm.getContainer(bm.keys.val(0))
+				require.Equal(t, tc.wantType, c[indexType], width)
+				require.Equal(t, tc.distinct, bm.GetCardinality(), width)
+			}
+		})
+	}
+}
+
+func TestFromSortedListDuplicates(t *testing.T) {
+	cases := fromSortedListDuplicateCases()
+	// Only the 64-bit width can carry a key past 2^32.
+	cases["collapse then a key beyond uint32"] = toleratedCase[uint64]{
+		vals:     append(sortedDup(1500, 2, 2), 1<<40),
+		expected: append(sortedSeq(1500, 2), 1<<40),
+	}
+	runFromSortedListDuplicateCases(t, family64, cases)
+}
+
+func TestFromSortedList32Duplicates(t *testing.T) {
+	cases := map[string]toleratedCase[uint32]{}
+	for name, tc := range fromSortedListDuplicateCases() {
+		cases[name] = toleratedCase[uint32]{vals: narrow(t, tc.vals), expected: tc.expected}
+	}
+	runFromSortedListDuplicateCases(t, family32, cases)
+}
+
+// widen converts 32-bit values to the []uint64 the 64-bit constructors take.
+func widen(vals []uint32) []uint64 {
+	wide := make([]uint64, len(vals))
+	for i, v := range vals {
+		wide[i] = uint64(v)
+	}
+	return wide
+}
+
+func TestFromSortedList32(t *testing.T) {
+	cases := map[string][]uint32{}
+	for name, vals := range fromSortedListCases(rand.New(rand.NewSource(1724861525311))) {
+		cases[name] = narrow(t, vals)
+	}
+	cases["max uint32 values"] = []uint32{1, math.MaxUint32 - 1, math.MaxUint32}
+	runFromSortedListCases(t, family32, cases)
+
+	// The two widths must agree byte for byte, not merely in content.
+	for name, vals := range cases {
+		t.Run("matches 64-bit/"+name, func(t *testing.T) {
+			require.Equal(t, FromSortedList(widen(vals)).ToBuffer(), FromSortedList32(vals).ToBuffer())
+		})
+	}
+}
+
+func TestFromSortedList32PanicsOnUnsortedInput(t *testing.T) {
+	unsorted := map[string][]uint32{}
+	for name, vals := range fromSortedListUnsortedCases() {
+		unsorted[name] = narrow(t, vals)
+	}
+	tolerated := map[string]toleratedCase[uint32]{}
+	for name, tc := range fromSortedListToleratedCases() {
+		tolerated[name] = toleratedCase[uint32]{vals: narrow(t, tc.vals), expected: tc.expected}
+	}
+	runFromSortedListPanicCases(t, family32, unsorted, tolerated)
+}
+
+// Every entry point of the family passes its own name down, so a panic
+// names the function the caller invoked, not the shared body it runs in.
+func TestFromSortedListPanicNamesCaller(t *testing.T) {
+	unsorted64, unsorted32 := []uint64{1, 3, 2}, []uint32{1, 3, 2}
+	getBuf := func(sizeBytes int) []byte { return make([]byte, sizeBytes) }
+	getBoth := func(sizeBytes int) (*Bitmap, []byte) { return &Bitmap{}, make([]byte, sizeBytes) }
+
+	unsortedCallers := map[string]func(){
+		"FromSortedList":            func() { FromSortedList(unsorted64) },
+		"FromSortedList32":          func() { FromSortedList32(unsorted32) },
+		"FromSortedListToBuf":       func() { FromSortedListToBuf(unsorted64, getBuf) },
+		"FromSortedList32ToBuf":     func() { FromSortedList32ToBuf(unsorted32, getBuf) },
+		"InitFromSortedListToBuf":   func() { InitFromSortedListToBuf(unsorted64, getBoth) },
+		"InitFromSortedList32ToBuf": func() { InitFromSortedList32ToBuf(unsorted32, getBoth) },
+	}
+	for name, call := range unsortedCallers {
+		t.Run("unsorted/"+name, func(t *testing.T) {
+			require.PanicsWithValue(t, name+": input not sorted at index 2 (2 after 3)", call)
+		})
+	}
+
+	// The buffer panics come from the shared initBitmapToBufExact, which must
+	// name the caller too.
+	tooSmall := func(sizeBytes int) []byte { return make([]byte, sizeBytes-2) }
+	tooSmallBoth := func(sizeBytes int) (*Bitmap, []byte) { return &Bitmap{}, make([]byte, sizeBytes-2) }
+	bufCallers := map[string]func(){
+		"FromSortedListToBuf":       func() { FromSortedListToBuf([]uint64{1, 2, 3}, tooSmall) },
+		"FromSortedList32ToBuf":     func() { FromSortedList32ToBuf([]uint32{1, 2, 3}, tooSmall) },
+		"InitFromSortedListToBuf":   func() { InitFromSortedListToBuf([]uint64{1, 2, 3}, tooSmallBoth) },
+		"InitFromSortedList32ToBuf": func() { InitFromSortedList32ToBuf([]uint32{1, 2, 3}, tooSmallBoth) },
+	}
+	for name, call := range bufCallers {
+		t.Run("buffer/"+name, func(t *testing.T) {
+			requirePanicPrefix(t, name+": ", call)
+		})
+	}
+}
+
+func requirePanicPrefix(t *testing.T, prefix string, call func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "expected a panic")
+		msg, ok := r.(string)
+		require.True(t, ok, "panic value %v is not a string", r)
+		require.True(t, strings.HasPrefix(msg, prefix), "panic %q does not start with %q", msg, prefix)
+	}()
+	call()
+}
+
+func TestFromSortedList32ToBufContract(t *testing.T) {
+	runFromSortedListToBufContract(t, family32)
 }
 
 func TestFromSortedListToBufMutation(t *testing.T) {
@@ -4270,17 +4540,17 @@ func TestFromSortedListToBufGetMutatesVals(t *testing.T) {
 		"value moved to a later key": {
 			vals:   []uint64{0, 1, 2},
 			mutate: func(vals []uint64) { vals[1] = 1 << 16 },
-			panics: "FromSortedList: vals mutated during build (index 2: 2 after 65536)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 2 after 65536)",
 		},
 		"values swapped within a key": {
 			vals:   []uint64{0, 1, 2},
 			mutate: func(vals []uint64) { vals[1], vals[2] = vals[2], vals[1] },
-			panics: "FromSortedList: vals mutated during build (index 2: 1 after 2)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 1 after 2)",
 		},
 		"value moved to an earlier key": {
 			vals:   []uint64{0, 1 << 16, 2 << 16},
 			mutate: func(vals []uint64) { vals[2] = 1 },
-			panics: "FromSortedList: vals mutated during build (index 2: 1 after 65536)",
+			panics: "FromSortedListToBuf: vals mutated during build (index 2: 1 after 65536)",
 		},
 	}
 	for name, tc := range rejected {
