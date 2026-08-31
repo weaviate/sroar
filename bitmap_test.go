@@ -1696,6 +1696,20 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
 	})
 
+	t.Run("repeated zero out leaves containers empty", func(t *testing.T) {
+		bm := clone(bmTemplate)
+
+		// Second pass hits zeroOutContainer's already-empty skip; a merge
+		// afterwards surfaces any stale payload bits it might have left.
+		bm.ZeroOut()
+		bm.ZeroOut()
+
+		require.True(t, bm.IsEmpty())
+		bm.Or(bmTemplate)
+		require.Equal(t, bmTemplate.GetCardinality(), bm.GetCardinality())
+		require.ElementsMatch(t, bmTemplate.ToArray(), bm.ToArray())
+	})
+
 	t.Run("merge after zero out, no size has changed", func(t *testing.T) {
 		bm := clone(bmTemplate)
 

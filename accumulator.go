@@ -251,7 +251,7 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 			switch src[indexType] {
 			case typeArray:
 				for _, lo := range array(src).all() {
-					dst[lo>>4] |= bitmapMask[lo&0xF]
+					setBit(dst, lo)
 				}
 			case typeBitmap:
 				d64 := uint16To64SliceUnsafe(dst)
@@ -353,7 +353,7 @@ func (acc *Accumulator) orRange(bm *Bitmap, from, to int) {
 		switch src[indexType] {
 		case typeArray:
 			for _, lo := range array(src).all() {
-				dst[lo>>4] |= bitmapMask[lo&0xF]
+				setBit(dst, lo)
 			}
 		case typeBitmap:
 			d64 := uint16To64SliceUnsafe(dst)
@@ -497,7 +497,7 @@ func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 			switch src[indexType] {
 			case typeArray:
 				for _, lo := range array(src).all() {
-					dst[lo>>4] &^= bitmapMask[lo&0xF]
+					clearBit(dst, lo)
 				}
 			case typeBitmap:
 				d64 := uint16To64SliceUnsafe(dst)
@@ -514,33 +514,58 @@ func (acc *Accumulator) andNotRange(bm *Bitmap, from, to int) {
 	}
 }
 
-// layoutScratchLen is how many per-block cardinalities the build path can
+// layoutScratchLen is how many per-block layout entries the build path can
 // hold on the caller's stack. Unions spanning more ranges pay one heap
 // allocation for the slice.
 const layoutScratchLen = 64
 
-// layout popcounts the staging blocks into the result's complete layout, so a
-// build can allocate fully sized and never reallocate or move anything. cards
-// is scratch[:len(blocks)] when it fits, a fresh slice otherwise. numKeys
-// includes the always-present key-0 slot; sizeContainer0 is that container's
-// size, a minContainerSize placeholder when the union misses key 0.
-func (acc *Accumulator) layout(scratch []int) (cards []int, numKeys, sizeContainer0, sizeOtherContainers int) {
+// blockLayout is one staging block's entry from the layout pass: its popcount
+// and the window of words holding its set bits, so the build reads only that
+// span instead of the whole 8KB block. min and max are inclusive uint16-word
+// indices, meaningful only when card > 0.
+type blockLayout struct {
+	card     int32 // fits: a block holds at most 65536 bits
+	min, max uint16
+}
+
+// layout popcounts the staging blocks into the result's complete layout — per
+// block a cardinality and touched-word window — so a build can allocate fully
+// sized and never reallocate or move anything. layouts is scratch[:len(blocks)]
+// when it fits, a fresh slice otherwise. numKeys includes the always-present
+// key-0 slot; sizeContainer0 is that container's size, a minContainerSize
+// placeholder when the union misses key 0.
+func (acc *Accumulator) layout(scratch []blockLayout) (layouts []blockLayout, numKeys, sizeContainer0, sizeOtherContainers int) {
 	if len(acc.blocks) <= len(scratch) {
-		cards = scratch[:len(acc.blocks)]
+		layouts = scratch[:len(acc.blocks)]
 	} else {
-		cards = make([]int, len(acc.blocks))
+		layouts = make([]blockLayout, len(acc.blocks))
 	}
 	numKeys = 1 // the key-0 slot every bitmap pre-creates
 	sizeContainer0 = minContainerSize
 	for i, b := range acc.blocks {
-		card := 0
-		for _, w := range uint16To64SliceUnsafe(b) {
-			card += bits.OnesCount64(w)
+		// Splitting the prefix/suffix zero-scan from the popcount beats
+		// tracking the window inside the popcount loop, which would tax every
+		// word of every block; only the two boundary words are read twice.
+		b64 := uint16To64SliceUnsafe(b)
+		first := 0
+		for first < len(b64) && b64[first] == 0 {
+			first++
 		}
-		cards[i] = card
-		if card == 0 {
+		if first == len(b64) {
+			layouts[i] = blockLayout{}
 			continue
 		}
+		last := len(b64) - 1
+		for b64[last] == 0 { // terminates: b64[first] != 0
+			last--
+		}
+		card := 0
+		for _, x := range b64[first : last+1] {
+			card += bits.OnesCount64(x)
+		}
+		// first/last are 64-bit-word indices; widen to the covered
+		// uint16-word span.
+		layouts[i] = blockLayout{card: int32(card), min: uint16(first * 4), max: uint16(last*4 + 3)}
 		sz, _ := containerSizeForCard(card)
 		if acc.keys[i] != 0 {
 			numKeys++
@@ -552,16 +577,16 @@ func (acc *Accumulator) layout(scratch []int) (cards []int, numKeys, sizeContain
 			sizeContainer0 = int(sz)
 		}
 	}
-	return cards, numKeys, sizeContainer0, sizeOtherContainers
+	return layouts, numKeys, sizeContainer0, sizeOtherContainers
 }
 
 // Bitmap assembles and returns the union. The accumulator keeps its staging
 // state afterwards; call Reset to reuse it for a new union.
 func (acc *Accumulator) Bitmap() *Bitmap {
-	var scratch [layoutScratchLen]int
-	cards, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
+	var scratch [layoutScratchLen]blockLayout
+	layouts, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
 	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
-	acc.buildInto(ra, cards)
+	acc.buildInto(ra, layouts)
 	return ra
 }
 
@@ -598,8 +623,8 @@ func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitma
 	if get == nil {
 		panic(name + ": get is nil")
 	}
-	var scratch [layoutScratchLen]int
-	cards, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
+	var scratch [layoutScratchLen]blockLayout
+	layouts, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
 	// +1 is the spare slot buildInto relies on.
 	sizeKeys := calcSizeKeys(numKeys + 1)
 	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
@@ -610,7 +635,7 @@ func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitma
 		panic(name + ": mutated during build — get must not use the accumulator")
 	}
 	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
-	acc.buildInto(dst, cards)
+	acc.buildInto(dst, layouts)
 	return dst
 }
 
@@ -619,10 +644,13 @@ func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitma
 // call sites). The spare is what lets setKey's return — a possibly shifted
 // offset — be discarded: the node never fills mid-build, so it never expands
 // and never moves containers. acc.keys is sorted, so containers are appended
-// in key order and no append can reallocate.
-func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
+// in key order and no append can reallocate. Each block is written from its
+// layout's window only; the words outside it are zeroed rather than copied,
+// since the container may come from newContainerNoClr over dirty memory.
+func (acc *Accumulator) buildInto(ra *Bitmap, layouts []blockLayout) {
 	for i, b := range acc.blocks {
-		card := cards[i]
+		bl := layouts[i]
+		card := int(bl.card)
 		if card == 0 {
 			continue
 		}
@@ -640,12 +668,18 @@ func (acc *Accumulator) buildInto(ra *Bitmap, cards []int) {
 		c[indexType] = typ
 		setCardinality(c, card)
 		if typ == typeArray {
-			bitsIntoArray(b, c[startIdx:])
+			// Only the touched window holds set bits — skip the rest.
+			bitsIntoArray(b[bl.min:bl.max+1], c[startIdx:], bl.min)
 			// Lookups never read the padding, but ToBuffer serializes it —
 			// clear it so a dirty pooled buffer cannot leak into the bytes.
 			clear(c[int(startIdx)+card:])
 		} else {
-			copy(c[startIdx:], b)
+			// Only the window holds set bits, but newContainerNoClr can hand
+			// back dirty memory, so the rest is zeroed rather than copied.
+			lo, hi := int(startIdx)+int(bl.min), int(startIdx)+int(bl.max)
+			clear(c[startIdx:lo])
+			copy(c[lo:], b[bl.min:bl.max+1])
+			clear(c[hi+1:])
 		}
 		if acc.keys[i] != 0 {
 			ra.setKey(acc.keys[i], off)

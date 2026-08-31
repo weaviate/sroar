@@ -146,6 +146,19 @@ func TestAccumulator(t *testing.T) {
 			},
 		},
 		{
+			name: "clustered mid-block window",
+			sources: func() []*Bitmap {
+				// Values confined to the middle of their 64K ranges: the
+				// build must clamp to an interior touched-word window on
+				// both ends without shifting the extracted values.
+				var sources []*Bitmap
+				for i := uint64(0); i < 100; i++ {
+					sources = append(sources, bitmapOf(1<<16+30_000+i), bitmapOf(5<<16+40_000+i))
+				}
+				return sources
+			},
+		},
+		{
 			name: "array-bitmap cutoff below",
 			sources: func() []*Bitmap {
 				// 2048 distinct values in one 64K range: result container
@@ -1204,6 +1217,41 @@ func TestAccumulatorWithRetainedBlocks(t *testing.T) {
 		require.Nil(t, acc.keys)
 		require.Nil(t, acc.blocks)
 	})
+}
+
+// buildInto copies only each block's touched window into a bitmap container,
+// so the rest of the payload has to be cleared: newContainerNoClr hands back
+// whatever the pooled buffer held. The values sit mid-block, so stale words
+// would precede them and ToArray alone would not notice.
+func TestAccumulatorBuildIntoClearsOutsideWindow(t *testing.T) {
+	const base = uint64(1) << 16
+	const lowBit = uint64(30000)
+
+	acc := NewAccumulator()
+	want := make([]uint64, 0, 3000)
+	for i := uint64(0); i < 3000; i++ {
+		acc.Or(bitmapOf(base + lowBit + i))
+		want = append(want, base+lowBit+i)
+	}
+
+	dirty := make([]byte, 1<<17)
+	for i := range dirty {
+		dirty[i] = 0xEE
+	}
+	var dst Bitmap
+	got := acc.InitBitmapToBuf(func(n int) (*Bitmap, []byte) {
+		require.LessOrEqual(t, n, len(dirty))
+		return &dst, dirty[:n]
+	})
+
+	off, ok := got.keys.getValue(base)
+	require.True(t, ok)
+	c := got.getContainer(off)
+	require.Equal(t, typeBitmap, c[indexType])
+	for i, w := range c[startIdx:c[indexSize]] {
+		require.NotEqual(t, uint16(0xEEEE), w, "stale word at payload index %d", i)
+	}
+	require.Equal(t, want, got.ToArray())
 }
 
 func TestAccumulatorBitmapToBuf(t *testing.T) {
