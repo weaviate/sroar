@@ -779,7 +779,16 @@ func (b bitmap) maximum() uint16 {
 
 func (b bitmap) cardinality() int {
 	var num int
-	for _, x := range b[startIdx:] {
+	data := b[startIdx:]
+	// Popcount64 costs the same as popcount16, so batching 4x fewer
+	// instructions is free. Fall back for slices not a multiple of 4.
+	if len(data)%4 == 0 {
+		for _, w := range uint16To64SliceUnsafe(data) {
+			num += bits.OnesCount64(w)
+		}
+		return num
+	}
+	for _, x := range data {
 		num += bits.OnesCount16(x)
 	}
 	return num
