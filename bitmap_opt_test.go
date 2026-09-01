@@ -4267,6 +4267,28 @@ func TestFromSortedListPanicsOnUnsortedInput(t *testing.T) {
 		fromSortedListUnsortedCases(), fromSortedListToleratedCases())
 }
 
+func TestFromSortedListToBufKeyZeroGrowsDuringGet(t *testing.T) {
+	// get must not modify vals, and a change that breaks the ascending order
+	// panics. One that keeps it is not caught: the godoc says such a build may
+	// outgrow the buffer and migrate to the heap. Key 0's container is the one
+	// filled in place, so it has to append rather than overrun its slot.
+	vals := make([]uint64, 0, 62)
+	for i := 0; i < 60; i++ {
+		vals = append(vals, uint64(i))
+	}
+	vals = append(vals, 1<<16|5, 1<<16|7)
+
+	var asked int
+	got := FromSortedListToBuf(vals, func(sizeBytes int) []byte {
+		asked = sizeBytes
+		vals[60] = 60 // key 0's segment grows to 61, still ascending
+		return make([]byte, sizeBytes)
+	})
+
+	require.Equal(t, vals, got.ToArray())
+	require.Greater(t, got.LenInBytes(), asked, "the build outgrew the buffer it asked for")
+}
+
 func TestFromSortedListToBufContract(t *testing.T) {
 	runFromSortedListToBufContract(t, family64)
 }

@@ -451,24 +451,13 @@ func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T, name string, che
 	// moved.
 	finalize := func(seg []T, key uint64) {
 		sz, typ := containerSizeForCard(len(seg))
-		var off uint64
-		if key == 0 {
-			// Key 0's container pre-exists at exactly sz — fill it in place;
-			// appending would orphan it as dead space in ra.data.
-			off = ra.keys.val(0)
-		} else {
-			off = ra.newContainerNoClr(sz)
-			ra.data[off] = sz
-		}
+		off := ra.placeContainer(key, sz)
 		c := ra.data[off : off+uint64(sz)]
 		c[indexType] = typ
 		if typ == typeArray {
 			fillArrayContainer(ra, off, c, seg)
 		} else {
 			fillBitmapContainer(ra, off, c, seg)
-		}
-		if key != 0 {
-			ra.setKey(key, off)
 		}
 	}
 
