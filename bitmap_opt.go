@@ -267,6 +267,7 @@ func arraySize(n int) int {
 // compactedArraySize is arraySize with one spare slot, so a container built at
 // this size takes one insert before it has to grow. A full 4096-value array
 // drops the spare rather than exceed maxContainerSize.
+// Bitmap.Compacted sizes through containerSizeForCard instead.
 func compactedArraySize(n int) int {
 	return min(arraySize(n+1), maxContainerSize)
 }
@@ -568,6 +569,126 @@ func dedupIntoArray[T sortedListVal](seg []T, c []uint16) (card int) {
 		card++
 	}
 	return card
+}
+
+// Compacted returns a copy of ra in the smallest layout the container rules
+// allow: containers resized to their cardinality, sparse bitmap containers
+// rewritten as arrays, unreferenced space reclaimed, empty containers dropped
+// except key 0's. It is byte-identical to a FromSortedList build of the same
+// values, and ra is not modified. A container in the copy can arrive full, so
+// an insert into it can reallocate where the same insert into ra would not.
+func (ra *Bitmap) Compacted() *Bitmap {
+	numKeys, sizeContainer0, sizeOtherContainers := ra.compactLayout()
+	res := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
+	return ra.compactInto("Compacted", res)
+}
+
+// CompactedToBuf is [Bitmap.Compacted] building into a buffer obtained from
+// get. get is called exactly once, with the byte size the result occupies; a
+// smaller buffer panics. The buffer is adopted to its full capacity, rounded
+// down to even, and may arrive dirty. It must not overlap ra's memory, and
+// get must not touch ra; neither is checked, and an overlap leaves ra and the
+// result undefined. The result references the buffer until it is released.
+func (ra *Bitmap) CompactedToBuf(get func(sizeBytes int) []byte) *Bitmap {
+	return ra.initCompactedToBuf("CompactedToBuf", wrapGetToBuf(get))
+}
+
+// InitCompactedToBuf is [Bitmap.CompactedToBuf] with the result Bitmap struct
+// pooled too. A nil struct or ra itself panics; the struct's fields are
+// overwritten and never freed, so nothing it owns may still be in use.
+func (ra *Bitmap) InitCompactedToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	return ra.initCompactedToBuf("InitCompactedToBuf", get)
+}
+
+// initCompactedToBuf reports panics under name, the exported method called.
+func (ra *Bitmap) initCompactedToBuf(name string, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	if get == nil {
+		panic(name + ": get is nil")
+	}
+	numKeys, sizeContainer0, sizeOtherContainers := ra.compactLayout()
+	sizeKeys := calcSizeKeys(numKeys + 1)
+	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
+
+	dst, buf := get(sizeTotal * 2)
+	if ra != nil && dst == ra {
+		panic(name + ": get returned the source bitmap")
+	}
+	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
+	return ra.compactInto(name, dst)
+}
+
+// compactLayout sizes a compacted copy of ra from container headers alone.
+// Key 0 is counted up front and sized separately, as in fromSortedLayout.
+func (ra *Bitmap) compactLayout() (numKeys, sizeContainer0, sizeOtherContainers int) {
+	numKeys = 1 // the key-0 slot every bitmap pre-creates
+	sizeContainer0 = minContainerSize
+	if ra.LenInBytes() == 0 {
+		return
+	}
+
+	for i, n := 0, ra.keys.numKeys(); i < n; i++ {
+		off := ra.keys.val(i)
+		card := getCardinality(ra.data[off:])
+		if card == 0 {
+			continue
+		}
+		sz, _ := containerSizeForCard(card)
+		if ra.keys.key(i) == 0 {
+			sizeContainer0 = int(sz)
+			continue
+		}
+		numKeys++
+		sizeOtherContainers += int(sz)
+	}
+	return
+}
+
+// compactInto writes ra's non-empty containers into res, which must be laid
+// out by compactLayout, spare key slot included, so no container is moved.
+func (ra *Bitmap) compactInto(name string, res *Bitmap) *Bitmap {
+	if ra.LenInBytes() == 0 {
+		return res
+	}
+
+	for i, n := 0, ra.keys.numKeys(); i < n; i++ {
+		src := ra.getContainer(ra.keys.val(i))
+		card := getCardinality(src)
+		if card == 0 {
+			continue
+		}
+		key := ra.keys.key(i)
+		sz, typ := containerSizeForCard(card)
+
+		off := res.placeContainer(key, sz)
+		writeCompactedContainer(name, res.data[off:off+uint64(sz)], src, card, typ)
+	}
+	return res
+}
+
+// writeCompactedContainer materializes src into dst, writing every byte of
+// it, including the size word placeContainer already set to the same value.
+// src's size word must be its real length: the bitmap-to-bitmap arm copies
+// src wholesale, so a short one leaves dst's tail dirty.
+func writeCompactedContainer(name string, dst, src []uint16, card int, typ uint16) {
+	switch {
+	case src[indexType] == typeBitmap && typ == typeBitmap:
+		// Both are maxContainerSize, so src's header is dst's header too.
+		copy(dst, src)
+	case src[indexType] == typeBitmap && typ == typeArray:
+		bitmap(src).intoArray(dst[startIdx:])
+		setArrayHeader(dst, card)
+		clear(dst[int(startIdx)+card:])
+	case src[indexType] == typeArray && typ == typeBitmap:
+		// Reachable only through FromBuffer: no constructor here builds an
+		// array container above 2044 values.
+		array(src).toBitmapContainer(dst)
+	case src[indexType] == typeArray && typ == typeArray:
+		copy(dst[startIdx:], src[startIdx:int(startIdx)+card])
+		setArrayHeader(dst, card)
+		clear(dst[int(startIdx)+card:])
+	default:
+		panic(fmt.Sprintf("%s: unknown container type %d", name, src[indexType]))
+	}
 }
 
 // andNotResultSize returns the uint16s the result for source ac occupies in

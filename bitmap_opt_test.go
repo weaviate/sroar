@@ -3919,8 +3919,11 @@ func TestContainerSizeForCard(t *testing.T) {
 		{card: 0, expSize: minContainerSize, expType: typeArray},
 		{card: 1, expSize: minContainerSize, expType: typeArray},
 		{card: 56, expSize: minContainerSize, expType: typeArray},
+		{card: 59, expSize: minContainerSize, expType: typeArray},
 		{card: 60, expSize: minContainerSize, expType: typeArray},
 		{card: 61, expSize: 68, expType: typeArray},
+		{card: 62, expSize: 68, expType: typeArray},
+		{card: 64, expSize: 68, expType: typeArray},
 		{card: 1020, expSize: 1024, expType: typeArray},
 		{card: 2043, expSize: maxArrayContainerSize, expType: typeArray},
 		{card: 2044, expSize: maxArrayContainerSize, expType: typeArray},
@@ -3935,6 +3938,40 @@ func TestContainerSizeForCard(t *testing.T) {
 			require.Equal(t, tc.expType, typ)
 		})
 	}
+
+	// No row can state that the zero-spare cardinalities are exactly the
+	// multiples of four from 60 to 2044, which is what Bitmap.Compacted's
+	// first insert turns on. Below 60 minContainerSize leaves room.
+	t.Run("zero-spare run", func(t *testing.T) {
+		const sweepCap = 1 << 12 // past the array range under any sizing rule
+		first, last, count := 0, 0, 0
+		for n := 1; n <= sweepCap; n++ {
+			if _, typ := containerSizeForCard(n); typ != typeArray {
+				break
+			}
+			if spareSlots(n) == 0 {
+				if first == 0 {
+					first = n
+				}
+				last = n
+				count++
+			}
+		}
+		require.Equal(t, 60, first)
+		require.Equal(t, 2044, last)
+		require.Equal(t, 497, count)
+
+		for n := first; n < first+8; n++ {
+			require.Equal(t, (4-n%4)%4, spareSlots(n), "cardinality %d", n)
+		}
+	})
+}
+
+// spareSlots is the slots a container sized for cardinality n keeps free for a
+// later insert. Zero means the first insert has to grow it.
+func spareSlots(n int) int {
+	sz, _ := containerSizeForCard(n)
+	return int(sz) - int(startIdx) - n
 }
 
 func TestFromSortedListSmallContainersAreMinSized(t *testing.T) {
@@ -4734,4 +4771,463 @@ func TestSearchKeyedMaskedFrom(t *testing.T) {
 			}
 		}
 	})
+}
+
+// bitmapWithEmptiedContainers keeps containers whose values are all gone.
+// RemoveRange drops the key outright, so only Remove and AndNot leave this.
+func bitmapWithEmptiedContainers() *Bitmap {
+	bm := bitmapOf(sortedSeq(5, 1<<16)...)
+	for k := 1; k <= 3; k++ {
+		bm.Remove(uint64(k) << 16)
+	}
+	return bm
+}
+
+// bitmapWithSparseBitmapContainer avoids key 0, which is special-cased.
+func bitmapWithSparseBitmapContainer() *Bitmap {
+	bm := bitmapOf(1, 2, 3)
+	base := uint64(5) << 16
+	for i := 0; i < 5_000; i++ { // past the array cutoff, so a bitmap container
+		bm.Set(base | uint64(i))
+	}
+	for i := 10; i < 5_000; i++ {
+		bm.Remove(base | uint64(i))
+	}
+	return bm
+}
+
+func compactionCases() []struct {
+	name  string
+	build func() *Bitmap
+} {
+	return []struct {
+		name  string
+		build func() *Bitmap
+	}{
+		{"empty", func() *Bitmap {
+			return NewBitmap()
+		}},
+		{"values in key 0 only", func() *Bitmap {
+			return bitmapOf(1, 2, 3)
+		}},
+		{"one value per container", func() *Bitmap {
+			return bitmapOf(sortedSeq(20, 1<<16)...)
+		}},
+		{"array containers with a stale tail", func() *Bitmap {
+			// Set doubles the container and Remove leaves the values past
+			// the new cardinality, so it is oversized and dirty behind them.
+			bm := bitmapOf(sortedSeq(600, 3)...)
+			for _, v := range sortedSeq(590, 3) {
+				bm.Remove(v)
+			}
+			return bm
+		}},
+		{"emptied containers", bitmapWithEmptiedContainers},
+		{"sparse bitmap container", bitmapWithSparseBitmapContainer},
+		{"orphaned containers", bitmapWithOrphanedContainers},
+		{"bitmap containers stay bitmaps", func() *Bitmap {
+			return Prefill(1 << 18)
+		}},
+		{"array container full at the cap", func() *Bitmap {
+			return bitmapOf(sortedSeq(2044, 1)...)
+		}},
+		{"one value past the cap", func() *Bitmap {
+			return bitmapOf(sortedSeq(2045, 1)...)
+		}},
+		{"nothing to gain", func() *Bitmap {
+			return FromSortedList(sortedSeq(10_000, 7))
+		}},
+	}
+}
+
+func TestCompacted(t *testing.T) {
+	for _, tc := range compactionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			vals := bm.ToArray()
+			before := append([]byte(nil), bm.ToBuffer()...)
+
+			got := bm.Compacted()
+
+			require.Equal(t, vals, got.ToArray())
+			// ToBuffer is nil for an empty bitmap, so compare the length too.
+			want := FromSortedList(vals)
+			require.Equal(t, want.ToBuffer(), got.ToBuffer())
+			require.Equal(t, want.LenInBytes(), got.LenInBytes())
+			require.LessOrEqual(t, got.LenInBytes(), bm.LenInBytes())
+			require.Equal(t, before, append([]byte(nil), bm.ToBuffer()...))
+
+			rt := FromBuffer(got.ToBufferWithCopy())
+			require.Equal(t, vals, rt.ToArray())
+			require.True(t, got.Set(1<<40|7))
+			require.True(t, got.Contains(1<<40|7))
+			require.Equal(t, len(vals)+1, got.GetCardinality())
+		})
+	}
+}
+
+func TestCompactedDropsEmptyContainers(t *testing.T) {
+	bm := bitmapWithEmptiedContainers()
+	require.Equal(t, 5, bm.NumContainers())
+	for i := 1; i <= 3; i++ {
+		require.Equal(t, 0, getCardinality(bm.getContainer(bm.keys.val(i))))
+	}
+
+	got := bm.Compacted()
+
+	require.Equal(t, 2, got.NumContainers())
+	require.Equal(t, []uint64{0, 4 << 16}, got.ToArray())
+}
+
+func TestCompactedKeepsEmptyKeyZeroContainer(t *testing.T) {
+	// Every bitmap pre-creates key 0's slot, empty or not.
+	bm := bitmapOf(0, 1<<20)
+	bm.Remove(0)
+	got := bm.Compacted()
+
+	require.Equal(t, 2, got.NumContainers())
+	require.Equal(t, uint64(0), got.keys.key(0))
+	require.Equal(t, 0, getCardinality(got.getContainer(got.keys.val(0))))
+	require.Equal(t, []uint64{1 << 20}, got.ToArray())
+}
+
+func TestCompactedRewritesSparseBitmapContainer(t *testing.T) {
+	// cannot.
+	bm := Prefill(1<<16 - 1)
+	bm.RemoveRange(10, 1<<16)
+	require.Equal(t, typeBitmap, bm.getContainer(bm.keys.val(0))[indexType])
+
+	got := bm.Compacted()
+
+	require.Equal(t, typeArray, got.getContainer(got.keys.val(0))[indexType])
+	require.Equal(t, uint16(minContainerSize), got.getContainer(got.keys.val(0))[indexSize])
+	require.Less(t, got.LenInBytes()*10, bm.LenInBytes())
+}
+
+// bitmapWithOrphanedContainers relies on Or past ten keys appending a merged
+// container that no longer fits the destination and abandoning the old one.
+func bitmapWithOrphanedContainers() *Bitmap {
+	a, b := NewBitmap(), NewBitmap()
+	for k := 0; k < 20; k++ {
+		for i := 0; i < 55; i++ {
+			a.Set(uint64(k)<<16 | uint64(2*i))
+			b.Set(uint64(k)<<16 | uint64(2*i+1))
+		}
+	}
+	return a.Or(b)
+}
+
+func TestCompactedReclaimsOrphanedContainers(t *testing.T) {
+	// ToBuffer writes the orphans out even though no key reaches them.
+	a := bitmapWithOrphanedContainers()
+
+	reachable := a.keys.size()
+	for i := 0; i < a.NumContainers(); i++ {
+		reachable += int(a.getContainer(a.keys.val(i))[indexSize])
+	}
+	require.Greater(t, a.LenInBytes(), reachable*2, "expected orphaned space in the source")
+
+	require.LessOrEqual(t, a.Compacted().LenInBytes(), reachable*2)
+}
+
+func TestCompactedEmptySources(t *testing.T) {
+	var nilBm *Bitmap
+	sources := []struct {
+		name string
+		src  *Bitmap
+	}{
+		{"nil", nilBm},
+		{"zero value", &Bitmap{}},
+		{"empty", NewBitmap()},
+	}
+	for _, tc := range sources {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.src.Compacted()
+			require.True(t, got.IsEmpty())
+			// An exact-size build of no values is the independent oracle.
+			require.Equal(t, FromSortedList(nil).LenInBytes(), got.LenInBytes())
+
+			// get is asked for the layout's own size, so an empty source
+			// over-counting its containers shows up here and nowhere else.
+			var asked int
+			buf := tc.src.CompactedToBuf(func(sizeBytes int) []byte {
+				asked = sizeBytes
+				return make([]byte, sizeBytes)
+			})
+			require.True(t, buf.IsEmpty())
+			require.Equal(t, got.ToBuffer(), buf.ToBuffer())
+			require.Equal(t, FromSortedList(nil).LenInBytes(), asked)
+		})
+	}
+}
+
+func TestCompactedToBufContract(t *testing.T) {
+	// The sparse bitmap container makes these cases cover padding clearing.
+	bm := bitmapWithSparseBitmapContainer()
+	for _, v := range sortedSeq(20, 1<<16) {
+		bm.Set(v)
+	}
+	want := bm.Compacted().ToBuffer()
+
+	t.Run("asks for exactly what the result occupies", func(t *testing.T) {
+		var asked, calls int
+		got := bm.CompactedToBuf(func(sizeBytes int) []byte {
+			calls++
+			asked = sizeBytes
+			return make([]byte, sizeBytes)
+		})
+		require.Equal(t, 1, calls, "get must be called exactly once")
+		require.Equal(t, len(want), asked)
+		require.Equal(t, want, got.ToBuffer())
+	})
+
+	t.Run("writes over a dirty oversized buffer", func(t *testing.T) {
+		got := bm.CompactedToBuf(func(sizeBytes int) []byte {
+			buf := make([]byte, sizeBytes+100)
+			for i := range buf {
+				buf[i] = 0xff
+			}
+			return buf
+		})
+		require.Equal(t, want, got.ToBuffer())
+	})
+
+	t.Run("writes over a dirty buffer on the bitmap to bitmap arm", func(t *testing.T) {
+		dense := bm.Clone()
+		dense.Or(Prefill(1 << 18))
+		wantDense := dense.Compacted().ToBuffer()
+		got := dense.CompactedToBuf(func(sizeBytes int) []byte {
+			buf := make([]byte, sizeBytes)
+			for i := range buf {
+				buf[i] = 0xff
+			}
+			return buf
+		})
+		require.Equal(t, typeBitmap, got.getContainer(got.keys.val(1))[indexType],
+			"the fixture must reach the bitmap to bitmap arm")
+		require.Equal(t, wantDense, got.ToBuffer())
+	})
+
+	t.Run("a get that grows the source leaves the buffer, not the values", func(t *testing.T) {
+		// Key 0 is no exception: placeContainer appends rather than overrun.
+		for _, tc := range []struct {
+			name string
+			grow func(*Bitmap)
+		}{
+			{"key 0 in place", func(b *Bitmap) { b.Set(1000) }},
+			{"a later key", func(b *Bitmap) {
+				for i := 0; i < 60; i++ {
+					b.Set(1<<16 | uint64(100+i))
+				}
+			}},
+			{"a new key", func(b *Bitmap) { b.Set(9 << 16) }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				src := NewBitmap()
+				for i := 0; i < 60; i++ {
+					src.Set(uint64(i))
+				}
+				src.Set(1<<16 | 5)
+
+				var asked int
+				got := src.CompactedToBuf(func(sizeBytes int) []byte {
+					asked = sizeBytes
+					tc.grow(src)
+					return make([]byte, sizeBytes)
+				})
+				require.Equal(t, src.ToArray(), got.ToArray())
+				require.Greater(t, got.LenInBytes(), asked,
+					"the fill must have outgrown the buffer get was asked for")
+			})
+		}
+	})
+
+	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
+		got := bm.CompactedToBuf(func(sizeBytes int) []byte { return make([]byte, 0, sizeBytes) })
+		require.Equal(t, want, got.ToBuffer())
+	})
+
+	t.Run("init builds into the provided struct", func(t *testing.T) {
+		reused := bitmapOf(99, 100_000)
+		got := bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) {
+			return reused, make([]byte, sizeBytes)
+		})
+		require.Same(t, reused, got)
+		require.Equal(t, want, got.ToBuffer())
+	})
+
+	t.Run("init allocates nothing with pooled struct and buffer", func(t *testing.T) {
+		pooled := &Bitmap{}
+		buf := make([]byte, 1<<16)
+		get := func(sizeBytes int) (*Bitmap, []byte) { return pooled, buf[:sizeBytes] }
+		allocs := testing.AllocsPerRun(10, func() { bm.InitCompactedToBuf(get) })
+		require.Zero(t, allocs)
+	})
+
+	t.Run("panics naming the caller", func(t *testing.T) {
+		var nilBM *Bitmap
+		buf := func(sizeBytes int) []byte { return make([]byte, sizeBytes) }
+		short := func(sizeBytes int) []byte { return make([]byte, sizeBytes-2) }
+		for _, tc := range []struct {
+			name   string
+			want   string // whole message, or "" to assert prefix only
+			prefix string
+			call   func()
+		}{
+			{name: "buffer too small", prefix: "CompactedToBuf: ", call: func() {
+				bm.CompactedToBuf(short)
+			}},
+			{name: "init buffer too small", prefix: "InitCompactedToBuf: ", call: func() {
+				bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) { return &Bitmap{}, short(sizeBytes) })
+			}},
+			{name: "nil get", want: "CompactedToBuf: get is nil", call: func() {
+				bm.CompactedToBuf(nil)
+			}},
+			{name: "init nil get", want: "InitCompactedToBuf: get is nil", call: func() {
+				bm.InitCompactedToBuf(nil)
+			}},
+			{name: "init nil struct", want: "InitCompactedToBuf: get returned a nil *Bitmap", call: func() {
+				bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) { return nil, buf(sizeBytes) })
+			}},
+			{name: "init returns the source", want: "InitCompactedToBuf: get returned the source bitmap", call: func() {
+				bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) { return bm, buf(sizeBytes) })
+			}},
+			// A nil receiver equals a nil dst; the aliasing check must not fire.
+			{name: "nil receiver", want: "InitCompactedToBuf: get returned a nil *Bitmap", call: func() {
+				nilBM.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) { return nil, buf(sizeBytes) })
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.want == "" {
+					requirePanicPrefix(t, tc.prefix, tc.call)
+					return
+				}
+				require.PanicsWithValue(t, tc.want, tc.call)
+			})
+		}
+	})
+}
+
+// oversizedArrayContainerAt forges the one shape no constructor here builds:
+// an array container above 2044 values, which FromBuffer hands back as is.
+// key picks whether the container is the pre-cleared key-0 slot or an appended
+// one, which decides whether the array-to-bitmap arm meets dirty memory.
+func oversizedArrayContainerAt(t *testing.T, key uint64) *Bitmap {
+	t.Helper()
+	const card = 2045
+	vals := make([]uint64, card-1)
+	for i := range vals {
+		vals[i] = key<<16 + uint64(2*i)
+	}
+	bm := FromSortedList(vals)
+
+	idx := 0
+	if key != 0 {
+		idx = 1
+		require.Equal(t, key<<16, bm.keys.key(idx))
+	}
+	off := bm.keys.val(idx)
+	require.Equal(t, typeArray, bm.getContainer(off)[indexType])
+	require.Equal(t, uint16(maxArrayContainerSize), bm.getContainer(off)[indexSize])
+
+	// The container is the arena tail, so it can stretch by four uint16s.
+	bm.fastExpand(4)
+	c := bm.data[off : off+maxArrayContainerSize+4]
+	c[indexSize] = maxArrayContainerSize + 4
+	c[int(startIdx)+card-1] = uint16(2 * (card - 1)) // stays sorted
+	setCardinality(c, card)
+	require.Equal(t, card, bm.GetCardinality())
+	return bm
+}
+
+func TestCompactedRewritesOversizedArrayContainer(t *testing.T) {
+	bm := oversizedArrayContainerAt(t, 0)
+
+	got := bm.Compacted()
+
+	gc := got.getContainer(got.keys.val(0))
+	require.Equal(t, typeBitmap, gc[indexType])
+	require.Equal(t, uint16(maxContainerSize), gc[indexSize])
+	require.Equal(t, bm.ToArray(), got.ToArray())
+	require.Equal(t, FromSortedList(bm.ToArray()).ToBuffer(), got.ToBuffer())
+	// The one input compaction grows: 2045 values have no legal array layout.
+	require.Greater(t, got.LenInBytes(), bm.LenInBytes())
+}
+
+func TestCompactedRewritesOversizedArrayContainerToDirtyBuffer(t *testing.T) {
+	// Only a container at another key reaches this arm over dirty memory.
+	bm := oversizedArrayContainerAt(t, 1)
+
+	want := bm.Compacted().ToBuffer()
+	got := bm.CompactedToBuf(func(sizeBytes int) []byte {
+		buf := make([]byte, sizeBytes)
+		for i := range buf {
+			buf[i] = 0xff
+		}
+		return buf
+	})
+	require.Equal(t, typeBitmap, got.getContainer(got.keys.val(1))[indexType])
+	require.Equal(t, want, got.ToBuffer())
+	require.Equal(t, bm.ToArray(), got.ToArray())
+}
+
+func TestCompactedPanicsOnUnknownContainerType(t *testing.T) {
+	bm := bitmapOf(1, 2, 3)
+	bm.data[bm.keys.val(0)+uint64(indexType)] = 7
+
+	require.PanicsWithValue(t, "Compacted: unknown container type 7", func() { bm.Compacted() })
+	require.PanicsWithValue(t, "CompactedToBuf: unknown container type 7", func() {
+		bm.CompactedToBuf(func(sizeBytes int) []byte { return make([]byte, sizeBytes) })
+	})
+	require.PanicsWithValue(t, "InitCompactedToBuf: unknown container type 7", func() {
+		bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) {
+			return &Bitmap{}, make([]byte, sizeBytes)
+		})
+	})
+}
+
+func TestCompactedFirstInsertGrows(t *testing.T) {
+	// The trade-off Compacted's godoc names, which only BenchmarkCompactedFirstInsert
+	// measures and CI never runs. 600 is a zero-spare cardinality, and Set's
+	// doubling leaves the source a container far wider than 600 values need.
+	const card = 600
+	src := NewBitmap()
+	for i := 0; i < card; i++ {
+		src.Set(1<<16 | uint64(i))
+	}
+	require.Zero(t, spareSlots(card))
+
+	got := src.Compacted()
+	srcBefore, gotBefore := src.LenInBytes(), got.LenInBytes()
+
+	require.True(t, src.Set(1<<16|60000))
+	require.True(t, got.Set(1<<16|60000))
+
+	require.Equal(t, srcBefore, src.LenInBytes(), "the source had slack to absorb it")
+	require.Greater(t, got.LenInBytes(), gotBefore, "the copy had none")
+}
+
+func TestCompactedMatchesExactSizeBuild(t *testing.T) {
+	// an exact-size build of the same values produces.
+	rnd := rand.New(rand.NewSource(20260818))
+	for i := 0; i < 200; i++ {
+		bm := NewBitmap()
+		for k := rnd.Intn(6) + 1; k > 0; k-- {
+			base := uint64(rnd.Intn(1<<20)) << 16
+			for n := rnd.Intn(3000); n > 0; n-- {
+				bm.Set(base | uint64(rnd.Intn(1<<16)))
+			}
+			for n := rnd.Intn(1500); n > 0; n-- {
+				bm.Remove(base | uint64(rnd.Intn(1<<16)))
+			}
+		}
+		vals := bm.ToArray()
+
+		got := bm.Compacted()
+
+		require.Equal(t, vals, got.ToArray())
+		require.Equal(t, FromSortedList(vals).ToBuffer(), got.ToBuffer())
+		require.LessOrEqual(t, got.LenInBytes(), bm.LenInBytes())
+		require.Equal(t, got.ToBuffer(), got.Compacted().ToBuffer())
+	}
 }
