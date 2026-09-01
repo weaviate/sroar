@@ -282,6 +282,20 @@ func (ra *Bitmap) newContainerNoClr(sz uint16) uint64 {
 	return offset
 }
 
+// placeContainer returns the offset the container for key is built at, with
+// the key entry set. Key 0 reuses its pre-created slot rather than orphan it.
+func (ra *Bitmap) placeContainer(key uint64, sz uint16) uint64 {
+	if key == 0 {
+		if off := ra.keys.val(0); sz <= ra.data[off] {
+			return off
+		}
+		// Key 0's slot is too small: the source grew between the two passes.
+	}
+	off := ra.newContainerNoClr(sz)
+	ra.data[off] = sz
+	return ra.setKey(key, off)
+}
+
 // expandContainer would expand a container at the given offset. It would typically double the size
 // of the container, until it reaches a threshold, where the size of the container would reach 2^16.
 // Expressed in uint16s, that'd be (2^16)/(2^4) = 2^12 = 4096. So, if the container size >= 2048,

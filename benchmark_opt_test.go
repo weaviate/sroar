@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"math/rand"
+	"strconv"
 	"testing"
 )
 
@@ -567,6 +568,118 @@ func BenchmarkFromSortedList(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				FromSortedList32ToBuf(vals32, getBuf)
 			}
+		})
+	}
+}
+
+// BenchmarkCompacted measures compaction against OR-ing into an empty bitmap,
+// which reclaims dead space but never shrinks a container.
+func BenchmarkCompacted(b *testing.B) {
+	orIntoEmpty := func(bm *Bitmap) *Bitmap {
+		res := NewBitmap()
+		res.Or(bm)
+		return res
+	}
+
+	// sparseArrays: nothing to shrink, so only the surrounding work differs.
+	sparseArrays := func(nContainers int) *Bitmap {
+		bm := NewBitmap()
+		for k := 0; k < nContainers; k++ {
+			for i := 0; i < 5; i++ {
+				bm.Set(uint64(k)<<16 | uint64(i*7))
+			}
+		}
+		return bm
+	}
+	arraysWithSlack := func(nContainers int) *Bitmap {
+		bm := NewBitmap()
+		for k := 0; k < nContainers; k++ {
+			for i := 0; i < 600; i++ {
+				bm.Set(uint64(k)<<16 | uint64(i))
+			}
+			for i := 20; i < 600; i++ {
+				bm.Remove(uint64(k)<<16 | uint64(i))
+			}
+		}
+		return bm
+	}
+	// sparseBitmaps: the one shape OR-ing into an empty bitmap cannot fix.
+	sparseBitmaps := func(nContainers int) *Bitmap {
+		bm := Prefill(uint64(nContainers)<<16 - 1)
+		for k := 0; k < nContainers; k++ {
+			bm.RemoveRange(uint64(k)<<16|500, uint64(k+1)<<16)
+		}
+		return bm
+	}
+
+	for _, bc := range []struct {
+		name  string
+		build func() *Bitmap
+	}{
+		{"sparse_arrays_100", func() *Bitmap { return sparseArrays(100) }},
+		{"sparse_arrays_10k", func() *Bitmap { return sparseArrays(10_000) }},
+		{"arrays_with_slack_100", func() *Bitmap { return arraysWithSlack(100) }},
+		{"sparse_bitmaps_100", func() *Bitmap { return sparseBitmaps(100) }},
+		{"dense_1M", func() *Bitmap { return Prefill(1 << 20) }},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			bm := bc.build()
+			b.Run("OrIntoEmpty", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					orIntoEmpty(bm)
+				}
+			})
+			b.Run("Compacted", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					bm.Compacted()
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkCompactedFirstInsert measures the first-insert cost Compacted's
+// godoc names. per is the values per container: 56 and 601 size the copy with
+// a spare slot, 60 and 600 without; only 600 leaves slack in the source.
+func BenchmarkCompactedFirstInsert(b *testing.B) {
+	const nContainers = 100
+	source := func(per int) *Bitmap {
+		bm := NewBitmap()
+		for k := 0; k < nContainers; k++ {
+			for i := 0; i < per; i++ {
+				bm.Set(uint64(k)<<16 | uint64(i))
+			}
+		}
+		return bm
+	}
+	insertOne := func(bm *Bitmap) {
+		for k := 0; k < nContainers; k++ {
+			bm.Set(uint64(k)<<16 | 60000)
+		}
+	}
+
+	for _, per := range []int{56, 60, 600, 601} {
+		src := source(per)
+		b.Run("per="+strconv.Itoa(per), func(b *testing.B) {
+			b.Run("Compacted", func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					cp := src.Compacted()
+					b.StartTimer()
+					insertOne(cp)
+				}
+			})
+			b.Run("OrIntoEmpty", func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					cp := NewBitmap()
+					cp.Or(src)
+					b.StartTimer()
+					insertOne(cp)
+				}
+			})
 		})
 	}
 }
