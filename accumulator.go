@@ -655,15 +655,7 @@ func (acc *Accumulator) buildInto(ra *Bitmap, layouts []blockLayout) {
 			continue
 		}
 		sz, typ := containerSizeForCard(card)
-		var off uint64
-		if acc.keys[i] == 0 {
-			// Pre-created at exactly sz by layout, key slot already set:
-			// appending here would orphan it as dead space in ra.data.
-			off = ra.keys.val(0)
-		} else {
-			off = ra.newContainerNoClr(sz)
-			ra.data[off] = sz
-		}
+		off := ra.placeContainer(acc.keys[i], sz)
 		c := ra.getContainer(off)
 		c[indexType] = typ
 		setCardinality(c, card)
@@ -680,9 +672,6 @@ func (acc *Accumulator) buildInto(ra *Bitmap, layouts []blockLayout) {
 			clear(c[startIdx:lo])
 			copy(c[lo:], b[bl.min:bl.max+1])
 			clear(c[hi+1:])
-		}
-		if acc.keys[i] != 0 {
-			ra.setKey(acc.keys[i], off)
 		}
 	}
 }
