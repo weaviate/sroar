@@ -1290,7 +1290,9 @@ func (ra *Bitmap) LenInBytes() int {
 	return len(ra.data) * 2
 }
 
-func (ra *Bitmap) capInBytes() int {
+// CapInBytes returns the size of the allocated buffer, including the growth
+// slack that LenInBytes does not count.
+func (ra *Bitmap) CapInBytes() int {
 	if ra == nil {
 		return 0
 	}

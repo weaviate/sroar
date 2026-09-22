@@ -106,7 +106,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Insert values across many different containers.
 		// Each unique high-48-bit key creates a new container.
@@ -119,14 +119,14 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 10000, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("no allocation as keys expand", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Force many key expansions by creating many distinct containers.
 		// Initial key space holds 2 keys; this forces multiple doublings.
@@ -135,14 +135,14 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 200, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("no allocation with bitmap containers", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Fill a single container past the array→bitmap conversion threshold
 		// (4096+ elements triggers bitmap container, which is 4100 uint16s).
@@ -151,7 +151,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 5000, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("length grows but capacity stays", func(t *testing.T) {
@@ -165,7 +165,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Greater(t, bm.LenInBytes(), initialLenInBytes, "length should grow as containers are added")
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 }
 
@@ -842,7 +842,7 @@ func TestMaskedToBuf(t *testing.T) {
 		result := bm.MaskedToBuf(0x0000FFFFFFFFFFFF, make([]byte, bufSize))
 
 		require.Equal(t, int(numValues), result.GetCardinality())
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("length grows but capacity stays", func(t *testing.T) {
@@ -856,7 +856,7 @@ func TestMaskedToBuf(t *testing.T) {
 
 		require.Equal(t, 50, result.GetCardinality())
 		require.Greater(t, result.LenInBytes(), 0)
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
 	})
 }
 
@@ -1628,7 +1628,7 @@ func TestReset(t *testing.T) {
 		require.Equal(t, 2, bm.keys.maxKeys())
 		require.Equal(t, 24, bm.keys.size())
 		require.Greater(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.LenInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.LenInBytes(), bm.CapInBytes())
 	})
 
 	t.Run("no panic on merge after reset", func(t *testing.T) {
@@ -1679,7 +1679,7 @@ func TestZeroOut(t *testing.T) {
 	}
 
 	clone := func(template *Bitmap) *Bitmap {
-		buf := make([]byte, 0, template.capInBytes())
+		buf := make([]byte, 0, template.CapInBytes())
 		return template.CloneToBuf(buf)
 	}
 
@@ -1693,7 +1693,7 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
 		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
 		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.CapInBytes(), bm.CapInBytes())
 	})
 
 	t.Run("repeated zero out leaves containers empty", func(t *testing.T) {
@@ -1722,6 +1722,6 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
 		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
 		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.CapInBytes(), bm.CapInBytes())
 	})
 }
