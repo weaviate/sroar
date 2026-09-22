@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -5080,6 +5081,24 @@ func TestCompactedToBufContract(t *testing.T) {
 			{name: "init buffer too small", prefix: "InitCompactedToBuf: ", call: func() {
 				bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) { return &Bitmap{}, short(sizeBytes) })
 			}},
+			{name: "headroom buffer too small", prefix: "CompactedToBufWithHeadroom: ", call: func() {
+				bm.CompactedToBufWithHeadroom(short)
+			}},
+			{name: "headroom nil get", want: "CompactedToBufWithHeadroom: get is nil", call: func() {
+				bm.CompactedToBufWithHeadroom(nil)
+			}},
+			{name: "headroom init buffer too small", prefix: "InitCompactedToBufWithHeadroom: ", call: func() {
+				bm.InitCompactedToBufWithHeadroom(func(sizeBytes int) (*Bitmap, []byte) { return &Bitmap{}, short(sizeBytes) })
+			}},
+			{name: "headroom init nil get", want: "InitCompactedToBufWithHeadroom: get is nil", call: func() {
+				bm.InitCompactedToBufWithHeadroom(nil)
+			}},
+			{name: "headroom init nil struct", want: "InitCompactedToBufWithHeadroom: get returned a nil *Bitmap", call: func() {
+				bm.InitCompactedToBufWithHeadroom(func(sizeBytes int) (*Bitmap, []byte) { return nil, buf(sizeBytes) })
+			}},
+			{name: "headroom init returns the source", want: "InitCompactedToBufWithHeadroom: get returned the source bitmap", call: func() {
+				bm.InitCompactedToBufWithHeadroom(func(sizeBytes int) (*Bitmap, []byte) { return bm, buf(sizeBytes) })
+			}},
 			{name: "nil get", want: "CompactedToBuf: get is nil", call: func() {
 				bm.CompactedToBuf(nil)
 			}},
@@ -5184,6 +5203,14 @@ func TestCompactedPanicsOnUnknownContainerType(t *testing.T) {
 			return &Bitmap{}, make([]byte, sizeBytes)
 		})
 	})
+	require.PanicsWithValue(t, "CompactedToBufWithHeadroom: unknown container type 7", func() {
+		bm.CompactedToBufWithHeadroom(func(sizeBytes int) []byte { return make([]byte, sizeBytes) })
+	})
+	require.PanicsWithValue(t, "InitCompactedToBufWithHeadroom: unknown container type 7", func() {
+		bm.InitCompactedToBufWithHeadroom(func(sizeBytes int) (*Bitmap, []byte) {
+			return &Bitmap{}, make([]byte, sizeBytes)
+		})
+	})
 }
 
 func TestCompactedFirstInsertGrows(t *testing.T) {
@@ -5230,4 +5257,291 @@ func TestCompactedMatchesExactSizeBuild(t *testing.T) {
 		require.LessOrEqual(t, got.LenInBytes(), bm.LenInBytes())
 		require.Equal(t, got.ToBuffer(), got.Compacted().ToBuffer())
 	}
+}
+
+// exactCompactedBuf opts out of headroom by capping at the size asked for.
+func exactCompactedBuf(sizeBytes int) []byte {
+	buf := make([]byte, sizeBytes)
+	return buf[:sizeBytes:sizeBytes]
+}
+
+// surplusCompactedBuf hands back extraBytes past what the build needs.
+func surplusCompactedBuf(extraBytes int) func(int) []byte {
+	return func(sizeBytes int) []byte { return make([]byte, sizeBytes+extraBytes) }
+}
+
+// avgOtherContainerSize is the per-key container cost the split estimates,
+// read back off a built result rather than off the layout that sized it.
+func avgOtherContainerSize(bm *Bitmap) int {
+	n := bm.keys.numKeys()
+	if n == 1 {
+		return int(bm.getContainer(bm.keys.val(0))[indexSize])
+	}
+	total := 0
+	for i := 1; i < n; i++ {
+		total += int(bm.getContainer(bm.keys.val(i))[indexSize])
+	}
+	return total / (n - 1)
+}
+
+func TestCompactedToBufWithHeadroomExactBuffer(t *testing.T) {
+	for _, tc := range compactionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			want := bm.CompactedToBuf(exactCompactedBuf)
+
+			got := bm.CompactedToBufWithHeadroom(exactCompactedBuf)
+
+			require.Equal(t, want.ToBuffer(), got.ToBuffer())
+			require.Equal(t, bm.Compacted().ToBuffer(), got.ToBuffer())
+			// ToBuffer is nil for an empty bitmap, so compare the sizes too.
+			require.Equal(t, want.LenInBytes(), got.LenInBytes())
+			require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
+		})
+	}
+}
+
+// A surplus buffer buys the exact-size constructors nothing.
+func TestCompactedToBufIgnoresSurplus(t *testing.T) {
+	const extraBytes = 1 << 14
+	for _, tc := range compactionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			want := bm.CompactedToBuf(exactCompactedBuf)
+
+			got := bm.CompactedToBuf(surplusCompactedBuf(extraBytes))
+			init := bm.InitCompactedToBuf(func(sizeBytes int) (*Bitmap, []byte) {
+				return &Bitmap{}, make([]byte, sizeBytes+extraBytes)
+			})
+
+			for _, g := range []*Bitmap{got, init} {
+				require.Equal(t, want.keys.maxKeys(), g.keys.maxKeys())
+				require.Equal(t, want.LenInBytes(), g.LenInBytes())
+				require.Equal(t, want.ToBuffer(), g.ToBuffer())
+			}
+		})
+	}
+}
+
+func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
+	const extraBytes = 1 << 14
+	for _, tc := range compactionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			exact := bm.CompactedToBuf(exactCompactedBuf)
+
+			got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+
+			extraKeys := got.keys.maxKeys() - exact.keys.maxKeys()
+			require.Positive(t, extraKeys)
+			require.Equal(t, extraBytes/2/(keySlotU16+avgOtherContainerSize(got)), extraKeys)
+			require.Equal(t, exact.LenInBytes()+2*keySlotU16*extraKeys, got.LenInBytes())
+			require.Equal(t, bm.ToArray(), got.ToArray())
+			require.LessOrEqual(t, got.LenInBytes(), exact.LenInBytes()+extraBytes,
+				"the headroom must fit in the surplus")
+
+			// minContainerSize and maxContainerSize bracket every other case.
+			require.LessOrEqual(t, extraKeys, extraBytes/2/(keySlotU16+minContainerSize))
+			require.GreaterOrEqual(t, extraKeys, extraBytes/2/(keySlotU16+maxContainerSize))
+		})
+	}
+
+	t.Run("min-sized array containers spend the most on slots", func(t *testing.T) {
+		bm := bitmapOf(sortedSeq(20, 1<<16)...)
+		got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+		require.Equal(t, minContainerSize, avgOtherContainerSize(got))
+		require.Equal(t, extraBytes/2/(keySlotU16+minContainerSize),
+			got.keys.maxKeys()-bm.CompactedToBuf(exactCompactedBuf).keys.maxKeys())
+	})
+
+	t.Run("a surplus buys slots at one slot plus one container, not below", func(t *testing.T) {
+		const slotWithContainer = 2 * (keySlotU16 + minContainerSize)
+		bm := bitmapOf(sortedSeq(20, 1<<16)...)
+		exact := bm.CompactedToBuf(exactCompactedBuf).keys.maxKeys()
+
+		require.Equal(t, exact, bm.CompactedToBufWithHeadroom(
+			surplusCompactedBuf(slotWithContainer-2)).keys.maxKeys())
+		require.Equal(t, exact+1, bm.CompactedToBufWithHeadroom(
+			surplusCompactedBuf(slotWithContainer)).keys.maxKeys())
+	})
+
+	t.Run("a length limited buffer is split by its capacity", func(t *testing.T) {
+		bm := bitmapOf(sortedSeq(20, 1<<16)...)
+		want := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+
+		got := bm.CompactedToBufWithHeadroom(func(sizeBytes int) []byte {
+			return make([]byte, 0, sizeBytes+extraBytes)
+		})
+
+		require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
+		require.Equal(t, want.ToBuffer(), got.ToBuffer())
+	})
+
+	t.Run("an odd or tiny surplus rounds down the way the buffer does", func(t *testing.T) {
+		bm := bitmapOf(sortedSeq(20, 1<<16)...)
+		exact := bm.CompactedToBuf(exactCompactedBuf)
+		for _, spare := range []int{1, 2, 143, 145, 1 << 22} {
+			t.Run(fmt.Sprint(spare), func(t *testing.T) {
+				got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(spare))
+				require.Equal(t, exact.keys.maxKeys()+spare/2/(keySlotU16+minContainerSize),
+					got.keys.maxKeys())
+				require.Equal(t, bm.ToArray(), got.ToArray())
+				require.True(t, got.Set(1<<40))
+			})
+		}
+	})
+
+	t.Run("a surplus below one average container still buys one slot", func(t *testing.T) {
+		bm := Prefill(1<<18 - 1) // every container a full bitmap container
+		exact := bm.CompactedToBuf(exactCompactedBuf).keys.maxKeys()
+		for _, tc := range []struct{ spare, want int }{
+			{2*(keySlotU16+minContainerSize) - 2, 0},
+			{2 * (keySlotU16 + minContainerSize), 1},
+			{1 << 12, 1},
+			{2 * (keySlotU16 + maxContainerSize), 1},
+		} {
+			t.Run(fmt.Sprint(tc.spare), func(t *testing.T) {
+				got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(tc.spare))
+				require.Equal(t, exact+tc.want, got.keys.maxKeys())
+				if tc.want > 0 {
+					require.True(t, got.Set(1<<40))
+					require.Zero(t, got.memMoved)
+				}
+			})
+		}
+	})
+
+	t.Run("full bitmap containers spend the least", func(t *testing.T) {
+		// Prefill is inclusive, so one past the last key would hold a value.
+		bm := Prefill(1<<18 - 1)
+		got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+		require.Equal(t, maxContainerSize, avgOtherContainerSize(got))
+		require.Equal(t, extraBytes/2/(keySlotU16+maxContainerSize),
+			got.keys.maxKeys()-bm.CompactedToBuf(exactCompactedBuf).keys.maxKeys())
+	})
+}
+
+func TestCompactedToBufWithHeadroomAbsorbsNewKeys(t *testing.T) {
+	everyOtherKey := func() *Bitmap { return bitmapOf(sortedSeq(20, 2<<16)...) }
+	// Key 0 is pre-created, so no insert can land below the first key.
+	for _, tc := range []struct {
+		name  string
+		build func() *Bitmap
+		spare int
+		key   func(i int) uint64
+	}{
+		{"above the max key", everyOtherKey, 1 << 11, func(i int) uint64 { return uint64(40+i) << 16 }},
+		{"between existing keys", everyOtherKey, 1 << 11, func(i int) uint64 { return uint64(2*i+1) << 16 }},
+		{"containers wider than a new key's", func() *Bitmap { return Prefill(1<<18 - 1) },
+			1 << 16, func(i int) uint64 { return uint64(1000+i) << 16 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(tc.spare))
+
+			budget := got.keys.maxKeys() - got.keys.numKeys() - 1
+			require.Positive(t, budget, "an exact-size result has no budget at all")
+
+			before := unsafe.Pointer(&got.data[0])
+			for i := 0; i < budget; i++ {
+				require.True(t, got.Set(tc.key(i)))
+				require.True(t, got.Set(tc.key(i)|1))
+			}
+			require.Equal(t, before, unsafe.Pointer(&got.data[0]), "the buffer was reallocated")
+			require.Zero(t, got.memMoved, "a container was moved")
+
+			// One key past the budget costs what the budget was bought to avoid.
+			require.True(t, got.Set(tc.key(budget)))
+			require.True(t, got.memMoved > 0 || unsafe.Pointer(&got.data[0]) != before)
+			require.Equal(t, 2*budget+bm.GetCardinality()+1, got.GetCardinality())
+		})
+	}
+}
+
+func TestCompactedToBufWithHeadroomDirtyBuffer(t *testing.T) {
+	bm := bitmapWithSparseBitmapContainer()
+	want := bm.ToArray()
+
+	got := bm.CompactedToBufWithHeadroom(func(sizeBytes int) []byte {
+		buf := make([]byte, sizeBytes+1<<14)
+		for i := range buf {
+			buf[i] = 0xff
+		}
+		return buf
+	})
+
+	require.Equal(t, want, got.ToArray())
+	for i := 0; i < got.keys.numKeys(); i++ {
+		_, has := got.keys.getValue(got.keys.key(i))
+		require.True(t, has, "key %d is unreachable", got.keys.key(i))
+	}
+	// ToBuffer carries the padding, so a dirty slot would be serialized.
+	for i := keyOffset(got.keys.numKeys()); i < len(got.keys); i++ {
+		require.Zero(t, got.keys.uint64(i), "slot %d kept the buffer's fill", i)
+	}
+	require.True(t, got.Set(9<<16|5))
+	require.True(t, got.Contains(9<<16|5))
+	require.Equal(t, got.ToArray(), FromBuffer(got.ToBufferWithCopy()).ToArray())
+}
+
+func TestCompactedToBufWithHeadroomSingleKey(t *testing.T) {
+	const extraBytes = 1 << 14
+	for _, tc := range []struct {
+		name  string
+		build func() *Bitmap
+	}{
+		{"nil", func() *Bitmap { return nil }},
+		{"zero value", func() *Bitmap { return &Bitmap{} }},
+		{"empty", NewBitmap},
+		{"key 0 only", func() *Bitmap { return bitmapOf(1, 2, 3) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			exact := bm.CompactedToBuf(exactCompactedBuf)
+
+			got := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+
+			// Key 0's own container is the only estimate available here.
+			require.Equal(t, 1, got.keys.numKeys())
+			require.Equal(t, exact.keys.maxKeys()+extraBytes/2/(keySlotU16+minContainerSize),
+				got.keys.maxKeys())
+			// nil and zero-value sources cannot be read back, so exact is the oracle.
+			require.Equal(t, exact.ToArray(), got.ToArray())
+			require.True(t, got.Set(1<<40))
+			require.Zero(t, got.memMoved)
+		})
+	}
+}
+
+func TestInitCompactedToBufWithHeadroom(t *testing.T) {
+	const extraBytes = 1 << 14
+	for _, tc := range compactionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := tc.build()
+			want := bm.CompactedToBufWithHeadroom(surplusCompactedBuf(extraBytes))
+
+			reused := bitmapOf(99, 100_000)
+			got := bm.InitCompactedToBufWithHeadroom(func(sizeBytes int) (*Bitmap, []byte) {
+				return reused, make([]byte, sizeBytes+extraBytes)
+			})
+
+			require.Same(t, reused, got)
+			require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
+			require.Equal(t, want.LenInBytes(), got.LenInBytes())
+			require.Equal(t, want.ToBuffer(), got.ToBuffer())
+		})
+	}
+
+	t.Run("allocates nothing with pooled struct and buffer", func(t *testing.T) {
+		bm := bitmapWithSparseBitmapContainer()
+		pooled := &Bitmap{}
+		buf := make([]byte, 1<<16)
+		get := func(sizeBytes int) (*Bitmap, []byte) { return pooled, buf }
+
+		allocs := testing.AllocsPerRun(10, func() { bm.InitCompactedToBufWithHeadroom(get) })
+
+		require.Zero(t, allocs)
+		require.Greater(t, pooled.keys.maxKeys(), bm.Compacted().keys.maxKeys(),
+			"the pooled buffer's surplus must have bought slots")
+	})
 }
