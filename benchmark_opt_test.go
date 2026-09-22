@@ -683,3 +683,45 @@ func BenchmarkCompactedFirstInsert(b *testing.B) {
 		})
 	}
 }
+
+// go test -bench BenchmarkGrownCap -run ^$ github.com/weaviate/sroar
+func BenchmarkGrownCap(b *testing.B) {
+	// The trace appends one sparse container and its key entry at a time, so peak
+	// slack and copy work can be read off against the pair that produced them.
+	const step = minContainerSize + 8
+
+	for _, limit := range []int{512 * 1024, growDoubleLimit, 4 * growDoubleLimit} {
+		for _, div := range []int{2, growSlackDiv, 8} {
+			for _, finalSize := range []int{1 << 22, 1 << 24, 1 << 25} {
+				if finalSize < 2*limit {
+					// The trace never leaves the doubling arm, so the pair is unswept.
+					continue
+				}
+				name := "limit_" + strconv.Itoa(limit) + "/div_" + strconv.Itoa(div) +
+					"/final_" + strconv.Itoa(finalSize)
+				b.Run(name, func(b *testing.B) {
+					var ln, copied, peakSlack int
+					buf := []uint16(nil)
+					for i := 0; i < b.N; i++ {
+						ln, copied, peakSlack = 0, 0, 0
+						buf = nil
+						for ln < finalSize {
+							if ln+step > cap(buf) {
+								grown := make([]uint16, ln, grownCapWith(cap(buf), step, limit, div))
+								copied += copy(grown, buf)
+								buf = grown
+								if s := cap(buf) - (ln + step); s > peakSlack {
+									peakSlack = s
+								}
+							}
+							ln += step
+							buf = buf[:ln]
+						}
+					}
+					b.ReportMetric(float64(peakSlack)*2, "peak-slack-bytes")
+					b.ReportMetric(float64(copied)*2, "bytes-copied")
+				})
+			}
+		}
+	}
+}

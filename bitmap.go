@@ -233,11 +233,7 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 	if toSize <= cap(ra.data) {
 		return
 	}
-	growBy := cap(ra.data)
-	if growBy < int(bySize) {
-		growBy = int(bySize)
-	}
-	out := make([]uint16, len(ra.data), cap(ra.data)+growBy)
+	out := make([]uint16, len(ra.data), grownCap(cap(ra.data), int(bySize)))
 	copy(out, ra.data)
 	prev := len(ra.keys) * 4 // Multiply by 4 to convert from u16 to u64.
 	ra.data = out
@@ -245,6 +241,30 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 	// Re-reference ra.keys correctly because underlying array has changed.
 	ra.keys = uint16To64SliceUnsafe(ra.data[:prev])
 	return
+}
+
+// growDoubleLimit is the buffer size past which grownCap stops doubling, so a
+// large bitmap does not carry a copy of itself in slack for the life of the
+// process. BenchmarkGrownCap sweeps it against a monotone-append trace.
+const growDoubleLimit = 4096 * 1024 // In Uint16.
+
+// growSlackDiv divides the grown size to give grownCap's slack past that limit.
+// A smaller divisor copies less and leaves more slack, and the same benchmark sweeps it.
+const growSlackDiv = 4
+
+func grownCap(cp, need int) int {
+	return grownCapWith(cp, need, growDoubleLimit, growSlackDiv)
+}
+
+// grownCapWith doubles while cp stays under limit, which leaves an exact fit when
+// need exceeds cp. Past the limit the slack is the grown size over div, so a buffer
+// just under the limit grows larger than one just over it.
+func grownCapWith(cp, need, limit, div int) int {
+	want := cp + need
+	if cp < limit {
+		return max(cp+cp, want)
+	}
+	return want + want/div
 }
 
 // scootRight isn't aware of containers. It's going to create empty space of

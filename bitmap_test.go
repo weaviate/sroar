@@ -1725,3 +1725,84 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.CapInBytes(), bm.CapInBytes())
 	})
 }
+
+func TestGrownCap(t *testing.T) {
+	// grownCap doubles below growDoubleLimit and adds a growSlackDiv share of the
+	// grown size past it. The two rows either side of the limit step down, not up.
+	testCases := []struct {
+		name   string
+		cp     int
+		need   int
+		expCap int
+	}{
+		{name: "empty buffer", cp: 0, need: 16, expCap: 16},
+		{name: "small, need below cp", cp: 1024, need: 100, expCap: 2048},
+		{name: "small, need above cp", cp: 1024, need: 5000, expCap: 6024},
+		{name: "just below the limit", cp: growDoubleLimit - 8, need: 8, expCap: 2 * (growDoubleLimit - 8)},
+		{name: "at the limit", cp: growDoubleLimit, need: 100, expCap: 5243005},
+		{name: "twice the limit", cp: 2 * growDoubleLimit, need: 1000, expCap: 10487010},
+		{name: "well past the limit", cp: 16 * growDoubleLimit, need: 1000, expCap: 83887330},
+		{name: "need above cp, past the limit", cp: 8 * growDoubleLimit, need: 20 * growDoubleLimit, expCap: 35 * growDoubleLimit},
+		{name: "small cp, need past the limit", cp: 1024, need: 10 * growDoubleLimit, expCap: 1024 + 10*growDoubleLimit},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := grownCap(tc.cp, tc.need)
+			require.Equal(t, tc.expCap, got)
+			require.GreaterOrEqual(t, got, tc.cp+tc.need)
+		})
+	}
+}
+
+func TestGrowthKeepsSlack(t *testing.T) {
+	// Past growDoubleLimit the buffer stops carrying a whole copy of itself in slack.
+	const measureFrom = 3 * growDoubleLimit * 2 // bytes
+	const growUntil = 6 * growDoubleLimit * 2
+
+	bm := NewBitmap()
+	id := uint64(0)
+	maxRatio, samples := 0.0, 0
+	for bm.LenInBytes() < growUntil {
+		ids := make([]uint64, 64)
+		for i := range ids {
+			id += uint64(maxCardinality)
+			ids[i] = id
+		}
+		bm.Or(FromSortedList(ids))
+
+		if bm.LenInBytes() >= measureFrom {
+			samples++
+			if r := float64(bm.CapInBytes()) / float64(bm.LenInBytes()); r > maxRatio {
+				maxRatio = r
+			}
+		}
+	}
+
+	require.Positive(t, samples)
+	require.LessOrEqual(t, maxRatio, 1.3)
+}
+
+func TestGrowthKeepsSlackOnSet(t *testing.T) {
+	// The Set path grows through expandNoLengthChange, not expandConditionally.
+	const measureFrom = 3 * growDoubleLimit * 2 // bytes
+	const growUntil = 6 * growDoubleLimit * 2
+
+	bm := NewBitmap()
+	id := uint64(0)
+	maxRatio, samples := 0.0, 0
+	for bm.LenInBytes() < growUntil {
+		id += uint64(maxCardinality)
+		bm.Set(id)
+
+		if bm.LenInBytes() >= measureFrom {
+			samples++
+			if r := float64(bm.CapInBytes()) / float64(bm.LenInBytes()); r > maxRatio {
+				maxRatio = r
+			}
+		}
+	}
+
+	require.Positive(t, samples)
+	require.LessOrEqual(t, maxRatio, 1.3)
+}
