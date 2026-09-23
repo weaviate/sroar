@@ -137,11 +137,14 @@ func initBitmapCore(dst *Bitmap, sizeKeys, sizeContainer0 int, buf []uint16) *Bi
 	return dst
 }
 
+// keySlotU16 is what one key occupies in the keys node, a key and a container
+// offset stored as uint64.
+const keySlotU16 = 8
+
 func calcSizeKeys(numKeys int) int {
-	// Each key must also keep an offset. So, we need to double the number
-	// of uint64s allocated. Plus, we need to make space for the first 2
-	// uint64s to store the number of keys and node size.
-	return 4 * (2*numKeys + 2)
+	// Two uint64s per key for the key and its offset, plus a header of two
+	// more for the key count and the node size.
+	return keySlotU16 * (numKeys + 1)
 }
 
 // initBitmapToBufExact lays an empty bitmap for the given layout over a

@@ -590,18 +590,36 @@ func (ra *Bitmap) Compacted() *Bitmap {
 // get must not touch ra; neither is checked, and an overlap leaves ra and the
 // result undefined. The result references the buffer until it is released.
 func (ra *Bitmap) CompactedToBuf(get func(sizeBytes int) []byte) *Bitmap {
-	return ra.initCompactedToBuf("CompactedToBuf", wrapGetToBuf(get))
+	return ra.initCompactedToBuf("CompactedToBuf", wrapGetToBuf(get), false)
+}
+
+// CompactedToBufWithHeadroom is [Bitmap.CompactedToBuf] with the capacity past
+// the requested size spent on key slots as well as container room, so inserts
+// at new keys stop moving every container. get is still called once with the
+// exact size, and buf[:n:n] opts out. Each slot is budgeted a container as big
+// as the source's own, so dense containers buy few slots, though any usable
+// surplus buys one. The result's size follows the buffer's, and ToBuffer()
+// carries the padding, so serialize a Compacted result instead.
+func (ra *Bitmap) CompactedToBufWithHeadroom(get func(sizeBytes int) []byte) *Bitmap {
+	return ra.initCompactedToBuf("CompactedToBufWithHeadroom", wrapGetToBuf(get), true)
 }
 
 // InitCompactedToBuf is [Bitmap.CompactedToBuf] with the result Bitmap struct
 // pooled too. A nil struct or ra itself panics; the struct's fields are
 // overwritten and never freed, so nothing it owns may still be in use.
 func (ra *Bitmap) InitCompactedToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
-	return ra.initCompactedToBuf("InitCompactedToBuf", get)
+	return ra.initCompactedToBuf("InitCompactedToBuf", get, false)
+}
+
+// InitCompactedToBufWithHeadroom is [Bitmap.CompactedToBufWithHeadroom] with
+// the result Bitmap struct pooled too, on [Bitmap.InitCompactedToBuf]'s terms.
+func (ra *Bitmap) InitCompactedToBufWithHeadroom(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+	return ra.initCompactedToBuf("InitCompactedToBufWithHeadroom", get, true)
 }
 
 // initCompactedToBuf reports panics under name, the exported method called.
-func (ra *Bitmap) initCompactedToBuf(name string, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
+// headroom sizes the keys node from the buffer, the one decision after get.
+func (ra *Bitmap) initCompactedToBuf(name string, get func(sizeBytes int) (*Bitmap, []byte), headroom bool) *Bitmap {
 	if get == nil {
 		panic(name + ": get is nil")
 	}
@@ -613,8 +631,27 @@ func (ra *Bitmap) initCompactedToBuf(name string, get func(sizeBytes int) (*Bitm
 	if ra != nil && dst == ra {
 		panic(name + ": get returned the source bitmap")
 	}
+	if headroom {
+		extraKeys := extraKeySlots(cap(buf)/2-sizeTotal, numKeys, sizeContainer0, sizeOtherContainers)
+		sizeKeys = calcSizeKeys(numKeys + 1 + extraKeys)
+		sizeTotal = sizeKeys + sizeContainer0 + sizeOtherContainers
+	}
 	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
 	return ra.compactInto(name, dst)
+}
+
+// extraKeySlots divides surplus uint16s between key slots and the container
+// each new key needs, so neither runs out first, estimating a new container
+// from the layout's own. One slot is the floor, whatever that estimate says.
+func extraKeySlots(surplus, numKeys, sizeContainer0, sizeOtherContainers int) int {
+	if surplus < keySlotU16+minContainerSize {
+		return 0
+	}
+	avgContainer := sizeContainer0
+	if numKeys > 1 {
+		avgContainer = sizeOtherContainers / (numKeys - 1)
+	}
+	return max(1, surplus/(keySlotU16+avgContainer))
 }
 
 // compactLayout sizes a compacted copy of ra from container headers alone.
@@ -644,7 +681,7 @@ func (ra *Bitmap) compactLayout() (numKeys, sizeContainer0, sizeOtherContainers 
 }
 
 // compactInto writes ra's non-empty containers into res, which must be laid
-// out by compactLayout, spare key slot included, so no container is moved.
+// out by compactLayout with a spare key slot or more, so no container is moved.
 func (ra *Bitmap) compactInto(name string, res *Bitmap) *Bitmap {
 	if ra.LenInBytes() == 0 {
 		return res
