@@ -1327,7 +1327,9 @@ func (ra *Bitmap) LenInBytes() int {
 	return len(ra.data) * 2
 }
 
-func (ra *Bitmap) capInBytes() int {
+// CapInBytes returns the size of the allocated buffer, including the growth
+// slack that LenInBytes does not count.
+func (ra *Bitmap) CapInBytes() int {
 	if ra == nil {
 		return 0
 	}
@@ -1749,9 +1751,7 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 		sizeKeys = 8 * max(newKeys, curNumKeys) // 2x uint64 (key+offset) = 8x uint16
 	}
 
-	// expand 2x (or up to sizeKeys+sizeNewContainers if 2x is too little)
-	growBy := max(cp, sizeKeys+sizeContainers)
-	out := make([]uint16, ln+sizeKeys, cp+growBy)
+	out := make([]uint16, ln+sizeKeys, grownCap(cp, sizeKeys+sizeContainers))
 
 	newSizeKeys := curSizeKeys + sizeKeys
 	copy(out, ra.data[:curSizeKeys])

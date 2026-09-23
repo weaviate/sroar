@@ -106,7 +106,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Insert values across many different containers.
 		// Each unique high-48-bit key creates a new container.
@@ -119,14 +119,14 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 10000, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("no allocation as keys expand", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Force many key expansions by creating many distinct containers.
 		// Initial key space holds 2 keys; this forces multiple doublings.
@@ -135,14 +135,14 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 200, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("no allocation with bitmap containers", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
 		bm := NewBitmapToBuf(make([]byte, bufSize))
 
-		require.Equal(t, bufSize, bm.capInBytes())
+		require.Equal(t, bufSize, bm.CapInBytes())
 
 		// Fill a single container past the array→bitmap conversion threshold
 		// (4096+ elements triggers bitmap container, which is 4100 uint16s).
@@ -151,7 +151,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Equal(t, 5000, bm.GetCardinality())
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("length grows but capacity stays", func(t *testing.T) {
@@ -165,7 +165,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 		}
 
 		require.Greater(t, bm.LenInBytes(), initialLenInBytes, "length should grow as containers are added")
-		require.Equal(t, bufSize, bm.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, bm.CapInBytes(), "capacity should not change")
 	})
 }
 
@@ -842,7 +842,7 @@ func TestMaskedToBuf(t *testing.T) {
 		result := bm.MaskedToBuf(0x0000FFFFFFFFFFFF, make([]byte, bufSize))
 
 		require.Equal(t, int(numValues), result.GetCardinality())
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
 	})
 
 	t.Run("length grows but capacity stays", func(t *testing.T) {
@@ -856,7 +856,7 @@ func TestMaskedToBuf(t *testing.T) {
 
 		require.Equal(t, 50, result.GetCardinality())
 		require.Greater(t, result.LenInBytes(), 0)
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
 	})
 }
 
@@ -1628,7 +1628,7 @@ func TestReset(t *testing.T) {
 		require.Equal(t, 2, bm.keys.maxKeys())
 		require.Equal(t, 24, bm.keys.size())
 		require.Greater(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.LenInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.LenInBytes(), bm.CapInBytes())
 	})
 
 	t.Run("no panic on merge after reset", func(t *testing.T) {
@@ -1679,7 +1679,7 @@ func TestZeroOut(t *testing.T) {
 	}
 
 	clone := func(template *Bitmap) *Bitmap {
-		buf := make([]byte, 0, template.capInBytes())
+		buf := make([]byte, 0, template.CapInBytes())
 		return template.CloneToBuf(buf)
 	}
 
@@ -1693,7 +1693,7 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
 		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
 		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.CapInBytes(), bm.CapInBytes())
 	})
 
 	t.Run("repeated zero out leaves containers empty", func(t *testing.T) {
@@ -1722,6 +1722,87 @@ func TestZeroOut(t *testing.T) {
 		require.Equal(t, bmTemplate.keys.maxKeys(), bm.keys.maxKeys())
 		require.Equal(t, bmTemplate.keys.size(), bm.keys.size())
 		require.Equal(t, bmTemplate.LenInBytes(), bm.LenInBytes())
-		require.Equal(t, bmTemplate.capInBytes(), bm.capInBytes())
+		require.Equal(t, bmTemplate.CapInBytes(), bm.CapInBytes())
 	})
+}
+
+func TestGrownCap(t *testing.T) {
+	// grownCap doubles below growDoubleLimit and adds a growSlackDiv share of the
+	// grown size past it. The two rows either side of the limit step down, not up.
+	testCases := []struct {
+		name   string
+		cp     int
+		need   int
+		expCap int
+	}{
+		{name: "empty buffer", cp: 0, need: 16, expCap: 16},
+		{name: "small, need below cp", cp: 1024, need: 100, expCap: 2048},
+		{name: "small, need above cp", cp: 1024, need: 5000, expCap: 6024},
+		{name: "just below the limit", cp: growDoubleLimit - 8, need: 8, expCap: 2 * (growDoubleLimit - 8)},
+		{name: "at the limit", cp: growDoubleLimit, need: 100, expCap: 5243005},
+		{name: "twice the limit", cp: 2 * growDoubleLimit, need: 1000, expCap: 10487010},
+		{name: "well past the limit", cp: 16 * growDoubleLimit, need: 1000, expCap: 83887330},
+		{name: "need above cp, past the limit", cp: 8 * growDoubleLimit, need: 20 * growDoubleLimit, expCap: 35 * growDoubleLimit},
+		{name: "small cp, need past the limit", cp: 1024, need: 10 * growDoubleLimit, expCap: 1024 + 10*growDoubleLimit},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := grownCap(tc.cp, tc.need)
+			require.Equal(t, tc.expCap, got)
+			require.GreaterOrEqual(t, got, tc.cp+tc.need)
+		})
+	}
+}
+
+func TestGrowthKeepsSlack(t *testing.T) {
+	// Past growDoubleLimit the buffer stops carrying a whole copy of itself in slack.
+	const measureFrom = 3 * growDoubleLimit * 2 // bytes
+	const growUntil = 6 * growDoubleLimit * 2
+
+	bm := NewBitmap()
+	id := uint64(0)
+	maxRatio, samples := 0.0, 0
+	for bm.LenInBytes() < growUntil {
+		ids := make([]uint64, 64)
+		for i := range ids {
+			id += uint64(maxCardinality)
+			ids[i] = id
+		}
+		bm.Or(FromSortedList(ids))
+
+		if bm.LenInBytes() >= measureFrom {
+			samples++
+			if r := float64(bm.CapInBytes()) / float64(bm.LenInBytes()); r > maxRatio {
+				maxRatio = r
+			}
+		}
+	}
+
+	require.Positive(t, samples)
+	require.LessOrEqual(t, maxRatio, 1.3)
+}
+
+func TestGrowthKeepsSlackOnSet(t *testing.T) {
+	// The Set path grows through expandNoLengthChange, not expandConditionally.
+	const measureFrom = 3 * growDoubleLimit * 2 // bytes
+	const growUntil = 6 * growDoubleLimit * 2
+
+	bm := NewBitmap()
+	id := uint64(0)
+	maxRatio, samples := 0.0, 0
+	for bm.LenInBytes() < growUntil {
+		id += uint64(maxCardinality)
+		bm.Set(id)
+
+		if bm.LenInBytes() >= measureFrom {
+			samples++
+			if r := float64(bm.CapInBytes()) / float64(bm.LenInBytes()); r > maxRatio {
+				maxRatio = r
+			}
+		}
+	}
+
+	require.Positive(t, samples)
+	require.LessOrEqual(t, maxRatio, 1.3)
 }

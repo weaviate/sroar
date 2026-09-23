@@ -1078,8 +1078,8 @@ func TestCapBytes(t *testing.T) {
 			bm.Set(uint64(x))
 
 			// ToBuffer() sets cap to len, real cap is >= than buffer's one
-			require.LessOrEqual(t, cap(bm.ToBuffer()), bm.capInBytes())
-			require.LessOrEqual(t, bm.LenInBytes(), bm.capInBytes())
+			require.LessOrEqual(t, cap(bm.ToBuffer()), bm.CapInBytes())
+			require.LessOrEqual(t, bm.LenInBytes(), bm.CapInBytes())
 		}
 	})
 
@@ -1087,14 +1087,14 @@ func TestCapBytes(t *testing.T) {
 		bm := NewBitmap()
 
 		// real cap is greater than 0, though ToBuffer() returns empty slice
-		require.Less(t, 0, bm.capInBytes())
-		require.LessOrEqual(t, bm.LenInBytes(), bm.capInBytes())
+		require.Less(t, 0, bm.CapInBytes())
+		require.LessOrEqual(t, bm.LenInBytes(), bm.CapInBytes())
 	})
 
 	t.Run("nil bitmap", func(t *testing.T) {
 		var bm *Bitmap
 
-		require.Equal(t, 0, bm.capInBytes())
+		require.Equal(t, 0, bm.CapInBytes())
 	})
 }
 
@@ -1143,7 +1143,7 @@ func TestCloneToBuf(t *testing.T) {
 						cloned := bm.CloneToBuf(buf)
 
 						assertEqualBitmaps(t, bm, cloned)
-						require.Equal(t, cap(buf), cloned.capInBytes())
+						require.Equal(t, cap(buf), cloned.CapInBytes())
 					})
 				}
 			})
@@ -1158,14 +1158,14 @@ func TestCloneToBuf(t *testing.T) {
 		cloned := bmNil.CloneToBuf(buf)
 
 		assertEqualBitmaps(t, bmEmpty, cloned)
-		require.Equal(t, cap(buf), cloned.capInBytes())
+		require.Equal(t, cap(buf), cloned.CapInBytes())
 	})
 
 	t.Run("source bitmap is not changed on cloned updates", func(t *testing.T) {
 		bm := NewBitmap()
 		bm.Set(1)
 		bmLen := bm.LenInBytes()
-		bmCap := bm.capInBytes()
+		bmCap := bm.CapInBytes()
 
 		buf := make([]byte, 0, bm.LenInBytes()*4)
 		cloned := bm.CloneToBuf(buf)
@@ -1173,12 +1173,12 @@ func TestCloneToBuf(t *testing.T) {
 		cloned.Set(1 + uint64(maxCardinality)*2)
 
 		require.Equal(t, bmLen, bm.LenInBytes())
-		require.Equal(t, bmCap, bm.capInBytes())
+		require.Equal(t, bmCap, bm.CapInBytes())
 		require.Equal(t, 1, bm.GetCardinality())
 		require.ElementsMatch(t, []uint64{1}, bm.ToArray())
 
 		require.Less(t, bmLen, cloned.LenInBytes())
-		require.LessOrEqual(t, bmCap, cloned.capInBytes())
+		require.LessOrEqual(t, bmCap, cloned.CapInBytes())
 		require.Equal(t, 3, cloned.GetCardinality())
 		require.Equal(t, []uint64{1, 1 + uint64(maxCardinality), 1 + uint64(maxCardinality)*2}, cloned.ToArray())
 	})
@@ -1191,13 +1191,13 @@ func TestCloneToBuf(t *testing.T) {
 		buf := make([]byte, 0, bm.LenInBytes()*4)
 		cloned := bm.CloneToBuf(buf)
 		clonedLen := cloned.LenInBytes()
-		clonedCap := cloned.capInBytes()
+		clonedCap := cloned.CapInBytes()
 
 		cloned.Set(1 + uint64(maxCardinality))
 		cloned.Set(1 + uint64(maxCardinality)*2)
 
 		require.Less(t, clonedLen, cloned.LenInBytes())
-		require.Equal(t, clonedCap, cloned.capInBytes())
+		require.Equal(t, clonedCap, cloned.CapInBytes())
 
 		// Verify that expansion reuses the pre-allocated buffer without
 		// allocating new memory. CloneToBuf allocates at most its one Bitmap
@@ -1237,7 +1237,7 @@ func TestCloneToBuf(t *testing.T) {
 		cloned := bm.CloneToBuf(buf)
 
 		require.Equal(t, bmLen, cloned.LenInBytes())
-		require.Equal(t, bmLen+2, cloned.capInBytes())
+		require.Equal(t, bmLen+2, cloned.CapInBytes())
 	})
 }
 
@@ -1284,7 +1284,7 @@ func TestFromBufferUnlimited(t *testing.T) {
 						fromBuf := FromBufferUnlimited(buf)
 
 						assertEqualBitmaps(t, bm, fromBuf)
-						require.Equal(t, cap(buf), fromBuf.capInBytes())
+						require.Equal(t, cap(buf), fromBuf.CapInBytes())
 					})
 				}
 			})
@@ -1297,7 +1297,7 @@ func TestFromBufferUnlimited(t *testing.T) {
 		fromBuf := FromBufferUnlimited(buf)
 
 		assertEqualBitmaps(t, bmEmpty, fromBuf)
-		require.Equal(t, bmEmpty.capInBytes(), fromBuf.capInBytes())
+		require.Equal(t, bmEmpty.CapInBytes(), fromBuf.CapInBytes())
 	})
 
 	t.Run("reuse bigger buffer to expand size", func(t *testing.T) {
@@ -1309,13 +1309,13 @@ func TestFromBufferUnlimited(t *testing.T) {
 		bm.CloneToBuf(buf)
 		fromBuf := FromBufferUnlimited(buf)
 		fromBufLen := fromBuf.LenInBytes()
-		fromBufCap := fromBuf.capInBytes()
+		fromBufCap := fromBuf.CapInBytes()
 
 		fromBuf.Set(1 + uint64(maxCardinality))
 		fromBuf.Set(1 + uint64(maxCardinality)*2)
 
 		require.Less(t, fromBufLen, fromBuf.LenInBytes())
-		require.Equal(t, fromBufCap, fromBuf.capInBytes())
+		require.Equal(t, fromBufCap, fromBuf.CapInBytes())
 	})
 
 	t.Run("allow buffer of odd cap", func(t *testing.T) {
@@ -1328,7 +1328,7 @@ func TestFromBufferUnlimited(t *testing.T) {
 		fromBuf := FromBufferUnlimited(buf)
 
 		require.Equal(t, bmLen, fromBuf.LenInBytes())
-		require.Equal(t, bmLen+2, fromBuf.capInBytes())
+		require.Equal(t, bmLen+2, fromBuf.CapInBytes())
 	})
 }
 
@@ -1360,16 +1360,16 @@ func TestFillUp(t *testing.T) {
 		maxX := maxCardinality + 1
 		bmSmall := NewBitmap()
 		lenBytes := bmSmall.LenInBytes()
-		capBytes := bmSmall.capInBytes()
+		capBytes := bmSmall.CapInBytes()
 
 		bmSmall.FillUp(uint64(maxX))
 		require.Less(t, lenBytes, bmSmall.LenInBytes())
-		require.Less(t, capBytes, bmSmall.capInBytes())
+		require.Less(t, capBytes, bmSmall.CapInBytes())
 
 		// + 8 (key) + 2x 4100 container - 64 container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
 		require.Equal(t, lenBytes+addLen, bmSmall.LenInBytes())
-		require.Equal(t, capBytes+addLen, bmSmall.capInBytes())
+		require.Equal(t, capBytes+addLen, bmSmall.CapInBytes())
 
 		assertPrefilled(t, bmSmall, maxX)
 	})
@@ -1379,11 +1379,11 @@ func TestFillUp(t *testing.T) {
 		bmBig := NewBitmap()
 		bmBig.expandNoLengthChange(3 * maxContainerSize) // big enough to fit 2x fullsize container
 		lenBytes := bmBig.LenInBytes()
-		capBytes := bmBig.capInBytes()
+		capBytes := bmBig.CapInBytes()
 
 		bmBig.FillUp(uint64(maxX))
 		require.Less(t, lenBytes, bmBig.LenInBytes())
-		require.Equal(t, capBytes, bmBig.capInBytes())
+		require.Equal(t, capBytes, bmBig.CapInBytes())
 
 		// + 8 (key) + 2x 4100 container - 64 container
 		addLen := 2 * (8 + maxContainerSize*2 - minContainerSize)
@@ -1398,30 +1398,30 @@ func TestFillUp(t *testing.T) {
 		t.Run("prefilled", func(t *testing.T) {
 			bm := Prefill(uint64(maxX))
 			lenBytes := bm.LenInBytes()
-			capBytes := bm.capInBytes()
+			capBytes := bm.CapInBytes()
 
 			bm.FillUp(uint64(maxX - 10))
 			require.Equal(t, lenBytes, bm.LenInBytes())
-			require.Equal(t, capBytes, bm.capInBytes())
+			require.Equal(t, capBytes, bm.CapInBytes())
 
 			bm.FillUp(uint64(maxX))
 			require.Equal(t, lenBytes, bm.LenInBytes())
-			require.Equal(t, capBytes, bm.capInBytes())
+			require.Equal(t, capBytes, bm.CapInBytes())
 		})
 
 		t.Run("single element", func(t *testing.T) {
 			bm := NewBitmap()
 			bm.Set(uint64(maxX))
 			lenBytes := bm.LenInBytes()
-			capBytes := bm.capInBytes()
+			capBytes := bm.CapInBytes()
 
 			bm.FillUp(uint64(maxX - 10))
 			require.Equal(t, lenBytes, bm.LenInBytes())
-			require.Equal(t, capBytes, bm.capInBytes())
+			require.Equal(t, capBytes, bm.CapInBytes())
 
 			bm.FillUp(uint64(maxX))
 			require.Equal(t, lenBytes, bm.LenInBytes())
-			require.Equal(t, capBytes, bm.capInBytes())
+			require.Equal(t, capBytes, bm.CapInBytes())
 		})
 	})
 
@@ -1436,11 +1436,11 @@ func TestFillUp(t *testing.T) {
 					t.Run(fmt.Sprintf("filled up 1x %d to %d", prefillX, fillUpX), func(t *testing.T) {
 						prefilled := Prefill(uint64(prefillX))
 						lenBytes := prefilled.LenInBytes()
-						capBytes := prefilled.capInBytes()
+						capBytes := prefilled.CapInBytes()
 
 						prefilled.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, prefilled.LenInBytes())
-						require.Equal(t, capBytes, prefilled.capInBytes())
+						require.Equal(t, capBytes, prefilled.CapInBytes())
 
 						assertPrefilled(t, prefilled, fillUpX)
 					})
@@ -1448,13 +1448,13 @@ func TestFillUp(t *testing.T) {
 					t.Run(fmt.Sprintf("filled up 3x %d to %d", prefillX, fillUpX), func(t *testing.T) {
 						prefilled := Prefill(uint64(prefillX))
 						lenBytes := prefilled.LenInBytes()
-						capBytes := prefilled.capInBytes()
+						capBytes := prefilled.CapInBytes()
 
 						prefilled.FillUp(uint64(fillUpX) - 20)
 						prefilled.FillUp(uint64(fillUpX) - 10)
 						prefilled.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, prefilled.LenInBytes())
-						require.Equal(t, capBytes, prefilled.capInBytes())
+						require.Equal(t, capBytes, prefilled.CapInBytes())
 
 						assertPrefilled(t, prefilled, fillUpX)
 					})
@@ -1473,11 +1473,11 @@ func TestFillUp(t *testing.T) {
 						singleElem := NewBitmap()
 						singleElem.Set(uint64(currentMaxX))
 						lenBytes := singleElem.LenInBytes()
-						capBytes := singleElem.capInBytes()
+						capBytes := singleElem.CapInBytes()
 
 						singleElem.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, singleElem.LenInBytes())
-						require.Equal(t, capBytes, singleElem.capInBytes())
+						require.Equal(t, capBytes, singleElem.CapInBytes())
 
 						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
 					})
@@ -1486,13 +1486,13 @@ func TestFillUp(t *testing.T) {
 						singleElem := NewBitmap()
 						singleElem.Set(uint64(currentMaxX))
 						lenBytes := singleElem.LenInBytes()
-						capBytes := singleElem.capInBytes()
+						capBytes := singleElem.CapInBytes()
 
 						singleElem.FillUp(uint64(fillUpX) - 10)
 						singleElem.FillUp(uint64(fillUpX) - 5)
 						singleElem.FillUp(uint64(fillUpX))
 						require.Equal(t, lenBytes, singleElem.LenInBytes())
-						require.Equal(t, capBytes, singleElem.capInBytes())
+						require.Equal(t, capBytes, singleElem.CapInBytes())
 
 						assertFilledUp(t, singleElem, currentMaxX, fillUpX)
 					})
@@ -1512,11 +1512,11 @@ func TestFillUp(t *testing.T) {
 						singleElem.Set(uint64(currentMaxX))
 						singleElem.expandNoLengthChange(maxContainerSize)
 						lenBytes := singleElem.LenInBytes()
-						capBytes := singleElem.capInBytes()
+						capBytes := singleElem.CapInBytes()
 
 						singleElem.FillUp(uint64(fillUpX))
 						require.Less(t, lenBytes, singleElem.LenInBytes())
-						require.Equal(t, capBytes, singleElem.capInBytes())
+						require.Equal(t, capBytes, singleElem.CapInBytes())
 
 						// + 4100 container
 						addLen := 2 * maxContainerSize
@@ -1530,13 +1530,13 @@ func TestFillUp(t *testing.T) {
 						singleElem.Set(uint64(currentMaxX))
 						singleElem.expandNoLengthChange(maxContainerSize)
 						lenBytes := singleElem.LenInBytes()
-						capBytes := singleElem.capInBytes()
+						capBytes := singleElem.CapInBytes()
 
 						singleElem.FillUp(uint64(fillUpX) - 3040)
 						singleElem.FillUp(uint64(fillUpX) - 1000)
 						singleElem.FillUp(uint64(fillUpX))
 						require.Less(t, lenBytes, singleElem.LenInBytes())
-						require.Equal(t, capBytes, singleElem.capInBytes())
+						require.Equal(t, capBytes, singleElem.CapInBytes())
 
 						// + 4100 container
 						addLen := 2 * maxContainerSize
@@ -1760,11 +1760,11 @@ func TestFillUp(t *testing.T) {
 				t.Run(fmt.Sprintf("filled up 1x %d to %d", tc.prefillX, tc.fillUpX), func(t *testing.T) {
 					prefilled := Prefill(uint64(tc.prefillX))
 					lenBytes := prefilled.LenInBytes()
-					capBytes := prefilled.capInBytes()
+					capBytes := prefilled.CapInBytes()
 
 					prefilled.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExpAddLen(lenBytes), prefilled.LenInBytes())
-					require.Equal(t, tc.fnExpAddCap(capBytes), prefilled.capInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), prefilled.CapInBytes())
 
 					assertPrefilled(t, prefilled, tc.fillUpX)
 				})
@@ -1772,13 +1772,13 @@ func TestFillUp(t *testing.T) {
 				t.Run(fmt.Sprintf("filled up 3x %d to %d", tc.prefillX, tc.fillUpX), func(t *testing.T) {
 					prefilled := Prefill(uint64(tc.prefillX))
 					lenBytes := prefilled.LenInBytes()
-					capBytes := prefilled.capInBytes()
+					capBytes := prefilled.CapInBytes()
 
 					prefilled.FillUp(uint64(tc.fillUpX) - 20)
 					prefilled.FillUp(uint64(tc.fillUpX) - 10)
 					prefilled.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExp3xAddLen(lenBytes), prefilled.LenInBytes())
-					require.Equal(t, tc.fnExp3xAddCap(capBytes), prefilled.capInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), prefilled.CapInBytes())
 
 					assertPrefilled(t, prefilled, tc.fillUpX)
 				})
@@ -1981,11 +1981,11 @@ func TestFillUp(t *testing.T) {
 					singleElem := NewBitmap()
 					singleElem.Set(uint64(tc.currentMaxX))
 					lenBytes := singleElem.LenInBytes()
-					capBytes := singleElem.capInBytes()
+					capBytes := singleElem.CapInBytes()
 
 					singleElem.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExpAddLen(lenBytes), singleElem.LenInBytes())
-					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.capInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.CapInBytes())
 
 					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
 				})
@@ -1994,13 +1994,13 @@ func TestFillUp(t *testing.T) {
 					singleElem := NewBitmap()
 					singleElem.Set(uint64(tc.currentMaxX))
 					lenBytes := singleElem.LenInBytes()
-					capBytes := singleElem.capInBytes()
+					capBytes := singleElem.CapInBytes()
 
 					singleElem.FillUp(uint64(tc.fillUpX) - 20)
 					singleElem.FillUp(uint64(tc.fillUpX) - 10)
 					singleElem.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExp3xAddLen(lenBytes), singleElem.LenInBytes())
-					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.capInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.CapInBytes())
 
 					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
 				})
@@ -2209,11 +2209,11 @@ func TestFillUp(t *testing.T) {
 					singleElem := NewBitmap()
 					singleElem.Set(uint64(tc.currentMaxX))
 					lenBytes := singleElem.LenInBytes()
-					capBytes := singleElem.capInBytes()
+					capBytes := singleElem.CapInBytes()
 
 					singleElem.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExpAddLen(lenBytes), singleElem.LenInBytes())
-					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.capInBytes())
+					require.Equal(t, tc.fnExpAddCap(capBytes), singleElem.CapInBytes())
 
 					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
 				})
@@ -2222,13 +2222,13 @@ func TestFillUp(t *testing.T) {
 					singleElem := NewBitmap()
 					singleElem.Set(uint64(tc.currentMaxX))
 					lenBytes := singleElem.LenInBytes()
-					capBytes := singleElem.capInBytes()
+					capBytes := singleElem.CapInBytes()
 
 					singleElem.FillUp(uint64(tc.fillUpX) - 20)
 					singleElem.FillUp(uint64(tc.fillUpX) - 10)
 					singleElem.FillUp(uint64(tc.fillUpX))
 					require.Equal(t, tc.fnExp3xAddLen(lenBytes), singleElem.LenInBytes())
-					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.capInBytes())
+					require.Equal(t, tc.fnExp3xAddCap(capBytes), singleElem.CapInBytes())
 
 					assertFilledUp(t, singleElem, tc.currentMaxX, tc.fillUpX)
 				})
@@ -2611,7 +2611,7 @@ func TestExpandConditionally(t *testing.T) {
 			additionalKeys, additionalKeys*minContainerSize)
 
 		expIds := bm024.ToArray()
-		expCapBytes := bm024.capInBytes()
+		expCapBytes := bm024.CapInBytes()
 		expKeysSize := bm024.keys.size()
 
 		t.Run("direct expand conditionally", func(t *testing.T) {
@@ -2621,7 +2621,7 @@ func TestExpandConditionally(t *testing.T) {
 
 					res.expandConditionally(k, k*minContainerSize)
 
-					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expCapBytes, res.CapInBytes())
 					require.Equal(t, expKeysSize, res.keys.size())
 					require.ElementsMatch(t, expIds, res.ToArray())
 				})
@@ -2637,7 +2637,7 @@ func TestExpandConditionally(t *testing.T) {
 
 						res.Or(bm)
 
-						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expCapBytes, res.CapInBytes())
 						require.Equal(t, expKeysSize, res.keys.size())
 						require.ElementsMatch(t, resIds, res.ToArray())
 					}
@@ -2654,7 +2654,7 @@ func TestExpandConditionally(t *testing.T) {
 			0, additionalKeys*minContainerSize+additionalKeys*8)
 
 		expIds := bm024.ToArray()
-		expCapBytes := bm024.capInBytes()
+		expCapBytes := bm024.CapInBytes()
 
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
@@ -2665,7 +2665,7 @@ func TestExpandConditionally(t *testing.T) {
 
 					res.expandConditionally(k, k*minContainerSize)
 
-					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expCapBytes, res.CapInBytes())
 					require.Equal(t, expKeysSize, res.keys.size())
 					require.ElementsMatch(t, expIds, res.ToArray())
 				})
@@ -2684,7 +2684,7 @@ func TestExpandConditionally(t *testing.T) {
 
 						res.Or(bm)
 
-						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expCapBytes, res.CapInBytes())
 						require.Equal(t, expKeysSize, res.keys.size())
 						require.ElementsMatch(t, resIds, res.ToArray())
 					}
@@ -2700,7 +2700,7 @@ func TestExpandConditionally(t *testing.T) {
 
 		expIds := bm024.ToArray()
 		keysSize := bm024.keys.size()
-		capBytes := bm024.capInBytes()
+		capBytes := bm024.CapInBytes()
 
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
@@ -2711,7 +2711,7 @@ func TestExpandConditionally(t *testing.T) {
 
 					res.expandConditionally(k, k*minContainerSize)
 
-					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expCapBytes, res.CapInBytes())
 					require.Equal(t, expKeysSize, res.keys.size())
 					require.ElementsMatch(t, expIds, res.ToArray())
 				})
@@ -2731,7 +2731,7 @@ func TestExpandConditionally(t *testing.T) {
 
 						res.Or(bm)
 
-						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expCapBytes, res.CapInBytes())
 						require.Equal(t, expKeysSize, res.keys.size())
 						require.ElementsMatch(t, resIds, res.ToArray())
 					}
@@ -2746,7 +2746,7 @@ func TestExpandConditionally(t *testing.T) {
 
 		expIds := bm024.ToArray()
 		keysSize := bm024.keys.size()
-		capBytes := bm024.capInBytes()
+		capBytes := bm024.CapInBytes()
 
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
@@ -2758,7 +2758,7 @@ func TestExpandConditionally(t *testing.T) {
 
 					res.expandConditionally(k, k*minContainerSize)
 
-					require.Equal(t, expCapBytes, res.capInBytes())
+					require.Equal(t, expCapBytes, res.CapInBytes())
 					require.Equal(t, expKeysSize, res.keys.size())
 					require.ElementsMatch(t, expIds, res.ToArray())
 				})
@@ -2779,7 +2779,7 @@ func TestExpandConditionally(t *testing.T) {
 
 						res.Or(bm)
 
-						require.Equal(t, expCapBytes, res.capInBytes())
+						require.Equal(t, expCapBytes, res.CapInBytes())
 						require.Equal(t, expKeysSize, res.keys.size())
 						require.ElementsMatch(t, resIds, res.ToArray())
 					}
@@ -2996,7 +2996,7 @@ func TestMaskedAndToBuf(t *testing.T) {
 		result := MaskedAndToBuf(a, b, 0x0000FFFFFFFFFFFF, make([]byte, bufSize))
 
 		require.Greater(t, result.GetCardinality(), 0)
-		require.Equal(t, bufSize, result.capInBytes(), "capacity should not change")
+		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
 	})
 }
 
@@ -3868,7 +3868,7 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 
 	t.Run("no allocation when buffer is large enough", func(t *testing.T) {
 		// With a generously-sized buffer, the result bitmap's data slice
-		// should never need to grow — capInBytes stays at the input buffer's
+		// should never need to grow — CapInBytes stays at the input buffer's
 		// original capacity.
 		inputs := []*Bitmap{
 			bm(pos(1, 1, 5), pos(2, 1, 5), pos(3, 1, 5)),
@@ -3880,7 +3880,7 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 		got := CopresenceByMaskToBuf(inputs, maskZeroMid, buf)
 
 		require.Greater(t, got.GetCardinality(), 0)
-		require.Equal(t, bufBytes, got.capInBytes(),
+		require.Equal(t, bufBytes, got.CapInBytes(),
 			"result cap should match the input buffer cap when no growth occurred")
 	})
 
