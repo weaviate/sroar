@@ -734,14 +734,7 @@ func BenchmarkOrArrayInPlace(b *testing.B) {
 	}
 	for _, sz := range sizes {
 		for _, overlapPct := range []int{0, 50, 100} {
-			// c holds even values, and other shares overlapPct% of the smaller side with c and fills the rest with odd values.
-			cv := uint16Range(0, 2*sz.cnum, 2)
-			shared := min(sz.cnum, sz.onum) * overlapPct / 100
-			ov := uint16Range(1, 2*(sz.onum-shared), 2)
-			for i := 0; i < shared; i++ {
-				ov = append(ov, cv[i*sz.cnum/shared])
-			}
-			slices.Sort(ov)
+			cv, ov := orArrayBenchValues(sz.cnum, sz.onum, overlapPct)
 			src := arrayContainer(int(startIdx)+sz.cnum+sz.onum, cv)
 			other := arrayContainer(int(startIdx)+sz.onum, ov)
 			c := make([]uint16, len(src))
@@ -754,6 +747,71 @@ func BenchmarkOrArrayInPlace(b *testing.B) {
 					containerOrAlt(c, other, buf, runInline)
 				}
 			})
+		}
+	}
+}
+
+// orArrayBenchValues returns c's values (even numbers) and other's, which share
+// overlapPct% of the smaller side with c and fill the rest with odd values.
+func orArrayBenchValues(cnum, onum, overlapPct int) (cv, ov []uint16) {
+	cv = uint16Range(0, 2*cnum, 2)
+	shared := min(cnum, onum) * overlapPct / 100
+	ov = uint16Range(1, 2*(onum-shared), 2)
+	for i := 0; i < shared; i++ {
+		ov = append(ov, cv[i*cnum/shared])
+	}
+	slices.Sort(ov)
+	return cv, ov
+}
+
+// BenchmarkOrArrayRoute compares union2by2 then storeUnion against
+// orArrayAsBitmap converted back to an array when the union is array-sized.
+// Neither route wins at every cnum and onum.
+//
+// go test -v -bench BenchmarkOrArrayRoute -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayRoute(b *testing.B) {
+	routes := []struct {
+		name string
+		or   func(c, other array, buf []uint16, runMode int)
+	}{
+		{"merge", func(c, other array, buf []uint16, runMode int) {
+			num := union2by2(c.all(), other.all(), buf[startIdx:])
+			c.storeUnion(buf[startIdx:int(startIdx)+num], other, buf, runMode)
+		}},
+		{"bitmap", func(c, other array, buf []uint16, runMode int) {
+			out := c.orArrayAsBitmap(other, buf, runMode)
+			if out != nil && isArrayCard(getCardinality(out)) {
+				c.storeUnion(bitmap(out).all(), other, buf, runMode)
+			}
+		}},
+	}
+	modes := []struct {
+		name    string
+		runMode int
+	}{{"new", 0}, {"full_slot", runInline}}
+	sizes := []struct{ cnum, onum int }{
+		{256, 256}, {512, 512}, {1024, 1024}, {1536, 1536}, {2044, 2044}, {2044, 256}, {256, 2044},
+	}
+	for _, sz := range sizes {
+		for _, overlapPct := range []int{0, 50, 100} {
+			cv, ov := orArrayBenchValues(sz.cnum, sz.onum, overlapPct)
+			src := arrayContainer((int(startIdx)+sz.cnum+3)/4*4, cv)
+			other := arrayContainer(int(startIdx)+sz.onum, ov)
+			c := make([]uint16, len(src))
+			buf := make([]uint16, maxContainerSize)
+
+			for _, mode := range modes {
+				for _, route := range routes {
+					name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "_overlap" +
+						strconv.Itoa(overlapPct) + "/" + mode.name + "/" + route.name
+					b.Run(name, func(b *testing.B) {
+						for i := 0; i < b.N; i++ {
+							copy(c, src)
+							route.or(c, other, buf, mode.runMode)
+						}
+					})
+				}
+			}
 		}
 	}
 }

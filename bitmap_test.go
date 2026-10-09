@@ -759,18 +759,9 @@ func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap
 	})
 
 	t.Run("trim-and-regrow: no dead space when array-to-bitmap conversion on last container", func(t *testing.T) {
-		// Two source keys collapse to the same masked key. Each has 1228
-		// non-overlapping values. When OR'd, cnum+onum = 2456 which meets the
-		// array-to-bitmap conversion threshold (maxContainerSize/5*3 - startIdx).
-		// The first source container (1228 elements, 1232 uint16s) is copied into
-		// the result as an array. The OR with the second source container triggers
-		// conversion to a bitmap (4100 uint16s) which cannot fit inline in the
-		// 1232-uint16 slot. Since this is the only (last) container in the result,
-		// the trim-and-regrow path fires, leaving no dead space.
-		//
-		// Without the optimisation the old 1232-uint16 array container would
-		// remain as dead space, making LenInBytes 2464 bytes larger than necessary.
-		const half = 1228 // cnum+onum = 2456 = maxContainerSize/5*3 - startIdx
+		// A 2456-value union outgrows the only container's 2048-uint16 slot,
+		// so trim-and-regrow must leave no dead space.
+		const half = 1228
 		bm := NewBitmap()
 		for v := uint64(0); v < half; v++ {
 			bm.Set(0x0001_0000_0000 | v) // key 1 → masked 0, values 0-1227
@@ -787,7 +778,7 @@ func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap
 		}
 
 		// Verify no dead space: total data must equal keys section + bitmap container.
-		// If dead space existed it would add 2464 bytes (the old 1232-uint16 array).
+		// If dead space existed it would add 4096 bytes (the old 2048-uint16 array).
 		containerOffset := result.keys.val(0)
 		containerSize := int(result.data[containerOffset]) // first uint16 = size = 4100 for bitmap
 		expectedLen := (result.keys.size() + containerSize) * 2

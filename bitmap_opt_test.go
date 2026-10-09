@@ -713,30 +713,46 @@ func TestOrMergesArraysInPlace(t *testing.T) {
 	newRa := func() *Bitmap {
 		return FromSortedList(perKey(0, 1000)).AndNot(FromSortedList(perKey(100, 1000)))
 	}
-	bm := FromSortedList(perKey(50, 250))
-	want := perKey(0, 250)
 
-	for name, or := range map[string]func(ra *Bitmap){
-		"Or":     func(ra *Bitmap) { ra.Or(bm) },
-		"OrConc": func(ra *Bitmap) { ra.OrConc(bm, 0) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			ra := newRa()
-			lenInBytes := ra.LenInBytes()
-			offsets := make([]uint64, numKeys)
-			for i := range offsets {
-				offsets[i] = ra.keys.val(i)
-			}
+	tcs := []struct {
+		name     string
+		newRa    func() *Bitmap
+		operands []*Bitmap
+		want     []uint64
+	}{
+		{"union fits the slot's spare room", newRa, []*Bitmap{FromSortedList(perKey(50, 250))}, perKey(0, 250)},
+		{
+			"subsets of a full slot whose sum exceeds array size",
+			func() *Bitmap { return FromSortedList(perKey(0, 2000)) },
+			[]*Bitmap{FromSortedList(perKey(0, 1500)), FromSortedList(perKey(500, 2000))},
+			perKey(0, 2000),
+		},
+	}
+	for _, tc := range tcs {
+		for name, or := range map[string]func(ra, bm *Bitmap){
+			"Or":     func(ra, bm *Bitmap) { ra.Or(bm) },
+			"OrConc": func(ra, bm *Bitmap) { ra.OrConc(bm, 0) },
+		} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				ra := tc.newRa()
+				lenInBytes := ra.LenInBytes()
+				offsets := make([]uint64, numKeys)
+				for i := range offsets {
+					offsets[i] = ra.keys.val(i)
+				}
 
-			or(ra)
+				for _, bm := range tc.operands {
+					or(ra, bm)
+				}
 
-			require.Equal(t, want, ra.ToArray())
-			require.Equal(t, lenInBytes, ra.LenInBytes())
-			for i, off := range offsets {
-				require.Equal(t, off, ra.keys.val(i))
-				require.Equal(t, typeArray, ra.getContainer(off)[indexType])
-			}
-		})
+				require.Equal(t, tc.want, ra.ToArray())
+				require.Equal(t, lenInBytes, ra.LenInBytes())
+				for i, off := range offsets {
+					require.Equal(t, off, ra.keys.val(i))
+					require.Equal(t, typeArray, ra.getContainer(off)[indexType])
+				}
+			})
+		}
 	}
 
 	t.Run("Or with itself", func(t *testing.T) {
@@ -3183,15 +3199,60 @@ func TestAndMasked(t *testing.T) {
 		require.False(t, ra.Contains(4))
 	})
 
+	// An empty array ORed with a bitmap hands back b's own container, which the next OR must not write into.
+	t.Run("empty array then bitmap leaves b unchanged", func(t *testing.T) {
+		b := NewBitmap()
+		b.Set(5)
+		b.Remove(5) // key 0 keeps an empty array
+		for v := uint64(0); v < 3000; v++ {
+			b.Set(0x0001_0000 | v)
+		}
+		for v := uint64(3000); v < 3010; v++ {
+			b.Set(0x0002_0000 | v)
+		}
+		bBefore := b.ToArray()
+		ra := NewBitmap()
+		for v := uint64(0); v < 4000; v++ {
+			ra.Set(v)
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, bBefore, b.ToArray())
+		require.Equal(t, 3010, ra.GetCardinality())
+		require.True(t, ra.Contains(3009))
+		require.False(t, ra.Contains(3010))
+	})
+
+	// Each OR outgrows the result's slot, so the result moves between the two buffers twice.
+	t.Run("union outgrowing its buffer twice", func(t *testing.T) {
+		b := NewBitmap()
+		for k := uint64(1); k <= 3; k++ {
+			for v := k - 1; v < 150; v += 3 {
+				b.Set(k<<32 | v)
+			}
+		}
+		ra := NewBitmap()
+		for v := uint64(0); v < 200; v++ {
+			ra.Set(v)
+		}
+
+		ra.AndMasked(b, 0)
+
+		require.Equal(t, 150, ra.GetCardinality())
+		require.True(t, ra.Contains(149))
+		require.False(t, ra.Contains(150))
+	})
+
 	// The next four tests target the buffer-swap logic in the OR accumulation loop.
-	// The source container (orBuf) is always exactly-sized after copying group[0],
-	// so any non-overlapping element OR'd in will not fit inline — the result
-	// lands in fallbackBuf and the two buffers are swapped.
+	// orBuf keeps the slot Set built for group[0], which a non-overlapping
+	// group in these tests outgrows, so the result lands in fallbackBuf and the
+	// two buffers swap.
 
 	t.Run("non-overlapping arrays: inline fails due to size, buffers swapped", func(t *testing.T) {
-		// group[0] has 50 elements → orBuf.indexSize = 54 (4 header + 50 values).
+		// group[0] has 50 elements → Set gave them a 64-uint16 slot.
 		// group[1] adds 50 non-overlapping elements → result needs indexSize 104.
-		// 54 < 104 → inline fails, result is in fallbackBuf, swap occurs.
+		// 64 < 104 → inline fails, result is in fallbackBuf, swap occurs.
 		ra := NewBitmap()
 		for v := uint64(0); v < 100; v++ {
 			ra.Set(v)
@@ -3238,10 +3299,9 @@ func TestAndMasked(t *testing.T) {
 	})
 
 	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
-		// cnum + onum = 1228 + 1228 = 2456 >= 2456 → array-to-bitmap conversion.
-		// Source container has indexSize = 1232 < maxContainerSize → inline fails,
-		// result (bitmap) lands in fallbackBuf, buffers are swapped.
-		const half = 1228 // cnum + onum == 2456 == maxContainerSize/5*3 - startIdx
+		// A 2456-value union outgrows the 2048-uint16 slot, so the bitmap lands
+		// in fallbackBuf and the buffers swap.
+		const half = 1228
 
 		ra := NewBitmap()
 		for v := uint64(0); v < 2*half; v++ {
@@ -3422,8 +3482,8 @@ func TestAndMaskedConc(t *testing.T) {
 
 	t.Run("large non-overlapping arrays: bitmap conversion triggers swap", func(t *testing.T) {
 		// Mirror of TestAndMasked/large_non-overlapping_arrays.
-		// Per ra key: two b keys with 1228 non-overlapping values each →
-		// cnum+onum=2456 triggers array-to-bitmap conversion and buffer swap.
+		// Each ra key gets two b keys with 1228 non-overlapping values, whose
+		// union of 2456 values converts to a bitmap and swaps buffers.
 		const half = 1228
 		ra := NewBitmap()
 		b := NewBitmap()
@@ -3819,6 +3879,85 @@ func TestCopresenceByMask(t *testing.T) {
 		runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
 			require.Equal(t, want, got.ToArray())
 		})
+	})
+
+	// An array union kept in its slot, then ORed with a full container, hands back that container for the AND to read.
+	t.Run("overlapping arrays then a full container", func(t *testing.T) {
+		const n = 1300
+		var aVals, want []uint64
+		for v := uint64(0); v < n; v++ {
+			aVals = append(aVals, v, 1<<16|v)
+		}
+		slices.Sort(aVals)
+		for v := uint64(0); v < 1<<16; v++ {
+			aVals = append(aVals, 2<<16|v)
+		}
+		for v := uint64(0); v < 1<<16; v++ {
+			want = append(want, v)
+		}
+		want = append(want, aVals[n:]...)
+		inputs := []*Bitmap{bm(aVals...), bm(want[:1<<16]...)}
+		runBoth(t, inputs, 0xFFFF, func(t *testing.T, got *Bitmap) {
+			require.Equal(t, want, got.ToArray())
+		})
+	})
+
+	// The seed's union is its own full container, which the AND with the other input must not write into.
+	t.Run("seed union aliasing a full container leaves inputs unchanged", func(t *testing.T) {
+		const n, m = 1300, 50000
+		var aVals, bVals []uint64
+		for k := uint64(0); k < 3; k++ {
+			hi := uint64(n)
+			if k == 2 {
+				hi = 1 << 16
+			}
+			for v := uint64(0); v < hi; v++ {
+				aVals = append(aVals, k<<16|v)
+			}
+			for v := uint64(0); v < m; v++ {
+				bVals = append(bVals, k<<16|v)
+			}
+		}
+		// b's containers sum past a's, so a seeds the fold.
+		inputs := []*Bitmap{bm(aVals...), bm(bVals...)}
+		runBoth(t, inputs, 0xFFFF, func(t *testing.T, got *Bitmap) {
+			require.Equal(t, bVals, got.ToArray())
+			require.Equal(t, aVals, inputs[0].ToArray())
+			require.Equal(t, bVals, inputs[1].ToArray())
+		})
+	})
+
+	// The third input's container ORs into the first two's union in place or swaps buffers.
+	t.Run("three inputs ORed into one masked key", func(t *testing.T) {
+		vals := func(mid, from, to uint64) []uint64 {
+			var out []uint64
+			for v := from; v < to; v++ {
+				out = append(out, pos(0, mid, v))
+			}
+			return out
+		}
+		full := vals(2, 0, 4000)
+		for _, tc := range []struct {
+			name    string
+			a, b, c [2]uint64
+		}{
+			{"union past array size", [2]uint64{0, 1000}, [2]uint64{1000, 2000}, [2]uint64{2000, 3000}},
+			{"third outgrows the slot as an array", [2]uint64{0, 100}, [2]uint64{100, 200}, [2]uint64{200, 1500}},
+			{"union of 2044", [2]uint64{0, 1000}, [2]uint64{1000, 2000}, [2]uint64{2000, 2044}},
+			{"union of 2045", [2]uint64{0, 1000}, [2]uint64{1000, 2000}, [2]uint64{2000, 2045}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				// Each input's mid-2 key carries every value, so all of mid 1 is copresent.
+				input := func(r [2]uint64) *Bitmap {
+					return bm(append(vals(1, r[0], r[1]), full...)...)
+				}
+				inputs := []*Bitmap{input(tc.a), input(tc.b), input(tc.c)}
+				want := append(vals(1, tc.a[0], tc.c[1]), full...)
+				runBoth(t, inputs, maskZeroMid, func(t *testing.T, got *Bitmap) {
+					require.Equal(t, want, got.ToArray())
+				})
+			})
+		}
 	})
 }
 

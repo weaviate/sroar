@@ -2374,20 +2374,13 @@ func searchKeyedMaskedFrom(entries []keyedMaskedEntry, from int, target uint64) 
 	return upper
 }
 
-// orPositionsInGroupReadOnly is the no-copy variant of orPositionsInGroup
-// for callers that will treat the result as read-only. For a single-container
-// group it returns the source container slice directly (no buffer write);
-// otherwise it falls through to orPositionsInGroup. The returned slice MUST
-// NOT be mutated by the caller — use only as an input to operations that
-// do not modify their arguments (e.g. AND into a separate accumulator
-// buffer, never AND-in-place into this slice). The spare return from the
-// underlying orPositionsInGroup is dropped since this variant's callers
-// don't track it.
+// orPositionsInGroupReadOnly is orPositionsInGroup for callers that only read
+// the result, which may be one of bm's containers and must not be written.
 func orPositionsInGroupReadOnly(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB []uint16) []uint16 {
 	if len(group) == 1 {
 		return bm.getContainer(group[0].offset)
 	}
-	result, _ := orPositionsInGroup(bm, group, bufA, bufB)
+	result, _, _ := orGroupContainers(bm, group, bufA, bufB)
 	return result
 }
 
@@ -2403,18 +2396,46 @@ func orPositionsInGroupReadOnly(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB
 // The first container is copied into bufA so the source containers are
 // never mutated; subsequent ORs use the runInline + fallback swap pattern.
 func orPositionsInGroup(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB []uint16) (result, spare []uint16) {
-	first := bm.getContainer(group[0].offset)
-	copy(bufA, first)
-	result, spare = bufA, bufB
+	result, own, spare := orGroupContainers(bm, group, bufA, bufB)
+	return ownedResult(result, own), spare
+}
 
+// orGroupContainers ORs group's containers through orIntoBufferPair. The
+// result may be one of bm's containers, so callers that write into it take
+// ownedResult first.
+func orGroupContainers(bm *Bitmap, group []keyedMaskedEntry, bufA, bufB []uint16) (result, own, spare []uint16) {
+	copy(bufA, bm.getContainer(group[0].offset))
+	result, own, spare = bufA, bufA, bufB
 	for i := 1; i < len(group); i++ {
-		c := containerOrAlt(result, bm.getContainer(group[i].offset), spare, runInline)
-		if len(c) > 0 {
-			// Inline failed (array→bitmap conversion): result is now in spare.
-			result, spare = spare, result
-		}
+		result, own, spare = orIntoBufferPair(result, bm.getContainer(group[i].offset), own, spare)
 	}
-	return result, spare
+	return result, own, spare
+}
+
+// orIntoBufferPair ORs src into result, which lies in own or is a source
+// container containerOrAlt returned. A result outgrowing own lands in spare,
+// and the pair swaps. A source container is read in place and copied into own
+// only when the next OR would write into it.
+func orIntoBufferPair(result, src, own, spare []uint16) (newResult, newOwn, newSpare []uint16) {
+	result = ownedResult(result, own)
+	c := containerOrAlt(result, src, spare, runInline)
+	switch {
+	case len(c) == 0:
+		return result, own, spare
+	case &c[0] == &spare[0]:
+		return c, spare, own
+	default:
+		return c, own, spare
+	}
+}
+
+// ownedResult returns result when it lies in own, and otherwise a copy of it in own.
+func ownedResult(result, own []uint16) []uint16 {
+	if &result[0] == &own[0] {
+		return result
+	}
+	copy(own, result)
+	return own
 }
 
 // emitGroupFilteredN walks all N groups in lockstep by originalKey. For
@@ -2506,10 +2527,8 @@ func nextEmitKey(groups [][]keyedMaskedEntry, cursors []int) (uint64, bool) {
 }
 
 func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int) {
-	// orBuf holds the accumulated OR result across the group.
-	// fallbackBuf is needed only when inline OR fails (array+array that must
-	// convert to bitmap): the result lands in fallbackBuf, which is then swapped
-	// with orBuf so subsequent iterations continue to use orBuf as the target.
+	// orBuf and fallbackBuf are the buffer pair orIntoBufferPair ORs a group's
+	// containers through.
 	orBuf := make([]uint16, maxContainerSize)
 	fallbackBuf := make([]uint16, maxContainerSize)
 
@@ -2548,13 +2567,9 @@ func andMaskedContainersInRange(ra, b *Bitmap, entries []maskedEntry, ai, aj int
 			copy(orBuf, b.getContainer(group[0].offset))
 			orResult = orBuf
 
+			// orResult may end as one of b's containers, which the AND below only reads.
 			for i := 1; i < len(group); i++ {
-				if c := containerOrAlt(orResult, b.getContainer(group[i].offset), fallbackBuf, runInline); len(c) > 0 {
-					// Inline failed (array→bitmap conversion): result is in fallbackBuf.
-					// Swap so orBuf always holds the current result.
-					orBuf, fallbackBuf = fallbackBuf, orBuf
-					orResult = c
-				}
+				orResult, orBuf, fallbackBuf = orIntoBufferPair(orResult, b.getContainer(group[i].offset), orBuf, fallbackBuf)
 			}
 		}
 

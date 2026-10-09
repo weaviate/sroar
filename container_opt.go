@@ -553,6 +553,9 @@ func (b bitmap) andNotBitmapAlt(other bitmap) {
 	setCardinality(b, num)
 }
 
+// containerOrAlt returns the union of ac and bc. Under runInline it merges into
+// ac and returns nil when ac's slot fits the result, and otherwise returns a
+// container that starts at buf or is bc itself.
 func containerOrAlt(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
 	at := ac[indexType]
 	bt := bc[indexType]
@@ -605,63 +608,100 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		return nil
 	}
 
-	// merge
-	out := buf
-	sum := cnum + onum
-	size := startIdx + uint16(sum)
-	// if merged arrays may exceed max container size convert to bitmap
-	if size >= maxContainerSize/5*3 {
-		clear(out[startIdx:])
-		out[indexType] = typeBitmap
-		out[indexSize] = maxContainerSize
-
-		smaller, larger := other, c
-		if onum > cnum {
-			smaller, larger = c, other
-		}
-
-		// larger is ORed into an empty bitmap so every element is new —
-		// no duplicate check needed and cardinality equals larger's size.
-		num := max(cnum, onum)
-		data := out[startIdx:]
-		for _, x := range larger.all() {
-			setBit(data, x)
-		}
-		// smaller may overlap with larger so check each bit before counting.
-		for _, x := range smaller.all() {
-			if !hasBit(data, x) {
-				setBit(data, x)
-				num++
-			}
-		}
-		setCardinality(out, num)
-
-		if runMode&runInline == 0 {
-			return out
-		}
-		if c[indexSize] < maxContainerSize {
-			return out
-		}
-		copy(c, out)
-		return nil
+	size := c[indexSize]
+	// A bitmap-sized slot keeps the union as a bitmap, so later Ors set bits in place.
+	if runMode&runInline != 0 && size == maxContainerSize {
+		return c.orArrayAsBitmap(other, buf, runMode)
 	}
-
-	if runMode&runInline != 0 && size <= c[indexSize] {
+	if runMode&runInline != 0 && int(startIdx)+cnum+onum <= int(size) {
 		c.orArrayInPlace(other)
 		return nil
 	}
+	// The union holds at least max(cnum, onum) values, so it is a bitmap
+	// unless c's slot keeps it. Below that, cnum+onum fits buf for union2by2,
+	// and BenchmarkOrArrayRoute shows no cnum, onum threshold where bitmaps win.
+	if !isArrayCard(max(cnum, onum)) {
+		return c.orArrayAsBitmap(other, buf, runMode)
+	}
+	num := union2by2(c.all(), other.all(), buf[startIdx:])
+	return c.storeUnion(buf[startIdx:int(startIdx)+num], other, buf, runMode)
+}
 
-	num := union2by2(c.all(), other.all(), out[startIdx:])
-	lastIdx := startIdx + uint16(num)
+// isArrayCard reports whether n values make an array container.
+func isArrayCard(n int) bool {
+	_, typ := containerSizeForCard(n)
+	return typ == typeArray
+}
+
+// keepsArray reports whether an in-place Or leaves an array of n values in c's
+// slot. A bitmap-sized slot always takes the bitmap.
+func (c array) keepsArray(n int) bool {
+	size := c[indexSize]
+	return size != maxContainerSize && n <= int(size-startIdx)
+}
+
+// storeUnion stores vals, the sorted union of c and other, in c's slot as an
+// array when keepsArray allows. Otherwise it returns the container built in
+// buf. vals may alias buf.
+func (c array) storeUnion(vals []uint16, other array, buf []uint16, runMode int) []uint16 {
+	u := len(vals)
+	if runMode&runInline != 0 && c.keepsArray(u) {
+		copy(c[startIdx:], vals)
+		setCardinality(c, u)
+		return nil
+	}
+	if !isArrayCard(u) {
+		// A bitmap in buf would overwrite vals, so build it from c and other.
+		return c.orArrayAsBitmap(other, buf, runMode)
+	}
+	copy(buf[startIdx:], vals)
+	return bufAsArray(buf, startIdx+uint16(u))
+}
+
+// orArrayAsBitmap builds the union of c and other as a bitmap in buf. The
+// union must not be array-sized unless c's slot keeps it.
+func (c array) orArrayAsBitmap(other array, buf []uint16, runMode int) []uint16 {
+	cnum := getCardinality(c)
+	onum := getCardinality(other)
+
+	out := buf[:maxContainerSize]
+	clear(out[startIdx:])
+	out[indexType] = typeBitmap
+	out[indexSize] = maxContainerSize
+
+	smaller, larger := other, c
+	if onum > cnum {
+		smaller, larger = c, other
+	}
+
+	// larger is ORed into an empty bitmap so every element is new —
+	// no duplicate check needed and cardinality equals larger's size.
+	num := max(cnum, onum)
+	data := out[startIdx:]
+	for _, x := range larger.all() {
+		setBit(data, x)
+	}
+	// smaller may overlap with larger so check each bit before counting.
+	for _, x := range smaller.all() {
+		if !hasBit(data, x) {
+			setBit(data, x)
+			num++
+		}
+	}
+	setCardinality(out, num)
 
 	if runMode&runInline == 0 {
-		return bufAsArray(out, lastIdx)
+		return out
 	}
-	if c[indexSize] < lastIdx {
-		return bufAsArray(out, lastIdx)
+	if c.keepsArray(num) {
+		bitmap(out).intoArray(c[startIdx : int(startIdx)+num])
+		setCardinality(c, num)
+		return nil
 	}
-	setCardinality(c, num)
-	copy(c[startIdx:], out[startIdx:lastIdx])
+	if c[indexSize] != maxContainerSize {
+		return out
+	}
+	copy(c, out)
 	return nil
 }
 
@@ -810,8 +850,8 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		}
 		addnum = onum
 	} else {
-		// Per-element check is faster than OR-all + POPCNT sweep for all
-		// valid array cardinalities (< 2456 before bitmap conversion).
+		// Per-element check is faster than OR-all + POPCNT sweep at array
+		// cardinalities.
 		for _, x := range other.all() {
 			if !hasBit(data, x) {
 				setBit(data, x)
