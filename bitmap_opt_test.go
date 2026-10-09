@@ -697,6 +697,55 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 	})
 }
 
+// Or and OrConc merge array containers inside the slots ra already has.
+func TestOrMergesArraysInPlace(t *testing.T) {
+	const numKeys = minContainersPerRoutine * 3
+	perKey := func(from, to uint64) []uint64 {
+		var vals []uint64
+		for k := uint64(0); k < numKeys; k++ {
+			for v := from; v < to; v++ {
+				vals = append(vals, k<<16|v)
+			}
+		}
+		return vals
+	}
+	// ra's slots fit 1000 values but hold 0..99, so the union 0..249 fits in place.
+	newRa := func() *Bitmap {
+		return FromSortedList(perKey(0, 1000)).AndNot(FromSortedList(perKey(100, 1000)))
+	}
+	bm := FromSortedList(perKey(50, 250))
+	want := perKey(0, 250)
+
+	for name, or := range map[string]func(ra *Bitmap){
+		"Or":     func(ra *Bitmap) { ra.Or(bm) },
+		"OrConc": func(ra *Bitmap) { ra.OrConc(bm, 0) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ra := newRa()
+			lenInBytes := ra.LenInBytes()
+			offsets := make([]uint64, numKeys)
+			for i := range offsets {
+				offsets[i] = ra.keys.val(i)
+			}
+
+			or(ra)
+
+			require.Equal(t, want, ra.ToArray())
+			require.Equal(t, lenInBytes, ra.LenInBytes())
+			for i, off := range offsets {
+				require.Equal(t, off, ra.keys.val(i))
+				require.Equal(t, typeArray, ra.getContainer(off)[indexType])
+			}
+		})
+	}
+
+	t.Run("Or with itself", func(t *testing.T) {
+		ra := newRa()
+		ra.Or(ra)
+		require.Equal(t, perKey(0, 100), ra.ToArray())
+	})
+}
+
 // checks if all exclusive containers from src bitmap
 // are copied to dst bitmap
 func TestIssue_Or_NotMergeContainers(t *testing.T) {

@@ -646,6 +646,11 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		return nil
 	}
 
+	if runMode&runInline != 0 && size <= c[indexSize] {
+		c.orArrayInPlace(other)
+		return nil
+	}
+
 	num := union2by2(c.all(), other.all(), out[startIdx:])
 	lastIdx := startIdx + uint16(num)
 
@@ -658,6 +663,67 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 	setCardinality(c, num)
 	copy(c[startIdx:], out[startIdx:lastIdx])
 	return nil
+}
+
+// orArrayInPlace merges other into c without a buffer. c's slot must have room
+// for cnum+onum values, since duplicates are dropped only at the end.
+func (c array) orArrayInPlace(other array) {
+	if &c[0] == &other[0] {
+		return
+	}
+	cnum := getCardinality(c)
+	end := cnum + getCardinality(other)
+	data := c[startIdx:]
+	n1, pos := union2by2Backward(data, cnum, end, other.all())
+	dups := pos - n1
+	if dups > 0 {
+		copy(data[n1:], data[pos:end])
+	}
+	setCardinality(c, end-dups)
+}
+
+// union2by2Backward merges the ascending set2 into the sorted set1[:n1],
+// writing downwards from set1[pos-1], and returns the new n1 and pos. pos-n1
+// must be at least len(set2), or a write lands on an unread value. When pos-n1
+// starts at len(set2), the returned pos-n1 is the duplicate count.
+func union2by2Backward(set1 []uint16, n1, pos int, set2 []uint16) (int, int) {
+	i := n1 - 1 // set1's last unread value
+	// Values above the other set's maximum move as one block.
+	if j := len(set2) - 1; j >= 0 && i >= 0 {
+		if top := set2[j]; set1[i] > top {
+			k, found := slices.BinarySearch(set1[:i+1], top)
+			if found {
+				k++
+			}
+			pos -= i + 1 - k
+			copy(set1[pos:], set1[k:i+1])
+			i = k - 1
+		} else if set1[i] < top {
+			k, _ := slices.BinarySearch(set2, set1[i]+1)
+			pos -= j + 1 - k
+			copy(set1[pos:], set2[k:])
+			set2 = set2[:k]
+		}
+	}
+	for j := len(set2) - 1; j >= 0; j-- {
+		if i < 0 {
+			pos -= j + 1
+			copy(set1[pos:], set2[:j+1])
+			return 0, pos
+		}
+		v := set2[j]
+		for i >= 0 && set1[i] > v {
+			pos--
+			set1[pos] = set1[i]
+			i--
+		}
+		if i >= 0 && set1[i] == v {
+			i--
+		}
+		pos--
+		set1[pos] = v
+	}
+	return i + 1, pos
 }
 
 func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {

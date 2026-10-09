@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"math/rand"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -722,6 +723,37 @@ func BenchmarkGrownCap(b *testing.B) {
 					b.ReportMetric(float64(copied)*2, "bytes-copied")
 				})
 			}
+		}
+	}
+}
+
+// go test -v -bench BenchmarkOrArrayInPlace -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayInPlace(b *testing.B) {
+	sizes := []struct{ cnum, onum int }{
+		{16, 16}, {16, 512}, {512, 16}, {128, 128}, {512, 512}, {64, 1200}, {1200, 64}, {1200, 1200},
+	}
+	for _, sz := range sizes {
+		for _, overlapPct := range []int{0, 50, 100} {
+			// c holds even values, and other shares overlapPct% of the smaller side with c and fills the rest with odd values.
+			cv := uint16Range(0, 2*sz.cnum, 2)
+			shared := min(sz.cnum, sz.onum) * overlapPct / 100
+			ov := uint16Range(1, 2*(sz.onum-shared), 2)
+			for i := 0; i < shared; i++ {
+				ov = append(ov, cv[i*sz.cnum/shared])
+			}
+			slices.Sort(ov)
+			src := arrayContainer(int(startIdx)+sz.cnum+sz.onum, cv)
+			other := arrayContainer(int(startIdx)+sz.onum, ov)
+			c := make([]uint16, len(src))
+			buf := make([]uint16, maxContainerSize)
+
+			name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "_overlap" + strconv.Itoa(overlapPct)
+			b.Run(name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					copy(c, src)
+					containerOrAlt(c, other, buf, runInline)
+				}
+			})
 		}
 	}
 }
