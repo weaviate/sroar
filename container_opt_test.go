@@ -111,20 +111,31 @@ func TestOrArrayAltResult(t *testing.T) {
 		{"legacy array past array size, bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), keptBitmap, 0},
 
 		{"c empty, fits slot", 64, runInline, []uint16{}, uint16Range(0, 50, 1), keptArray, 0},
-		{"c empty, array-sized other", 64, runInline, []uint16{}, uint16Range(0, 2044, 1), returnedOther, 0},
+		{"c empty, other exactly fills slot", 64, runInline, []uint16{}, uint16Range(0, 60, 1), keptArray, 0},
+		{"c empty, other one past slot", 64, runInline, []uint16{}, uint16Range(0, 61, 1), newArray, 128},
 		{"c empty, legacy other past array size", 64, runInline, []uint16{}, uint16Range(0, 2500, 1), newArray, maxContainerSize},
+		{"c empty, right-sized other past slot", 64, runInline, []uint16{}, uint16Range(0, 124, 1), returnedOther, 0},
 		{"c empty in bitmap-sized slot, legacy other past array size", maxContainerSize, runInline, []uint16{}, uint16Range(0, 2500, 1), keptArray, 0},
 		{"other empty, legacy c in bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 2500, 1), []uint16{}, keptArray, 0},
 		{"other empty, legacy c in legacy slot", 3000, runInline, uint16Range(0, 2500, 1), []uint16{}, keptArray, 0},
+		{"both empty", 64, runInline, []uint16{}, []uint16{}, keptArray, 0},
+
+		{"edge bounds, disjoint ranges past array size", maxContainerSize, runInline, uint16Range(0, 1100, 1), uint16Range(2000, 3000, 1), keptBitmap, 0},
+		{"edge bounds, run with other sticking out past array size", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(1000, 3200, 2), newBitmap, maxContainerSize},
+		{"edge bounds undecided, interleaved past array size", maxContainerSize, runInline, uint16Range(0, 3000, 2), uint16Range(1, 3000, 2), keptBitmap, 0},
+		{"edge bounds undecided, union array-sized", 1504, runInline, uint16Range(0, 3000, 2), append([]uint16{0}, uint16Range(1000, 1600, 1)...), newArray, 2048},
 
 		{"not inline, small union", 64, 0, uint16Range(0, 30, 1), uint16Range(10, 40, 1), newArray, 64},
 		{"not inline, array-sized union", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), newArray, 2048},
 		{"not inline, union one past array size", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), newBitmap, maxContainerSize},
 		{"not inline, legacy arrays past array size", 3500, 0, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), newBitmap, maxContainerSize},
+		{"not inline, edge bounds past array size", 2048, 0, uint16Range(0, 3000, 2), uint16Range(2000, 5000, 2), newBitmap, maxContainerSize},
+		{"not inline, edge bounds undecided, union array-sized", 2048, 0, uint16Range(0, 3000, 2), uint16Range(1000, 3200, 2), newArray, 2048},
 		{"not inline, c empty", 64, 0, []uint16{}, uint16Range(0, 60, 1), returnedOther, 0},
 		{"not inline, other empty, spare room in c", 2048, 0, uint16Range(0, 30, 1), []uint16{}, newArray, 64},
 		{"not inline, other empty, right-sized c", 64, 0, uint16Range(0, 30, 1), []uint16{}, returnedC, 0},
 		{"not inline, other empty, legacy c", 3000, 0, uint16Range(0, 2500, 1), []uint16{}, newArray, maxContainerSize},
+		{"not inline, both empty", 64, 0, []uint16{}, []uint16{}, returnedC, 0},
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,6 +194,61 @@ func TestOrArrayAltResult(t *testing.T) {
 		require.Equal(t, vals, c.all())
 		require.Equal(t, make([]uint16, 64-int(startIdx)-len(vals)), []uint16(c[int(startIdx)+len(vals):]))
 	})
+}
+
+func TestUnionMayFitArray(t *testing.T) {
+	run := func(from, to int) []uint16 { return uint16Range(from, to, 1) }
+	evens := func(from, to int) []uint16 { return uint16Range(from, to, 2) }
+	tcs := []struct {
+		name    string
+		slot    int
+		runMode int
+		c, o    []uint16
+		want    bool
+	}{
+		{"disjoint ranges, c below", 2048, 0, run(0, 1100), run(2000, 3000), false},
+		{"disjoint ranges, c above", 2048, 0, run(2000, 3000), run(0, 1100), false},
+		{"disjoint ranges, legacy slot keeps the union", 3004, runInline, run(0, 1250), run(2000, 3250), true},
+		{"c sticks out low, decided", 2048, 0, evens(0, 3000), evens(2000, 5000), false},
+		{"other sticks out low, decided", 2048, 0, evens(2000, 5000), evens(0, 3000), false},
+		{"other sticks out at both ends, decided", 2048, 0, run(1000, 1500), evens(0, 4000), false},
+		{"other sticks out at both ends, undecided", 2048, 0, evens(1000, 3000), evens(0, 4000), true},
+		{"each sticks out at one end, decided only by other's low end", 2048, 0,
+			append(run(200, 2000), evens(2000, 2100)...), append(run(0, 200), uint16Range(200, 2000, 50)...), false},
+		{"each sticks out at one end, decided only by c's low end", 2048, 0,
+			append(run(0, 200), uint16Range(200, 2000, 50)...), append(run(200, 2000), evens(2000, 2100)...), false},
+		{"each sticks out at one end, decided only by other's high end", 2048, 0,
+			append(evens(0, 100), run(100, 1900)...), append(uint16Range(100, 1900, 50), run(1900, 2100)...), false},
+		{"equal first values, other sticks out high", 2048, 0, evens(0, 3000), append([]uint16{0}, evens(3000, 5000)...), false},
+		{"equal first values, undecided", 2048, 0, evens(0, 3000), append([]uint16{0}, evens(1000, 4000)...), true},
+		{"equal at both ends, undecided", 2048, 0, evens(0, 3000), uint16Range(0, 3000, 3), true},
+		{"interleaved disjoint, undecided", 2048, 0, evens(0, 3000), evens(1, 3000), true},
+
+		{"c a run, union of 2044", 2048, 0, run(0, 1500), evens(1000, 2588), true},
+		{"c a run, union of 2045", 2048, 0, run(0, 1500), evens(1000, 2590), false},
+		{"other a run, union of 2044", 2048, 0, evens(1000, 2588), run(0, 1500), true},
+		{"other a run, union of 2045", 2048, 0, evens(1000, 2590), run(0, 1500), false},
+
+		{"inline, bitmap-sized slot", maxContainerSize, runInline, evens(0, 3000), evens(2000, 5000), false},
+		{"inline, small slot", 1504, runInline, evens(0, 3000), evens(2000, 5000), false},
+		{"inline, legacy slot keeps bound", 2804, runInline, evens(0, 3000), evens(2000, 5000), true},
+		{"inline, legacy slot past bound", 2404, runInline, evens(0, 3000), evens(1000, 5000), false},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			c := arrayContainer(tc.slot, tc.c)
+			other := arrayContainer(int(startIdx)+len(tc.o), tc.o)
+			require.False(t, isArrayCard(len(tc.c)+len(tc.o)), "shapes below route the merge before the bound")
+
+			got := c.unionMayFitArray(other, tc.runMode)
+
+			require.Equal(t, tc.want, got)
+			u := len(sortedUnion(tc.c, tc.o))
+			if !got {
+				require.False(t, isArrayCard(u) || tc.runMode&runInline != 0 && c.canFitArray(u), "ruling out an array must hold for the real union")
+			}
+		})
+	}
 }
 
 // An inline array ∪ bitmap whose union is the bitmap, and outgrows the array's slot, returns the bitmap itself.

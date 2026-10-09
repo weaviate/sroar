@@ -554,8 +554,8 @@ func (b bitmap) andNotBitmapAlt(other bitmap) {
 }
 
 // containerOrAlt returns the union of ac and bc. Under runInline it merges into
-// ac and returns nil when ac's slot fits the result, and otherwise returns a
-// container that starts at buf or is bc itself.
+// ac and returns nil when ac's slot fits the result. Otherwise it returns a
+// container that starts at buf, or one of the inputs, which is ac only without runInline.
 func containerOrAlt(ac, bc []uint16, buf []uint16, runMode int) []uint16 {
 	at := ac[indexType]
 	bt := bc[indexType]
@@ -587,44 +587,82 @@ func (c array) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 	cnum := getCardinality(c)
 	onum := getCardinality(other)
 
+	inline := runMode&runInline != 0
+	size := c[indexSize]
+
+	// An empty side never changes the other's type.
 	if onum == 0 {
-		if runMode&runInline == 0 {
-			return resizeArray(c, buf)
+		if inline {
+			return nil
 		}
-		// do nothing, nothing to add
-		return nil
+		return resizeArray(c, buf)
 	}
 	if cnum == 0 {
-		if runMode&runInline == 0 {
+		if !inline || onum > int(size-startIdx) {
 			return resizeArray(other, buf)
 		}
-		// overwrite array or return if does not fit
-		lastIdx := startIdx + uint16(onum)
-		if c[indexSize] < lastIdx {
-			return resizeArray(other, buf)
-		}
+		copy(c[startIdx:], other.all())
 		setCardinality(c, onum)
-		copy(c[startIdx:], other[startIdx:lastIdx])
 		return nil
 	}
 
-	size := c[indexSize]
 	// A bitmap-sized slot keeps the union as a bitmap, so later Ors set bits in place.
-	if runMode&runInline != 0 && size == maxContainerSize {
+	if inline && size == maxContainerSize {
 		return c.orArrayAsBitmap(other, buf, runMode)
 	}
-	if runMode&runInline != 0 && int(startIdx)+cnum+onum <= int(size) {
+	if inline && int(startIdx)+cnum+onum <= int(size) {
 		c.orArrayInPlace(other)
 		return nil
 	}
-	// The union holds at least max(cnum, onum) values, so it is a bitmap
-	// unless c's slot keeps it. Below that, cnum+onum fits buf for union2by2,
-	// and BenchmarkOrArrayRoute shows no cnum, onum threshold where bitmaps win.
+	// Arrays past 2044 values, from OrOld or older data, may sum past buf's room for union2by2.
 	if !isArrayCard(max(cnum, onum)) {
 		return c.orArrayAsBitmap(other, buf, runMode)
 	}
+	if !isArrayCard(cnum+onum) && !c.unionMayFitArray(other, runMode) {
+		return c.orArrayAsBitmap(other, buf, runMode)
+	}
 	num := union2by2(c.all(), other.all(), buf[startIdx:])
-	return c.storeUnion(buf[startIdx:int(startIdx)+num], other, buf, runMode)
+	if inline && c.canFitArray(num) {
+		copy(c[startIdx:], buf[startIdx:int(startIdx)+num])
+		setCardinality(c, num)
+		return nil
+	}
+	if !isArrayCard(num) {
+		// The merged values occupy buf, so the bitmap is built from c and other.
+		return c.orArrayAsBitmap(other, buf, runMode)
+	}
+	return bufAsArray(buf, startIdx+uint16(num))
+}
+
+// unionMayFitArray reports false when a lower bound on the union of the
+// non-empty c and other rules out storing it as an array. The bound counts each
+// array's values outside the other's range, and is exact when either is a run.
+func (c array) unionMayFitArray(other array, runMode int) bool {
+	fitsArray := func(n int) bool {
+		return isArrayCard(n) || runMode&runInline != 0 && c.canFitArray(n)
+	}
+	a, b := c.all(), other.all()
+	lastA, lastB := a[len(a)-1], b[len(b)-1]
+	if lastA < b[0] || lastB < a[0] {
+		return fitsArray(len(a) + len(b))
+	}
+	var newA, newB int
+	if a[0] < b[0] {
+		newA, _ = slices.BinarySearch(a, b[0])
+	} else if b[0] < a[0] {
+		newB, _ = slices.BinarySearch(b, a[0])
+	}
+	if !fitsArray(max(len(a)+newB, len(b)+newA)) {
+		return false
+	}
+	if lastA > lastB {
+		k, _ := slices.BinarySearch(a, lastB+1)
+		newA += len(a) - k
+	} else if lastB > lastA {
+		k, _ := slices.BinarySearch(b, lastA+1)
+		newB += len(b) - k
+	}
+	return fitsArray(max(len(a)+newB, len(b)+newA))
 }
 
 // isArrayCard reports whether n values make an array container.
@@ -633,29 +671,11 @@ func isArrayCard(n int) bool {
 	return typ == typeArray
 }
 
-// keepsArray reports whether an in-place Or leaves an array of n values in c's
+// canFitArray reports whether an in-place Or leaves an array of n values in c's
 // slot. A bitmap-sized slot always takes the bitmap.
-func (c array) keepsArray(n int) bool {
+func (c array) canFitArray(n int) bool {
 	size := c[indexSize]
 	return size != maxContainerSize && n <= int(size-startIdx)
-}
-
-// storeUnion stores vals, the sorted union of c and other, in c's slot as an
-// array when keepsArray allows. Otherwise it returns the container built in
-// buf. vals may alias buf.
-func (c array) storeUnion(vals []uint16, other array, buf []uint16, runMode int) []uint16 {
-	u := len(vals)
-	if runMode&runInline != 0 && c.keepsArray(u) {
-		copy(c[startIdx:], vals)
-		setCardinality(c, u)
-		return nil
-	}
-	if !isArrayCard(u) {
-		// A bitmap in buf would overwrite vals, so build it from c and other.
-		return c.orArrayAsBitmap(other, buf, runMode)
-	}
-	copy(buf[startIdx:], vals)
-	return bufAsArray(buf, startIdx+uint16(u))
 }
 
 // orArrayAsBitmap builds the union of c and other as a bitmap in buf. The
@@ -693,7 +713,7 @@ func (c array) orArrayAsBitmap(other array, buf []uint16, runMode int) []uint16 
 	if runMode&runInline == 0 {
 		return out
 	}
-	if c.keepsArray(num) {
+	if c.canFitArray(num) {
 		bitmap(out).intoArray(c[startIdx : int(startIdx)+num])
 		setCardinality(c, num)
 		return nil

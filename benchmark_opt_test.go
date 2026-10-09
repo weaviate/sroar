@@ -764,24 +764,30 @@ func orArrayBenchValues(cnum, onum, overlapPct int) (cv, ov []uint16) {
 	return cv, ov
 }
 
-// BenchmarkOrArrayRoute compares union2by2 then storeUnion against
-// orArrayAsBitmap converted back to an array when the union is array-sized.
-// Neither route wins at every cnum and onum.
+// BenchmarkOrArrayRoute compares union2by2, stored as orArrayAlt stores it,
+// against orArrayAsBitmap converted back to an array when the union is
+// array-sized. Merging wins whenever the union is array-sized.
 //
 // go test -v -bench BenchmarkOrArrayRoute -benchmem -run ^$ github.com/weaviate/sroar
 func BenchmarkOrArrayRoute(b *testing.B) {
+	vals := make([]uint16, maxContainerSize)
 	routes := []struct {
 		name string
 		or   func(c, other array, buf []uint16, runMode int)
 	}{
 		{"merge", func(c, other array, buf []uint16, runMode int) {
 			num := union2by2(c.all(), other.all(), buf[startIdx:])
-			c.storeUnion(buf[startIdx:int(startIdx)+num], other, buf, runMode)
+			switch {
+			case runMode&runInline != 0 && c.canFitArray(num):
+				copy(c[startIdx:], buf[startIdx:int(startIdx)+num])
+			case !isArrayCard(num):
+				c.orArrayAsBitmap(other, buf, runMode)
+			}
 		}},
 		{"bitmap", func(c, other array, buf []uint16, runMode int) {
 			out := c.orArrayAsBitmap(other, buf, runMode)
 			if out != nil && isArrayCard(getCardinality(out)) {
-				c.storeUnion(bitmap(out).all(), other, buf, runMode)
+				bitmap(out).intoArray(vals)
 			}
 		}},
 	}
@@ -811,6 +817,63 @@ func BenchmarkOrArrayRoute(b *testing.B) {
 						}
 					})
 				}
+			}
+		}
+	}
+}
+
+// BenchmarkOrArrayShapes times array ∪ array through containerOrAlt on value
+// shapes where unionMayFitArray's bound decides the route and where it does not.
+//
+// go test -v -bench BenchmarkOrArrayShapes -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayShapes(b *testing.B) {
+	shapes := []struct {
+		name   string
+		values func(cnum, onum int) (cv, ov []uint16)
+	}{
+		{"interleaved_disjoint", func(cnum, onum int) ([]uint16, []uint16) {
+			return orArrayBenchValues(cnum, onum, 0)
+		}},
+		{"interleaved_overlap50", func(cnum, onum int) ([]uint16, []uint16) {
+			return orArrayBenchValues(cnum, onum, 50)
+		}},
+		{"other_out_high", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(0, 4*onum, 4)
+		}},
+		{"out_both_ends", func(cnum, onum int) ([]uint16, []uint16) {
+			from := (4*onum - 2*cnum) / 4 * 2
+			from = max(from, 0)
+			return uint16Range(from, from+2*cnum, 2), uint16Range(0, 4*onum, 4)
+		}},
+		{"c_low_other_high", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(cnum/2*2, cnum/2*2+2*onum, 2)
+		}},
+		{"ranges_disjoint", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(2*cnum, 2*cnum+2*onum, 2)
+		}},
+		{"c_run", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, cnum, 1), uint16Range(cnum/2, cnum/2+2*onum, 2)
+		}},
+	}
+	sizes := []struct{ cnum, onum int }{{1024, 1024}, {1536, 1536}, {2044, 2044}, {2044, 256}}
+	for _, sz := range sizes {
+		for _, shape := range shapes {
+			cv, ov := shape.values(sz.cnum, sz.onum)
+			other := arrayContainer(int(startIdx)+len(ov), ov)
+			buf := make([]uint16, maxContainerSize)
+			for _, mode := range []struct {
+				name    string
+				runMode int
+			}{{"new", 0}, {"full_slot", runInline}} {
+				src := arrayContainer((int(startIdx)+len(cv)+3)/4*4, cv)
+				c := make([]uint16, len(src))
+				name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "/" + shape.name + "/" + mode.name
+				b.Run(name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						copy(c, src)
+						containerOrAlt(c, other, buf, mode.runMode)
+					}
+				})
 			}
 		}
 	}
