@@ -878,3 +878,37 @@ func BenchmarkOrArrayShapes(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkBitsIntoArray compares bitsIntoArray, which reads uint64s, against
+// the uint16 loop, on values packed into one run and spread over the container.
+//
+// go test -v -bench BenchmarkBitsIntoArray -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkBitsIntoArray(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(words, out []uint16, baseWord uint16) int
+	}{
+		{"uint16", bitsIntoArray16},
+		{"uint64", bitsIntoArray},
+	}
+	for _, n := range []int{64, 512, 2000, 8000, 30000} {
+		shapes := []struct {
+			name string
+			vals []uint16
+		}{
+			{"clustered", uint16Range(4096, 4096+n, 1)},
+			{"spread", uint16Range(0, maxCardinality, maxCardinality/n)[:n]},
+		}
+		for _, shape := range shapes {
+			words := bitmapWords(shape.vals)
+			out := make([]uint16, n)
+			for _, impl := range impls {
+				b.Run(shape.name+"_"+strconv.Itoa(n)+"/"+impl.name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						impl.fn(words, out, 0)
+					}
+				})
+			}
+		}
+	}
+}

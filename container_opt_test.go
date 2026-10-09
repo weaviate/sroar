@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"testing"
 
@@ -275,20 +276,63 @@ func TestOrArrayBitmapAltReturnsOther(t *testing.T) {
 	}
 }
 
-// Values fed in several descending chunks merge the same as in one call.
-func TestUnion2by2BackwardChunks(t *testing.T) {
-	set1 := uint16Range(0, 60, 3)
-	set2 := uint16Range(0, 60, 2)
-	end := len(set1) + len(set2)
-	data := make([]uint16, end)
-	copy(data, set1)
-
-	n1, pos := len(set1), end
-	for hi := len(set2); hi > 0; hi -= 7 {
-		n1, pos = union2by2Backward(data, n1, pos, set2[max(hi-7, 0):hi])
+// bitmapWords returns a headerless run of bitmap words holding vals.
+func bitmapWords(vals []uint16) []uint16 {
+	words := make([]uint16, maxContainerSize-startIdx)
+	for _, v := range vals {
+		setBit(words, v)
 	}
-	dups := pos - n1
-	copy(data[n1:], data[pos:end])
+	return words
+}
 
-	require.Equal(t, sortedUnion(set1, set2), data[:end-dups])
+// bitsIntoArray matches the uint16 loop on unaligned windows and short outs.
+func TestBitsIntoArrayMatchesUint16Loop(t *testing.T) {
+	tcs := []struct {
+		name string
+		vals []uint16
+	}{
+		{"empty", nil},
+		{"single first", []uint16{0}},
+		{"single mid", []uint16{12345}},
+		{"single last", []uint16{math.MaxUint16}},
+		{"clustered", uint16Range(1000, 4000, 1)},
+		{"spread", uint16Range(5, maxCardinality, 29)},
+		{"full", uint16Range(0, maxCardinality, 1)},
+	}
+	check := func(t *testing.T, words []uint16, outLen int, baseWord uint16) {
+		want := make([]uint16, outLen)
+		got := make([]uint16, outLen)
+		wantN := bitsIntoArray16(words, want, baseWord)
+		gotN := bitsIntoArray(words, got, baseWord)
+		require.Equal(t, wantN, gotN)
+		require.Equal(t, want, got)
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			words := bitmapWords(tc.vals)
+			n := len(tc.vals)
+
+			t.Run("whole run", func(t *testing.T) {
+				check(t, words, n, 0)
+			})
+			t.Run("short out", func(t *testing.T) {
+				for _, outLen := range []int{0, 1, 2, 63, 64, 65, n / 3, n - 1} {
+					if outLen >= 0 && outLen <= n {
+						check(t, words, outLen, 0)
+					}
+				}
+			})
+			t.Run("unaligned windows", func(t *testing.T) {
+				for _, lo := range []int{0, 1, 2, 3, 5, 62, 63, 250} {
+					for _, hi := range []int{lo, lo + 1, lo + 3, lo + 4, lo + 37, len(words) - 2, len(words)} {
+						if hi < lo || hi > len(words) {
+							continue
+						}
+						check(t, words[lo:hi], n, uint16(lo))
+						check(t, words[lo:hi], n/2, uint16(lo))
+					}
+				}
+			})
+		})
+	}
 }
