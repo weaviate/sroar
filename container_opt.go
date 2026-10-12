@@ -242,9 +242,6 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 		// Two-pointer scan: process each uint64 word of b against sorted
 		// elements of other — no scratch buffer or allocation needed.
 		// For each word, the uint64 mask is built on the fly from other's elements.
-		// Bit of value x in dst64[x>>6]: bitmapMask reverses bit order within
-		// each uint16 (bitmapMask(p)=1<<(15-p)), so the mapping is
-		// uint64(bitmapMask(pos)) << (idx*16) where idx=(x>>4)&3, pos=x&0xF.
 		// Benchmarks show this is faster than the previous 1KB batch approach
 		// and avoids any allocation.
 		dst64 := uint16To64SliceUnsafe(b[startIdx:])
@@ -265,10 +262,7 @@ func (b bitmap) andArrayAlt(other array, optBuf []uint16, runMode int) []uint16 
 			}
 			var mask uint64
 			for j < len(src) && int(src[j]) < wordEnd {
-				x := src[j]
-				idx := (x >> 4) & 3 // which uint16 within the uint64 (0-3)
-				pos := x & 0xF      // bit within that uint16
-				mask |= uint64(bitmapMask(pos)) << (idx * 16)
+				mask |= wordBit(src[j])
 				j++
 			}
 			dst64[i] &= mask

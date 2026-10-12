@@ -411,6 +411,12 @@ func hasBit(words []uint16, x uint16) bool {
 	return words[x>>4]&bitmapMask(x&0xF) > 0
 }
 
+// wordBit returns value x's bit in its uint64 bitmap word x>>6. bitmapMask
+// reverses each uint16, so x is bit (x^15)&63.
+func wordBit(x uint16) uint64 {
+	return 1 << ((x ^ 15) & 63)
+}
+
 // orMaskMinValuesPerWord is the average number of vals per uint64 word from
 // which orValues ORs one mask per word. Below it, building each word's mask
 // costs more than setting each value. BenchmarkOrValues sweeps it.
@@ -441,7 +447,6 @@ func orValuesEach(words []uint16, vals []uint16) int {
 }
 
 // orValuesByMask ORs each uint64 word once, with the bits of all vals in it.
-// Value x is bit (x^15)&63 of word x>>6, since bitmapMask reverses each uint16.
 func orValuesByMask(words []uint16, vals []uint16) int {
 	ws := uint16To64SliceUnsafe(words)
 	added := 0
@@ -449,7 +454,7 @@ func orValuesByMask(words []uint16, vals []uint16) int {
 		w := vals[i] >> 6
 		var mask uint64
 		for ; i < len(vals) && vals[i]>>6 == w; i++ {
-			mask |= 1 << ((vals[i] ^ 15) & 63)
+			mask |= wordBit(vals[i])
 		}
 		added += bits.OnesCount64(mask &^ ws[w])
 		ws[w] |= mask

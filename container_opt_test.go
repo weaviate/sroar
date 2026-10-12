@@ -384,6 +384,15 @@ func TestBitsIntoArrayMatchesUint16Loop(t *testing.T) {
 	}
 }
 
+// wordBit sets the same bit as setBit for every value.
+func TestWordBitMatchesSetBit(t *testing.T) {
+	for x := 0; x <= math.MaxUint16; x++ {
+		words := make([]uint16, 4)
+		setBit(words, uint16(x&63))
+		require.Equal(t, uint16To64SliceUnsafe(words)[0], wordBit(uint16(x)), "value %d", x)
+	}
+}
+
 // orValues and its mask loop match the per-value loop in new-value count and bits.
 func TestOrValuesMatchesPerValueLoop(t *testing.T) {
 	clustered := uint16Range(1000, 3000, 1)
