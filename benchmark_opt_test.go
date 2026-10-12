@@ -912,3 +912,48 @@ func BenchmarkBitsIntoArray(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkOrValues compares setting each value against ORing a mask per
+// uint64 word, on values from clustered to spread over the whole container.
+// Steps 21 and 24 put about 3 values in a word, either side of orMaskMinValuesPerWord.
+//
+// go test -v -bench BenchmarkOrValues -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrValues(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(words, vals []uint16) int
+	}{
+		{"each", orValuesEach},
+		{"mask", orValuesByMask},
+		{"chosen", orValues},
+	}
+	for _, c := range []int{256, 1500} {
+		spreadStep := maxCardinality / c
+		for _, step := range []int{1, 8, 16, 21, 24, 32, 48, spreadStep} {
+			if step > spreadStep {
+				continue
+			}
+			shape := "step" + strconv.Itoa(step)
+			switch step {
+			case 1:
+				shape = "clustered"
+			case spreadStep:
+				shape = "spread"
+			}
+			vals := uint16Range(0, c*step, step)
+			for _, n := range []int{64, 512, 2000, 30000} {
+				src := bitmapWords(uint16Range(1, maxCardinality, maxCardinality/n)[:n])
+				words := make([]uint16, len(src))
+				for _, impl := range impls {
+					name := "c" + strconv.Itoa(c) + "_" + shape + "_into" + strconv.Itoa(n) + "/" + impl.name
+					b.Run(name, func(b *testing.B) {
+						for i := 0; i < b.N; i++ {
+							copy(words, src)
+							impl.fn(words, vals)
+						}
+					})
+				}
+			}
+		}
+	}
+}

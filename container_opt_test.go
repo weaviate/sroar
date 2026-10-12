@@ -336,3 +336,50 @@ func TestBitsIntoArrayMatchesUint16Loop(t *testing.T) {
 		})
 	}
 }
+
+// orValues and its mask loop match the per-value loop in new-value count and bits.
+func TestOrValuesMatchesPerValueLoop(t *testing.T) {
+	clustered := uint16Range(1000, 3000, 1)
+	spread := uint16Range(5, maxCardinality, 61)
+	tcs := []struct {
+		name         string
+		inBitmap     []uint16
+		vals         []uint16
+		wantNewCount int
+	}{
+		{"empty vals", clustered, nil, 0},
+		{"clustered into empty", nil, clustered, 2000},
+		{"spread into empty", nil, spread, len(spread)},
+		{"clustered disjoint", spread[:16], uint16Range(1100, 1150, 1), 50},
+		{"clustered overlapping", uint16Range(1000, 3000, 2), clustered, 1000},
+		{"clustered all present", clustered, uint16Range(1500, 2500, 1), 0},
+		{"spread disjoint", clustered, uint16Range(4000, maxCardinality, 59), len(uint16Range(4000, maxCardinality, 59))},
+		{"spread overlapping", uint16Range(5, maxCardinality, 122), spread, len(spread) / 2},
+		{"word edges", uint16Range(0, maxCardinality, 64), []uint16{0, 15, 16, 63, 64, 65, 127, 65472, math.MaxUint16}, 6},
+		{"full", uint16Range(0, maxCardinality, 3), uint16Range(0, maxCardinality, 1), maxCardinality - len(uint16Range(0, maxCardinality, 3))},
+	}
+	impls := []struct {
+		name string
+		fn   func(words, vals []uint16) int
+	}{
+		{"chosen", orValues},
+		{"mask", orValuesByMask},
+	}
+	for _, tc := range tcs {
+		want := bitmapWords(tc.inBitmap)
+		require.Equal(t, tc.wantNewCount, orValuesEach(want, tc.vals), tc.name)
+		require.Equal(t, sortedUnion(tc.inBitmap, tc.vals), bitmapValues(want), tc.name)
+		for _, impl := range impls {
+			t.Run(tc.name+"/"+impl.name, func(t *testing.T) {
+				got := bitmapWords(tc.inBitmap)
+				require.Equal(t, tc.wantNewCount, impl.fn(got, tc.vals))
+				require.Equal(t, want, got)
+			})
+		}
+	}
+}
+
+func bitmapValues(words []uint16) []uint16 {
+	out := make([]uint16, maxCardinality)
+	return out[:bitsIntoArray(words, out, 0)]
+}

@@ -411,6 +411,52 @@ func hasBit(words []uint16, x uint16) bool {
 	return words[x>>4]&bitmapMask(x&0xF) > 0
 }
 
+// orMaskMinValuesPerWord is the average number of vals per uint64 word from
+// which orValues ORs one mask per word. Below it, building each word's mask
+// costs more than setting each value. BenchmarkOrValues sweeps it.
+const orMaskMinValuesPerWord = 3
+
+// orValues sets the sorted vals' bits in a bitmap container's words past its
+// header, and returns how many were not set before.
+func orValues(words []uint16, vals []uint16) int {
+	if len(vals) == 0 {
+		return 0
+	}
+	spanWords := int(vals[len(vals)-1]>>6) - int(vals[0]>>6) + 1
+	if len(vals) < orMaskMinValuesPerWord*spanWords {
+		return orValuesEach(words, vals)
+	}
+	return orValuesByMask(words, vals)
+}
+
+func orValuesEach(words []uint16, vals []uint16) int {
+	added := 0
+	for _, x := range vals {
+		if !hasBit(words, x) {
+			setBit(words, x)
+			added++
+		}
+	}
+	return added
+}
+
+// orValuesByMask ORs each uint64 word once, with the bits of all vals in it.
+// Value x is bit (x^15)&63 of word x>>6, since bitmapMask reverses each uint16.
+func orValuesByMask(words []uint16, vals []uint16) int {
+	ws := uint16To64SliceUnsafe(words)
+	added := 0
+	for i := 0; i < len(vals); {
+		w := vals[i] >> 6
+		var mask uint64
+		for ; i < len(vals) && vals[i]>>6 == w; i++ {
+			mask |= 1 << ((vals[i] ^ 15) & 63)
+		}
+		added += bits.OnesCount64(mask &^ ws[w])
+		ws[w] |= mask
+	}
+	return added
+}
+
 func (b bitmap) add(x uint16) bool {
 	idx := x >> 4
 	mask := bitmapMask(x & 0xF)

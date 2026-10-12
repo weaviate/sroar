@@ -681,33 +681,13 @@ func (c array) canFitArray(n int) bool {
 // orArrayAsBitmap builds the union of c and other as a bitmap in buf. The
 // union must not be array-sized unless c's slot keeps it.
 func (c array) orArrayAsBitmap(other array, buf []uint16, runMode int) []uint16 {
-	cnum := getCardinality(c)
-	onum := getCardinality(other)
-
 	out := buf[:maxContainerSize]
 	clear(out[startIdx:])
 	out[indexType] = typeBitmap
 	out[indexSize] = maxContainerSize
 
-	smaller, larger := other, c
-	if onum > cnum {
-		smaller, larger = c, other
-	}
-
-	// larger is ORed into an empty bitmap so every element is new —
-	// no duplicate check needed and cardinality equals larger's size.
-	num := max(cnum, onum)
 	data := out[startIdx:]
-	for _, x := range larger.all() {
-		setBit(data, x)
-	}
-	// smaller may overlap with larger so check each bit before counting.
-	for _, x := range smaller.all() {
-		if !hasBit(data, x) {
-			setBit(data, x)
-			num++
-		}
-	}
+	num := orValues(data, c.all()) + orValues(data, other.all())
 	setCardinality(out, num)
 
 	if runMode&runInline == 0 {
@@ -809,19 +789,11 @@ func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 		return nil
 	}
 
-	// merge: copy other into out then set c's bits per-element, counting
-	// only new bits. Faster than clear+convert+OR+POPCNT at all cardinalities
-	// because it avoids the 256-word OR+POPCNT sweep (~130ns fixed overhead).
+	// Copying other and setting c's bits beats clear+convert+OR+POPCNT at all
+	// cardinalities, since it skips the 256-word OR+POPCNT sweep (~130ns fixed overhead).
 	out := buf
 	copy(out, other)
-	addnum := 0
-	data := out[startIdx:]
-	for _, x := range c.all() {
-		if !hasBit(data, x) {
-			setBit(data, x)
-			addnum++
-		}
-	}
+	addnum := orValues(out[startIdx:], c.all())
 	setCardinality(out, onum+addnum)
 
 	if runMode&runInline == 0 {
@@ -859,26 +831,9 @@ func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
 		copy(out, b)
 	}
 
-	var addnum int
-	data := out[startIdx:]
-	if bnum == 0 {
-		// Bitmap is empty — every element is new, skip the !has check.
-		// A full POPCNT sweep to recompute cardinality would cost ~500ns
-		// fixed overhead; since all bits are new, addnum == onum.
-		for _, x := range other.all() {
-			setBit(data, x)
-		}
-		addnum = onum
-	} else {
-		// Per-element check is faster than OR-all + POPCNT sweep at array
-		// cardinalities.
-		for _, x := range other.all() {
-			if !hasBit(data, x) {
-				setBit(data, x)
-				addnum++
-			}
-		}
-	}
+	// Counting new bits as they are set is faster than OR-all + POPCNT sweep
+	// at array cardinalities.
+	addnum := orValues(out[startIdx:], other.all())
 	setCardinality(out, bnum+addnum)
 
 	if runMode&runInline == 0 {
