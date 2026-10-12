@@ -64,125 +64,142 @@ func sortedUnion(a, b []uint16) []uint16 {
 	return slices.Compact(out)
 }
 
-func TestOrArrayAltResult(t *testing.T) {
-	const (
-		keptArray     = iota // array in c's slot
-		keptBitmap           // bitmap in c's slot
-		newArray             // array returned in buf
-		newBitmap            // bitmap returned in buf
-		returnedC            // c itself returned
-		returnedOther        // other itself returned
-	)
-	tcs := []struct {
-		name    string
-		slot    int
-		runMode int
-		c, o    []uint16
-		want    int
-		newSize int
-	}{
-		{"no duplicates, interleaved", 64, runInline, uint16Range(0, 40, 2), uint16Range(1, 40, 2), keptArray, 0},
-		{"duplicates shift result down", 64, runInline, uint16Range(0, 30, 1), uint16Range(10, 40, 1), keptArray, 0},
-		{"other entirely below c", 64, runInline, uint16Range(100, 120, 1), uint16Range(0, 20, 1), keptArray, 0},
-		{"other entirely above c", 64, runInline, uint16Range(0, 20, 1), uint16Range(100, 120, 1), keptArray, 0},
-		{"other inside c, all duplicates", 64, runInline, uint16Range(0, 30, 1), uint16Range(5, 15, 1), keptArray, 0},
-		{"cnum is 1, below other", 64, runInline, []uint16{0}, uint16Range(10, 20, 1), keptArray, 0},
-		{"cnum is 1, above other", 64, runInline, []uint16{65535}, uint16Range(10, 20, 1), keptArray, 0},
-		{"cnum is 1, duplicate", 64, runInline, []uint16{15}, uint16Range(10, 20, 1), keptArray, 0},
-		{"onum is 1, below c", 64, runInline, uint16Range(10, 20, 1), []uint16{0}, keptArray, 0},
-		{"onum is 1, above c", 64, runInline, uint16Range(10, 20, 1), []uint16{65535}, keptArray, 0},
-		{"onum is 1, duplicate", 64, runInline, uint16Range(10, 20, 1), []uint16{15}, keptArray, 0},
-		{"union exactly fills slot", 64, runInline, uint16Range(0, 60, 2), uint16Range(1, 60, 2), keptArray, 0},
-		{"cnum+onum fills slot, duplicates", 64, runInline, uint16Range(0, 30, 1), uint16Range(29, 59, 1), keptArray, 0},
-		{"cnum+onum one past slot, union fits", 64, runInline, uint16Range(0, 40, 1), uint16Range(30, 51, 1), keptArray, 0},
-		{"union too large for slot", 64, runInline, uint16Range(0, 40, 1), uint16Range(40, 80, 1), newArray, 128},
-		{"legacy slot between array and bitmap size", 3000, runInline, uint16Range(0, 3000, 2), uint16Range(1, 1800, 2), keptArray, 0},
+const (
+	orKeptArray     = iota // array in c's slot
+	orKeptBitmap           // bitmap in c's slot
+	orNewArray             // array returned in buf
+	orNewBitmap            // bitmap returned in buf
+	orReturnedC            // c itself returned
+	orReturnedOther        // other itself returned
+)
 
-		{"full slot, union of a lower subset", 2004, runInline, uint16Range(0, 2000, 1), uint16Range(0, 1500, 1), keptArray, 0},
-		{"full slot, union of an upper subset", 2004, runInline, uint16Range(0, 2000, 1), uint16Range(500, 2000, 1), keptArray, 0},
-		{"bitmap-sized slot, array-sized union", maxContainerSize, runInline, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), keptBitmap, 0},
-		{"bitmap-sized slot, few values", maxContainerSize, runInline, uint16Range(0, 30, 1), uint16Range(20, 50, 1), keptBitmap, 0},
-		{"bitmap-sized slot, union one past array size", maxContainerSize, runInline, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), keptBitmap, 0},
-		{"small slot, array-sized union", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), newArray, 2048},
-		{"small slot, union one past array size", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), newBitmap, maxContainerSize},
-		{"legacy slot fits union past array size", 3000, runInline, uint16Range(0, 1500, 1), uint16Range(500, 2500, 1), keptArray, 0},
-		{"legacy array past array size, union fits slot", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), keptArray, 0},
-		{"legacy array past array size, union past slot", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(2400, 3600, 1), newBitmap, maxContainerSize},
-		{"legacy arrays, union past buf's array capacity", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(3000, 4500, 1), newBitmap, maxContainerSize},
-		{"legacy array past array size, bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), keptBitmap, 0},
+type orResultCase struct {
+	name    string
+	slot    int
+	runMode int
+	c, o    []uint16
+	want    int
+	newSize int
+}
 
-		{"c empty, fits slot", 64, runInline, []uint16{}, uint16Range(0, 50, 1), keptArray, 0},
-		{"c empty, other exactly fills slot", 64, runInline, []uint16{}, uint16Range(0, 60, 1), keptArray, 0},
-		{"c empty, other one past slot", 64, runInline, []uint16{}, uint16Range(0, 61, 1), newArray, 128},
-		{"c empty, legacy other past array size", 64, runInline, []uint16{}, uint16Range(0, 2500, 1), newArray, maxContainerSize},
-		{"c empty, right-sized other past slot", 64, runInline, []uint16{}, uint16Range(0, 124, 1), returnedOther, 0},
-		{"c empty in bitmap-sized slot, legacy other past array size", maxContainerSize, runInline, []uint16{}, uint16Range(0, 2500, 1), keptArray, 0},
-		{"other empty, legacy c in bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 2500, 1), []uint16{}, keptArray, 0},
-		{"other empty, legacy c in legacy slot", 3000, runInline, uint16Range(0, 2500, 1), []uint16{}, keptArray, 0},
-		{"both empty", 64, runInline, []uint16{}, []uint16{}, keptArray, 0},
+// testOrResult runs containerOrAlt on an array c in a slot of tc.slot and
+// other built by newOther, and checks where and how the union is stored.
+func testOrResult(t *testing.T, tc orResultCase, newOther func(vals []uint16) []uint16, bufUntouched bool) {
+	c := arrayContainer(tc.slot, tc.c)
+	other := newOther(tc.o)
+	buf := make([]uint16, maxContainerSize)
 
-		{"edge bounds, disjoint ranges past array size", maxContainerSize, runInline, uint16Range(0, 1100, 1), uint16Range(2000, 3000, 1), keptBitmap, 0},
-		{"edge bounds, run with other sticking out past array size", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(1000, 3200, 2), newBitmap, maxContainerSize},
-		{"edge bounds undecided, interleaved past array size", maxContainerSize, runInline, uint16Range(0, 3000, 2), uint16Range(1, 3000, 2), keptBitmap, 0},
-		{"edge bounds undecided, union array-sized", 1504, runInline, uint16Range(0, 3000, 2), append([]uint16{0}, uint16Range(1000, 1600, 1)...), newArray, 2048},
+	got := containerOrAlt(c, other, buf, tc.runMode)
 
-		{"not inline, small union", 64, 0, uint16Range(0, 30, 1), uint16Range(10, 40, 1), newArray, 64},
-		{"not inline, array-sized union", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), newArray, 2048},
-		{"not inline, union one past array size", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), newBitmap, maxContainerSize},
-		{"not inline, legacy arrays past array size", 3500, 0, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), newBitmap, maxContainerSize},
-		{"not inline, edge bounds past array size", 2048, 0, uint16Range(0, 3000, 2), uint16Range(2000, 5000, 2), newBitmap, maxContainerSize},
-		{"not inline, edge bounds undecided, union array-sized", 2048, 0, uint16Range(0, 3000, 2), uint16Range(1000, 3200, 2), newArray, 2048},
-		{"not inline, c empty", 64, 0, []uint16{}, uint16Range(0, 60, 1), returnedOther, 0},
-		{"not inline, other empty, spare room in c", 2048, 0, uint16Range(0, 30, 1), []uint16{}, newArray, 64},
-		{"not inline, other empty, right-sized c", 64, 0, uint16Range(0, 30, 1), []uint16{}, returnedC, 0},
-		{"not inline, other empty, legacy c", 3000, 0, uint16Range(0, 2500, 1), []uint16{}, newArray, maxContainerSize},
-		{"not inline, both empty", 64, 0, []uint16{}, []uint16{}, returnedC, 0},
+	res, wantSize, wantType := []uint16(c), uint16(tc.slot), typeArray
+	switch tc.want {
+	case orKeptArray, orKeptBitmap:
+		require.Nil(t, got)
+	case orNewArray, orNewBitmap:
+		require.NotEmpty(t, got)
+		require.Same(t, &buf[0], &got[0], "callers swap buffers, so a new container starts at buf")
+		require.Equal(t, tc.c, c.all(), "c is unchanged when the result is returned")
+		res, wantSize = got, uint16(tc.newSize)
+	case orReturnedC:
+		require.Same(t, &c[0], &got[0])
+		res = got
+	case orReturnedOther:
+		require.Same(t, &other[0], &got[0])
+		require.Equal(t, tc.c, c.all())
+		res, wantSize, wantType = got, uint16(len(other)), other[indexType]
 	}
+	switch tc.want {
+	case orKeptBitmap, orNewBitmap:
+		wantType = typeBitmap
+	}
+
+	if bufUntouched {
+		require.Equal(t, make([]uint16, maxContainerSize), buf, "merge in place leaves buf untouched")
+	}
+	require.Equal(t, wantType, res[indexType])
+	require.Equal(t, wantSize, res[indexSize])
+	require.Len(t, res, int(wantSize))
+	want := sortedUnion(tc.c, tc.o)
+	require.Equal(t, len(want), getCardinality(res))
+	if wantType == typeArray {
+		require.Equal(t, want, array(res).all())
+	} else {
+		require.Equal(t, want, bitmap(res).all())
+	}
+	if other[indexType] == typeArray {
+		require.Equal(t, tc.o, array(other).all())
+	} else {
+		require.Equal(t, tc.o, bitmap(other).all())
+	}
+}
+
+func TestOrArrayAltResult(t *testing.T) {
+	tcs := []orResultCase{
+		{"no duplicates, interleaved", 64, runInline, uint16Range(0, 40, 2), uint16Range(1, 40, 2), orKeptArray, 0},
+		{"duplicates shift result down", 64, runInline, uint16Range(0, 30, 1), uint16Range(10, 40, 1), orKeptArray, 0},
+		{"other entirely below c", 64, runInline, uint16Range(100, 120, 1), uint16Range(0, 20, 1), orKeptArray, 0},
+		{"other entirely above c", 64, runInline, uint16Range(0, 20, 1), uint16Range(100, 120, 1), orKeptArray, 0},
+		{"other inside c, all duplicates", 64, runInline, uint16Range(0, 30, 1), uint16Range(5, 15, 1), orKeptArray, 0},
+		{"cnum is 1, below other", 64, runInline, []uint16{0}, uint16Range(10, 20, 1), orKeptArray, 0},
+		{"cnum is 1, above other", 64, runInline, []uint16{65535}, uint16Range(10, 20, 1), orKeptArray, 0},
+		{"cnum is 1, duplicate", 64, runInline, []uint16{15}, uint16Range(10, 20, 1), orKeptArray, 0},
+		{"onum is 1, below c", 64, runInline, uint16Range(10, 20, 1), []uint16{0}, orKeptArray, 0},
+		{"onum is 1, above c", 64, runInline, uint16Range(10, 20, 1), []uint16{65535}, orKeptArray, 0},
+		{"onum is 1, duplicate", 64, runInline, uint16Range(10, 20, 1), []uint16{15}, orKeptArray, 0},
+		{"union exactly fills slot", 64, runInline, uint16Range(0, 60, 2), uint16Range(1, 60, 2), orKeptArray, 0},
+		{"cnum+onum fills slot, duplicates", 64, runInline, uint16Range(0, 30, 1), uint16Range(29, 59, 1), orKeptArray, 0},
+		{"cnum+onum one past slot, union fits", 64, runInline, uint16Range(0, 40, 1), uint16Range(30, 51, 1), orKeptArray, 0},
+		{"union too large for slot", 64, runInline, uint16Range(0, 40, 1), uint16Range(40, 80, 1), orNewArray, 128},
+		{"legacy slot between array and bitmap size", 3000, runInline, uint16Range(0, 3000, 2), uint16Range(1, 1800, 2), orKeptArray, 0},
+
+		{"full slot, union of a lower subset", 2004, runInline, uint16Range(0, 2000, 1), uint16Range(0, 1500, 1), orKeptArray, 0},
+		{"full slot, union of an upper subset", 2004, runInline, uint16Range(0, 2000, 1), uint16Range(500, 2000, 1), orKeptArray, 0},
+		{"bitmap-sized slot, array-sized union", maxContainerSize, runInline, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), orKeptBitmap, 0},
+		{"bitmap-sized slot, few values", maxContainerSize, runInline, uint16Range(0, 30, 1), uint16Range(20, 50, 1), orKeptBitmap, 0},
+		{"bitmap-sized slot, union one past array size", maxContainerSize, runInline, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), orKeptBitmap, 0},
+		{"small slot, array-sized union", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), orNewArray, 2048},
+		{"small slot, union one past array size", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), orNewBitmap, maxContainerSize},
+		{"legacy slot fits union past array size", 3000, runInline, uint16Range(0, 1500, 1), uint16Range(500, 2500, 1), orKeptArray, 0},
+		{"legacy array past array size, union fits slot", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), orKeptArray, 0},
+		{"legacy array past array size, union past slot", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(2400, 3600, 1), orNewBitmap, maxContainerSize},
+		{"legacy arrays, union past buf's array capacity", 3500, runInline, uint16Range(0, 3000, 1), uint16Range(3000, 4500, 1), orNewBitmap, maxContainerSize},
+		{"legacy array past array size, bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), orKeptBitmap, 0},
+
+		{"c empty, fits slot", 64, runInline, []uint16{}, uint16Range(0, 50, 1), orKeptArray, 0},
+		{"c empty, other exactly fills slot", 64, runInline, []uint16{}, uint16Range(0, 60, 1), orKeptArray, 0},
+		{"c empty, other one past slot", 64, runInline, []uint16{}, uint16Range(0, 61, 1), orNewArray, 128},
+		{"c empty, legacy other past array size", 64, runInline, []uint16{}, uint16Range(0, 2500, 1), orNewArray, maxContainerSize},
+		{"c empty, right-sized other past slot", 64, runInline, []uint16{}, uint16Range(0, 124, 1), orReturnedOther, 0},
+		{"c empty in bitmap-sized slot, legacy other past array size", maxContainerSize, runInline, []uint16{}, uint16Range(0, 2500, 1), orKeptArray, 0},
+		{"other empty, legacy c in bitmap-sized slot", maxContainerSize, runInline, uint16Range(0, 2500, 1), []uint16{}, orKeptArray, 0},
+		{"other empty, legacy c in legacy slot", 3000, runInline, uint16Range(0, 2500, 1), []uint16{}, orKeptArray, 0},
+		{"both empty", 64, runInline, []uint16{}, []uint16{}, orKeptArray, 0},
+
+		{"bitmap-sized slot, disjoint ranges past array size", maxContainerSize, runInline, uint16Range(0, 1100, 1), uint16Range(2000, 3000, 1), orKeptBitmap, 0},
+		{"edge bounds, run with other sticking out past array size", 1504, runInline, uint16Range(0, 1500, 1), uint16Range(1000, 3200, 2), orNewBitmap, maxContainerSize},
+		{"bitmap-sized slot, interleaved past array size", maxContainerSize, runInline, uint16Range(0, 3000, 2), uint16Range(1, 3000, 2), orKeptBitmap, 0},
+		{"edge bounds undecided, union array-sized", 1504, runInline, uint16Range(0, 3000, 2), append([]uint16{0}, uint16Range(1000, 1600, 1)...), orNewArray, 2048},
+		{"edge bounds undecided, union past array size", 2048, 0, uint16Range(0, 3000, 2), uint16Range(1, 3000, 2), orNewBitmap, maxContainerSize},
+		{"edge bounds undecided, union past array size, inline", 1504, runInline, uint16Range(0, 3000, 2), uint16Range(1, 3000, 2), orNewBitmap, maxContainerSize},
+		{"legacy interleaved arrays, union past buf", 3008, runInline, uint16Range(0, 6000, 2), uint16Range(1, 6000, 2), orNewBitmap, maxContainerSize},
+
+		{"not inline, small union", 64, 0, uint16Range(0, 30, 1), uint16Range(10, 40, 1), orNewArray, 64},
+		{"not inline, array-sized union", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(544, 2044, 1), orNewArray, 2048},
+		{"not inline, union one past array size", maxContainerSize, 0, uint16Range(0, 1500, 1), uint16Range(545, 2045, 1), orNewBitmap, maxContainerSize},
+		{"not inline, legacy arrays past array size", 3500, 0, uint16Range(0, 3000, 1), uint16Range(2200, 3400, 1), orNewBitmap, maxContainerSize},
+		{"not inline, edge bounds past array size", 2048, 0, uint16Range(0, 3000, 2), uint16Range(2000, 5000, 2), orNewBitmap, maxContainerSize},
+		{"not inline, edge bounds undecided, union array-sized", 2048, 0, uint16Range(0, 3000, 2), uint16Range(1000, 3200, 2), orNewArray, 2048},
+		{"not inline, c empty", 64, 0, []uint16{}, uint16Range(0, 60, 1), orReturnedOther, 0},
+		{"not inline, other empty, spare room in c", 2048, 0, uint16Range(0, 30, 1), []uint16{}, orNewArray, 64},
+		{"not inline, other empty, right-sized c", 64, 0, uint16Range(0, 30, 1), []uint16{}, orReturnedC, 0},
+		{"not inline, other empty, legacy c", 3000, 0, uint16Range(0, 2500, 1), []uint16{}, orNewArray, maxContainerSize},
+		{"not inline, both empty", 64, 0, []uint16{}, []uint16{}, orReturnedC, 0},
+	}
+	newOther := func(vals []uint16) []uint16 { return arrayContainer(int(startIdx)+len(vals), vals) }
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			c := arrayContainer(tc.slot, tc.c)
-			other := arrayContainer(int(startIdx)+len(tc.o), tc.o)
-			buf := make([]uint16, maxContainerSize)
-
-			got := containerOrAlt(c, other, buf, tc.runMode)
-
-			res, wantSize := []uint16(c), uint16(tc.slot)
-			switch tc.want {
-			case keptArray, keptBitmap:
-				require.Nil(t, got)
-			case newArray, newBitmap:
-				require.NotEmpty(t, got)
-				require.Same(t, &buf[0], &got[0], "callers swap buffers, so a new container starts at buf")
-				require.Equal(t, tc.c, c.all(), "c is unchanged when the result is returned")
-				res, wantSize = got, uint16(tc.newSize)
-			case returnedC:
-				require.Same(t, &c[0], &got[0])
-				res = got
-			case returnedOther:
-				require.Same(t, &other[0], &got[0])
-				require.Equal(t, tc.c, c.all())
-				res, wantSize = got, uint16(len(other))
-			}
-			wantType := typeArray
-			switch tc.want {
-			case keptBitmap, newBitmap:
-				wantType = typeBitmap
-			}
-
-			if tc.runMode&runInline != 0 && int(startIdx)+len(tc.c)+len(tc.o) <= tc.slot && tc.slot != maxContainerSize {
-				require.Equal(t, make([]uint16, maxContainerSize), buf, "merge in place leaves buf untouched")
-			}
-			require.Equal(t, wantType, res[indexType])
-			require.Equal(t, wantSize, res[indexSize])
-			require.Len(t, res, int(wantSize))
-			want := sortedUnion(tc.c, tc.o)
-			require.Equal(t, len(want), getCardinality(res))
-			if wantType == typeArray {
-				require.Equal(t, want, array(res).all())
-			} else {
-				require.Equal(t, want, bitmap(res).all())
-			}
-			require.Equal(t, tc.o, other.all())
+			inPlace := tc.runMode&runInline != 0 && int(startIdx)+len(tc.c)+len(tc.o) <= tc.slot && tc.slot != maxContainerSize
+			testOrResult(t, tc, newOther, inPlace)
 		})
 	}
 
@@ -252,26 +269,56 @@ func TestUnionMayFitArray(t *testing.T) {
 	}
 }
 
-// An inline array ∪ bitmap whose union is the bitmap, and outgrows the array's slot, returns the bitmap itself.
-func TestOrArrayBitmapAltReturnsOther(t *testing.T) {
-	tcs := []struct {
-		name string
-		c    []uint16
-		o    []uint16
-	}{
-		{"c empty", []uint16{}, uint16Range(0, 3000, 1)},
-		{"other full", uint16Range(0, 10, 1), uint16Range(0, maxCardinality, 1)},
+func TestOrArrayBitmapAltResult(t *testing.T) {
+	run := func(from, to int) []uint16 { return uint16Range(from, to, 1) }
+	full := run(0, maxCardinality)
+	tcs := []orResultCase{
+		{"interleaved, fits slot", 128, runInline, uint16Range(0, 60, 2), uint16Range(1, 60, 2), orKeptArray, 0},
+		{"c entirely below other", 128, runInline, run(0, 30), run(1000, 1050), orKeptArray, 0},
+		{"c entirely above other", 128, runInline, run(60000, 60030), run(0, 50), orKeptArray, 0},
+		{"heavy overlap, union exactly fills slot", 64, runInline, run(0, 60), uint16Range(0, 60, 2), orKeptArray, 0},
+		{"other inside c, all duplicates", 64, runInline, run(0, 60), run(10, 20), orKeptArray, 0},
+		{"values spread over the whole range", 2048, runInline, uint16Range(3, maxCardinality, 97), uint16Range(0, maxCardinality, 64), orKeptArray, 0},
+		{"union one past slot", 64, runInline, run(0, 30), run(100, 131), orNewBitmap, maxContainerSize},
+		{"bitmap-sized slot, union of 2044", maxContainerSize, runInline, run(0, 1500), run(544, 2044), orKeptBitmap, 0},
+		{"bitmap-sized slot, few values", maxContainerSize, runInline, run(0, 30), run(100, 140), orKeptBitmap, 0},
+		{"bitmap-sized slot, union of 2045", maxContainerSize, runInline, run(0, 1500), run(545, 2045), orKeptBitmap, 0},
+		{"small slot, union of 2044", 1504, runInline, run(0, 1500), run(544, 2044), orNewBitmap, maxContainerSize},
+		{"small slot, union of 2045", 1504, runInline, run(0, 1500), run(545, 2045), orNewBitmap, maxContainerSize},
+		{"legacy slot fits union past array size", 3004, runInline, run(0, 1500), run(500, 3000), orKeptArray, 0},
+		{"legacy slot fits other, not the union", 3004, runInline, run(0, 1500), run(1000, 3100), orNewBitmap, maxContainerSize},
+		{"legacy slot smaller than other", 2504, runInline, run(2900, 3100), run(0, 3000), orNewBitmap, maxContainerSize},
+		{"legacy array past array size, union fits slot", 3504, runInline, run(0, 3000), run(2200, 3400), orKeptArray, 0},
+		{"legacy array past array size, bitmap-sized slot", maxContainerSize, runInline, run(0, 3000), run(2200, 3400), orKeptBitmap, 0},
+		{"bitmap-sized slot, other past array size", maxContainerSize, runInline, run(0, 100), run(50, 30050), orKeptBitmap, 0},
+
+		{"other empty", 64, runInline, run(0, 10), []uint16{}, orKeptArray, 0},
+		{"c empty", 64, runInline, []uint16{}, run(0, 3000), orReturnedOther, 0},
+		{"c empty, other with few values", 64, runInline, []uint16{}, run(0, 10), orKeptArray, 0},
+		{"c empty, other exactly fills slot", 64, runInline, []uint16{}, run(0, 60), orKeptArray, 0},
+		{"c empty, other one past slot", 64, runInline, []uint16{}, run(0, 61), orReturnedOther, 0},
+		{"c empty in legacy slot, other past array size", 3004, runInline, []uint16{}, run(0, 2500), orKeptArray, 0},
+		{"c empty in bitmap-sized slot, other with few values", maxContainerSize, runInline, []uint16{}, run(0, 10), orKeptBitmap, 0},
+		{"other full", 64, runInline, run(0, 10), full, orReturnedOther, 0},
+		{"other full, bitmap-sized slot", maxContainerSize, runInline, run(0, 10), full, orKeptBitmap, 0},
+
+		{"not inline, small union", 2048, 0, run(0, 30), run(10, 40), orNewBitmap, maxContainerSize},
+		{"not inline, c entirely above other", 64, 0, run(60000, 60010), run(0, 40), orNewBitmap, maxContainerSize},
+		{"not inline, union of 2044", maxContainerSize, 0, run(0, 1500), run(544, 2044), orNewBitmap, maxContainerSize},
+		{"not inline, union of 2045", maxContainerSize, 0, run(0, 1500), run(545, 2045), orNewBitmap, maxContainerSize},
+		{"not inline, legacy array past array size", 3504, 0, run(0, 3000), run(2200, 3400), orNewBitmap, maxContainerSize},
+		{"not inline, other past array size", 64, 0, run(0, 10), run(5, 30005), orNewBitmap, maxContainerSize},
+		{"not inline, other empty, spare room in c", 2048, 0, run(0, 10), []uint16{}, orNewArray, 64},
+		{"not inline, other empty, right-sized c", 64, 0, run(0, 10), []uint16{}, orReturnedC, 0},
+		{"not inline, c empty", 64, 0, []uint16{}, run(0, 10), orReturnedOther, 0},
+		{"not inline, other full", 64, 0, run(0, 10), full, orReturnedOther, 0},
+	}
+	newOther := func(vals []uint16) []uint16 {
+		return arrayContainer(int(startIdx)+len(vals), vals).toBitmapContainer(nil)
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			c := arrayContainer(64, tc.c)
-			other := arrayContainer(int(startIdx)+len(tc.o), tc.o).toBitmapContainer(nil)
-			buf := make([]uint16, maxContainerSize)
-
-			got := containerOrAlt(c, other, buf, runInline)
-
-			require.Same(t, &other[0], &got[0])
-			require.Equal(t, tc.c, array(c).all())
+			testOrResult(t, tc, newOther, false)
 		})
 	}
 }

@@ -697,7 +697,7 @@ func TestCompareMergeImplementationsConcurrent(t *testing.T) {
 	})
 }
 
-// Or and OrConc merge array containers inside the slots ra already has.
+// Or and OrConc merge into array containers inside the slots ra already has.
 func TestOrMergesArraysInPlace(t *testing.T) {
 	const numKeys = minContainersPerRoutine * 3
 	perKey := func(from, to uint64) []uint64 {
@@ -713,6 +713,11 @@ func TestOrMergesArraysInPlace(t *testing.T) {
 	newRa := func() *Bitmap {
 		return FromSortedList(perKey(0, 1000)).AndNot(FromSortedList(perKey(100, 1000)))
 	}
+	// fewBits keeps bitmap containers holding 50..249 after an in-place And.
+	fewBits := FromSortedList(perKey(0, 5000)).And(FromSortedList(perKey(50, 250)))
+	for i := 0; i < numKeys; i++ {
+		require.Equal(t, typeBitmap, fewBits.getContainer(fewBits.keys.val(i))[indexType])
+	}
 
 	tcs := []struct {
 		name     string
@@ -721,6 +726,13 @@ func TestOrMergesArraysInPlace(t *testing.T) {
 		want     []uint64
 	}{
 		{"union fits the slot's spare room", newRa, []*Bitmap{FromSortedList(perKey(50, 250))}, perKey(0, 250)},
+		{"bitmap with few values, union fits the slot's spare room", newRa, []*Bitmap{fewBits}, perKey(0, 250)},
+		{
+			"bitmap with few values into slots emptied by And",
+			func() *Bitmap { return FromSortedList(perKey(0, 1000)).And(FromSortedList(perKey(2000, 2001))) },
+			[]*Bitmap{fewBits},
+			perKey(50, 250),
+		},
 		{
 			"subsets of a full slot whose sum exceeds array size",
 			func() *Bitmap { return FromSortedList(perKey(0, 2000)) },

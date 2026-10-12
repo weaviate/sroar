@@ -957,3 +957,41 @@ func BenchmarkOrValues(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkOrArrayBitmap times array ∪ bitmap through containerOrAlt with c in
+// a slot that fits the union, in a bitmap-sized slot and not inline.
+//
+// go test -v -bench BenchmarkOrArrayBitmap -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayBitmap(b *testing.B) {
+	buf := make([]uint16, maxContainerSize)
+	for _, onum := range []int{64, 512, 2000, 30000} {
+		for _, cnum := range []int{256, 1500} {
+			cv, ov := orArrayBenchValues(cnum, onum, 50)
+			other := arrayContainer(int(startIdx)+onum, ov).toBitmapContainer(nil)
+			u := len(sortedUnion(cv, ov))
+			modes := []struct {
+				name    string
+				slot    int
+				runMode int
+			}{
+				{"fit_slot", (int(startIdx) + u + 3) / 4 * 4, runInline},
+				{"bitmap_slot", maxContainerSize, runInline},
+				{"new", (int(startIdx) + cnum + 3) / 4 * 4, 0},
+			}
+			for _, mode := range modes {
+				if mode.name == "fit_slot" && !isArrayCard(u) {
+					continue
+				}
+				src := arrayContainer(mode.slot, cv)
+				c := make([]uint16, len(src))
+				name := "o" + strconv.Itoa(onum) + "_c" + strconv.Itoa(cnum) + "/" + mode.name
+				b.Run(name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						copy(c, src)
+						containerOrAlt(c, other, buf, mode.runMode)
+					}
+				})
+			}
+		}
+	}
+}

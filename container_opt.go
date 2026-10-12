@@ -689,19 +689,26 @@ func (c array) orArrayAsBitmap(other array, buf []uint16, runMode int) []uint16 
 	data := out[startIdx:]
 	num := orValues(data, c.all()) + orValues(data, other.all())
 	setCardinality(out, num)
+	return c.bitmapUnionResult(out, runMode)
+}
 
+// bitmapUnionResult puts out, the union of c and another container built as a
+// bitmap, into c's slot under runInline when it fits, and otherwise returns it.
+// A bitmap-sized slot keeps the bitmap, since compaction picks the type anyway.
+func (c array) bitmapUnionResult(out []uint16, runMode int) []uint16 {
 	if runMode&runInline == 0 {
 		return out
 	}
-	if c.canFitArray(num) {
-		bitmap(out).intoArray(c[startIdx : int(startIdx)+num])
-		setCardinality(c, num)
+	if c[indexSize] == maxContainerSize {
+		copy(c, out)
 		return nil
 	}
-	if c[indexSize] != maxContainerSize {
+	num := getCardinality(out)
+	if !c.canFitArray(num) {
 		return out
 	}
-	copy(c, out)
+	bitmap(out).intoArray(c[startIdx : int(startIdx)+num])
+	setCardinality(c, num)
 	return nil
 }
 
@@ -769,41 +776,35 @@ func union2by2Backward(set1 []uint16, n1, pos int, set2 []uint16) (int, int) {
 func (c array) orBitmapAlt(other bitmap, buf []uint16, runMode int) []uint16 {
 	cnum := getCardinality(c)
 	onum := getCardinality(other)
+	inline := runMode&runInline != 0
 
 	if onum == 0 {
-		if runMode&runInline == 0 {
-			return resizeArray(c, buf)
+		if inline {
+			return nil
 		}
-		// do nothing, nothing to add
+		return resizeArray(c, buf)
+	}
+	// An empty c takes other's values as an array when its slot holds them.
+	if cnum == 0 && inline && c.canFitArray(onum) {
+		other.intoArray(c[startIdx : int(startIdx)+onum])
+		setCardinality(c, onum)
 		return nil
 	}
 	if cnum == 0 || onum == maxCardinality {
-		if runMode&runInline == 0 {
-			return other
-		}
-		// overwrite converting to bitmap or return bitmap if does not fit
-		if c[indexSize] != maxContainerSize {
+		if !inline || c[indexSize] != maxContainerSize {
 			return other
 		}
 		copy(c, other)
 		return nil
 	}
 
-	// Copying other and setting c's bits beats clear+convert+OR+POPCNT at all
-	// cardinalities, since it skips the 256-word OR+POPCNT sweep (~130ns fixed overhead).
-	out := buf
+	// Copying other and setting c's bits skips the popcount over all 1024 uint64
+	// words that converting c and ORing two bitmaps would need.
+	// A union that does not stay in c is returned as this bitmap even when array-sized.
+	out := buf[:maxContainerSize]
 	copy(out, other)
-	addnum := orValues(out[startIdx:], c.all())
-	setCardinality(out, onum+addnum)
-
-	if runMode&runInline == 0 {
-		return out
-	}
-	if c[indexSize] != maxContainerSize {
-		return out
-	}
-	copy(c, out)
-	return nil
+	setCardinality(out, onum+orValues(out[startIdx:], c.all()))
+	return c.bitmapUnionResult(out, runMode)
 }
 
 func (b bitmap) orArrayAlt(other array, buf []uint16, runMode int) []uint16 {
