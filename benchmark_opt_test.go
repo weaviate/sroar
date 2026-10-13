@@ -2,6 +2,7 @@ package sroar
 
 import (
 	"math/rand"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -720,6 +721,275 @@ func BenchmarkGrownCap(b *testing.B) {
 					}
 					b.ReportMetric(float64(peakSlack)*2, "peak-slack-bytes")
 					b.ReportMetric(float64(copied)*2, "bytes-copied")
+				})
+			}
+		}
+	}
+}
+
+// go test -v -bench BenchmarkOrArrayInPlace -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayInPlace(b *testing.B) {
+	sizes := []struct{ cnum, onum int }{
+		{16, 16}, {16, 512}, {512, 16}, {128, 128}, {512, 512}, {64, 1200}, {1200, 64}, {1200, 1200},
+	}
+	for _, sz := range sizes {
+		for _, overlapPct := range []int{0, 50, 100} {
+			cv, ov := orArrayBenchValues(sz.cnum, sz.onum, overlapPct)
+			src := arrayContainer(int(startIdx)+sz.cnum+sz.onum, cv)
+			other := arrayContainer(int(startIdx)+sz.onum, ov)
+			c := make([]uint16, len(src))
+			buf := make([]uint16, maxContainerSize)
+
+			name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "_overlap" + strconv.Itoa(overlapPct)
+			b.Run(name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					copy(c, src)
+					containerOrAlt(c, other, buf, runInline)
+				}
+			})
+		}
+	}
+}
+
+// orArrayBenchValues returns c's values (even numbers) and other's, which share
+// overlapPct% of the smaller side with c and fill the rest with odd values.
+func orArrayBenchValues(cnum, onum, overlapPct int) (cv, ov []uint16) {
+	cv = uint16Range(0, 2*cnum, 2)
+	shared := min(cnum, onum) * overlapPct / 100
+	ov = uint16Range(1, 2*(onum-shared), 2)
+	for i := 0; i < shared; i++ {
+		ov = append(ov, cv[i*cnum/shared])
+	}
+	slices.Sort(ov)
+	return cv, ov
+}
+
+// BenchmarkOrArrayRoute compares union2by2, stored as orArrayAlt stores it,
+// against orArrayAsBitmap converted back to an array when the union is
+// array-sized. Merging wins whenever the union is array-sized.
+//
+// go test -v -bench BenchmarkOrArrayRoute -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayRoute(b *testing.B) {
+	vals := make([]uint16, maxContainerSize)
+	routes := []struct {
+		name string
+		or   func(c, other array, buf []uint16, runMode int)
+	}{
+		{"merge", func(c, other array, buf []uint16, runMode int) {
+			num := union2by2(c.all(), other.all(), buf[startIdx:])
+			switch {
+			case runMode&runInline != 0 && c.canFitArray(num):
+				copy(c[startIdx:], buf[startIdx:int(startIdx)+num])
+			case !isArrayCard(num):
+				c.orArrayAsBitmap(other, buf, runMode)
+			}
+		}},
+		{"bitmap", func(c, other array, buf []uint16, runMode int) {
+			out := c.orArrayAsBitmap(other, buf, runMode)
+			if out != nil && isArrayCard(getCardinality(out)) {
+				bitmap(out).intoArray(vals)
+			}
+		}},
+	}
+	modes := []struct {
+		name    string
+		runMode int
+	}{{"new", 0}, {"full_slot", runInline}}
+	sizes := []struct{ cnum, onum int }{
+		{256, 256}, {512, 512}, {1024, 1024}, {1536, 1536}, {2044, 2044}, {2044, 256}, {256, 2044},
+	}
+	for _, sz := range sizes {
+		for _, overlapPct := range []int{0, 50, 100} {
+			cv, ov := orArrayBenchValues(sz.cnum, sz.onum, overlapPct)
+			src := arrayContainer((int(startIdx)+sz.cnum+3)/4*4, cv)
+			other := arrayContainer(int(startIdx)+sz.onum, ov)
+			c := make([]uint16, len(src))
+			buf := make([]uint16, maxContainerSize)
+
+			for _, mode := range modes {
+				for _, route := range routes {
+					name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "_overlap" +
+						strconv.Itoa(overlapPct) + "/" + mode.name + "/" + route.name
+					b.Run(name, func(b *testing.B) {
+						for i := 0; i < b.N; i++ {
+							copy(c, src)
+							route.or(c, other, buf, mode.runMode)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkOrArrayShapes times array ∪ array through containerOrAlt on value
+// shapes where unionMayFitArray's bound decides the route and where it does not.
+//
+// go test -v -bench BenchmarkOrArrayShapes -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayShapes(b *testing.B) {
+	shapes := []struct {
+		name   string
+		values func(cnum, onum int) (cv, ov []uint16)
+	}{
+		{"interleaved_disjoint", func(cnum, onum int) ([]uint16, []uint16) {
+			return orArrayBenchValues(cnum, onum, 0)
+		}},
+		{"interleaved_overlap50", func(cnum, onum int) ([]uint16, []uint16) {
+			return orArrayBenchValues(cnum, onum, 50)
+		}},
+		{"other_out_high", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(0, 4*onum, 4)
+		}},
+		{"out_both_ends", func(cnum, onum int) ([]uint16, []uint16) {
+			from := (4*onum - 2*cnum) / 4 * 2
+			from = max(from, 0)
+			return uint16Range(from, from+2*cnum, 2), uint16Range(0, 4*onum, 4)
+		}},
+		{"c_low_other_high", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(cnum/2*2, cnum/2*2+2*onum, 2)
+		}},
+		{"ranges_disjoint", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, 2*cnum, 2), uint16Range(2*cnum, 2*cnum+2*onum, 2)
+		}},
+		{"c_run", func(cnum, onum int) ([]uint16, []uint16) {
+			return uint16Range(0, cnum, 1), uint16Range(cnum/2, cnum/2+2*onum, 2)
+		}},
+	}
+	sizes := []struct{ cnum, onum int }{{1024, 1024}, {1536, 1536}, {2044, 2044}, {2044, 256}}
+	for _, sz := range sizes {
+		for _, shape := range shapes {
+			cv, ov := shape.values(sz.cnum, sz.onum)
+			other := arrayContainer(int(startIdx)+len(ov), ov)
+			buf := make([]uint16, maxContainerSize)
+			for _, mode := range []struct {
+				name    string
+				runMode int
+			}{{"new", 0}, {"full_slot", runInline}} {
+				src := arrayContainer((int(startIdx)+len(cv)+3)/4*4, cv)
+				c := make([]uint16, len(src))
+				name := "c" + strconv.Itoa(sz.cnum) + "_o" + strconv.Itoa(sz.onum) + "/" + shape.name + "/" + mode.name
+				b.Run(name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						copy(c, src)
+						containerOrAlt(c, other, buf, mode.runMode)
+					}
+				})
+			}
+		}
+	}
+}
+
+// BenchmarkBitsIntoArray compares bitsIntoArray, which reads uint64s, against
+// the uint16 loop, on values packed into one run and spread over the container.
+//
+// go test -v -bench BenchmarkBitsIntoArray -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkBitsIntoArray(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(words, out []uint16, baseWord uint16) int
+	}{
+		{"uint16", bitsIntoArray16},
+		{"uint64", bitsIntoArray},
+	}
+	for _, n := range []int{64, 512, 2000, 8000, 30000} {
+		shapes := []struct {
+			name string
+			vals []uint16
+		}{
+			{"clustered", uint16Range(4096, 4096+n, 1)},
+			{"spread", uint16Range(0, maxCardinality, maxCardinality/n)[:n]},
+		}
+		for _, shape := range shapes {
+			words := bitmapWords(shape.vals)
+			out := make([]uint16, n)
+			for _, impl := range impls {
+				b.Run(shape.name+"_"+strconv.Itoa(n)+"/"+impl.name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						impl.fn(words, out, 0)
+					}
+				})
+			}
+		}
+	}
+}
+
+// BenchmarkOrValues compares setting each value against ORing a mask per
+// uint64 word, on values from clustered to spread over the whole container.
+// Steps 21 and 24 put about 3 values in a word, either side of orMaskMinValuesPerWord.
+//
+// go test -v -bench BenchmarkOrValues -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrValues(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(words, vals []uint16) int
+	}{
+		{"each", orValuesEach},
+		{"mask", orValuesByMask},
+		{"chosen", orValues},
+	}
+	for _, c := range []int{256, 1500} {
+		spreadStep := maxCardinality / c
+		for _, step := range []int{1, 8, 16, 21, 24, 32, 48, spreadStep} {
+			if step > spreadStep {
+				continue
+			}
+			shape := "step" + strconv.Itoa(step)
+			switch step {
+			case 1:
+				shape = "clustered"
+			case spreadStep:
+				shape = "spread"
+			}
+			vals := uint16Range(0, c*step, step)
+			for _, n := range []int{64, 512, 2000, 30000} {
+				src := bitmapWords(uint16Range(1, maxCardinality, maxCardinality/n)[:n])
+				words := make([]uint16, len(src))
+				for _, impl := range impls {
+					name := "c" + strconv.Itoa(c) + "_" + shape + "_into" + strconv.Itoa(n) + "/" + impl.name
+					b.Run(name, func(b *testing.B) {
+						for i := 0; i < b.N; i++ {
+							copy(words, src)
+							impl.fn(words, vals)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkOrArrayBitmap times array ∪ bitmap through containerOrAlt with c in
+// a slot that fits the union, in a bitmap-sized slot and not inline.
+//
+// go test -v -bench BenchmarkOrArrayBitmap -benchmem -run ^$ github.com/weaviate/sroar
+func BenchmarkOrArrayBitmap(b *testing.B) {
+	buf := make([]uint16, maxContainerSize)
+	for _, onum := range []int{64, 512, 2000, 30000} {
+		for _, cnum := range []int{256, 1500} {
+			cv, ov := orArrayBenchValues(cnum, onum, 50)
+			other := arrayContainer(int(startIdx)+onum, ov).toBitmapContainer(nil)
+			u := len(sortedUnion(cv, ov))
+			modes := []struct {
+				name    string
+				slot    int
+				runMode int
+			}{
+				{"fit_slot", (int(startIdx) + u + 3) / 4 * 4, runInline},
+				{"bitmap_slot", maxContainerSize, runInline},
+				{"new", (int(startIdx) + cnum + 3) / 4 * 4, 0},
+			}
+			for _, mode := range modes {
+				if mode.name == "fit_slot" && !isArrayCard(u) {
+					continue
+				}
+				src := arrayContainer(mode.slot, cv)
+				c := make([]uint16, len(src))
+				name := "o" + strconv.Itoa(onum) + "_c" + strconv.Itoa(cnum) + "/" + mode.name
+				b.Run(name, func(b *testing.B) {
+					for i := 0; i < b.N; i++ {
+						copy(c, src)
+						containerOrAlt(c, other, buf, mode.runMode)
+					}
 				})
 			}
 		}

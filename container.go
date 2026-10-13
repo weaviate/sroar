@@ -411,6 +411,57 @@ func hasBit(words []uint16, x uint16) bool {
 	return words[x>>4]&bitmapMask(x&0xF) > 0
 }
 
+// wordBit returns value x's bit in its uint64 bitmap word x>>6. bitmapMask
+// reverses each uint16, so x is bit (x^15)&63.
+func wordBit(x uint16) uint64 {
+	return 1 << ((x ^ 15) & 63)
+}
+
+// orMaskMinValuesPerWord is the average number of vals per uint64 word from
+// which orValues ORs one mask per word. Below it, building each word's mask
+// costs more than setting each value. BenchmarkOrValues sweeps it.
+const orMaskMinValuesPerWord = 3
+
+// orValues sets the sorted vals' bits in a bitmap container's words past its
+// header, and returns how many were not set before.
+func orValues(words []uint16, vals []uint16) int {
+	if len(vals) == 0 {
+		return 0
+	}
+	spanWords := int(vals[len(vals)-1]>>6) - int(vals[0]>>6) + 1
+	if len(vals) < orMaskMinValuesPerWord*spanWords {
+		return orValuesEach(words, vals)
+	}
+	return orValuesByMask(words, vals)
+}
+
+func orValuesEach(words []uint16, vals []uint16) int {
+	added := 0
+	for _, x := range vals {
+		if !hasBit(words, x) {
+			setBit(words, x)
+			added++
+		}
+	}
+	return added
+}
+
+// orValuesByMask ORs each uint64 word once, with the bits of all vals in it.
+func orValuesByMask(words []uint16, vals []uint16) int {
+	ws := uint16To64SliceUnsafe(words)
+	added := 0
+	for i := 0; i < len(vals); {
+		w := vals[i] >> 6
+		var mask uint64
+		for ; i < len(vals) && vals[i]>>6 == w; i++ {
+			mask |= wordBit(vals[i])
+		}
+		added += bits.OnesCount64(mask &^ ws[w])
+		ws[w] |= mask
+	}
+	return added
+}
+
 func (b bitmap) add(x uint16) bool {
 	idx := x >> 4
 	mask := bitmapMask(x & 0xF)
@@ -628,6 +679,58 @@ func (b bitmap) intoArray(out []uint16) int {
 // is full, so an out sized below the words' popcount degrades
 // deterministically rather than overrunning.
 func bitsIntoArray(words []uint16, out []uint16, baseWord uint16) int {
+	// Words before the next multiple of 4 from the container start go one at
+	// a time, so the uint64 view of the rest stays 8-byte aligned.
+	head := min(int(-baseWord&3), len(words))
+	tail := head + (len(words)-head)&^3
+	idx := bitsIntoArray16(words[:head], out, baseWord)
+	if head < tail {
+		idx += bitsIntoArray64(words[head:tail], out[idx:], baseWord+uint16(head))
+	}
+	return idx + bitsIntoArray16(words[tail:], out[idx:], baseWord+uint16(tail))
+}
+
+// bitsIntoArray64 is bitsIntoArray over 8-byte aligned words whose length is a
+// multiple of 4, read as uint64s and skipping 8 zero uint64s at a time.
+func bitsIntoArray64(words []uint16, out []uint16, baseWord uint16) int {
+	ws := uint16To64SliceUnsafe(words)
+	idx := 0
+	for g := 0; g < len(ws); g += 8 {
+		grp := ws[g:min(g+8, len(ws))]
+		if len(grp) == 8 && grp[0]|grp[1]|grp[2]|grp[3]|grp[4]|grp[5]|grp[6]|grp[7] == 0 {
+			continue
+		}
+		for j, x := range grp {
+			if x == 0 {
+				continue
+			}
+			w := 4 * (g + j)
+			if idx+bits.OnesCount64(x) > len(out) {
+				return idx + bitsIntoArray16(words[w:w+4], out[idx:], baseWord+uint16(w))
+			}
+			x = reverseEachUint16(x)
+			base := (baseWord + uint16(w)) << 4
+			for x != 0 {
+				out[idx] = base + uint16(bits.TrailingZeros64(x))
+				idx++
+				x &= x - 1
+			}
+		}
+	}
+	return idx
+}
+
+// reverseEachUint16 reverses the bit order within each 16-bit lane of x, so
+// the bitmap word in lane k holds value pos at bit 16*k+pos.
+func reverseEachUint16(x uint64) uint64 {
+	x = bits.Reverse64(x)
+	x = x>>32 | x<<32
+	return (x>>16)&0x0000FFFF0000FFFF | (x&0x0000FFFF0000FFFF)<<16
+}
+
+// bitsIntoArray16 is bitsIntoArray one uint16 word at a time, for the words
+// outside an aligned uint64 and the uint64 that does not fit in out.
+func bitsIntoArray16(words []uint16, out []uint16, baseWord uint16) int {
 	idx := 0
 	for w, word := range words {
 		if word == 0 {
