@@ -774,6 +774,141 @@ func TestOrMergesArraysInPlace(t *testing.T) {
 	})
 }
 
+// Or grows ra once for bm's new keys, then appends their containers in bm's key order.
+func TestOrAppendsNewContainers(t *testing.T) {
+	const aVal, bVal = 1, 2
+	fromKeys := func(val uint64, keys []uint64) *Bitmap {
+		bm := NewBitmap()
+		for _, k := range keys {
+			bm.Set(k<<16 | val)
+		}
+		return bm
+	}
+	seq := func(from, to, step uint64) []uint64 {
+		var keys []uint64
+		for k := from; k < to; k += step {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+	// A node holds at most fullNode keys because setKey grows it when the last slot fills.
+	fullNode := uint64(NewBitmap().keys.maxKeys() - 1)
+
+	tcs := []struct {
+		name         string
+		aKeys, bKeys []uint64
+		emptyBKeys   []uint64
+		bigBKeys     []uint64
+		fullKeyNode  bool
+	}{
+		{name: "tail", aKeys: seq(0, 4, 1), bKeys: seq(4, 10, 1)},
+		{name: "between a's keys", aKeys: seq(0, 12, 2), bKeys: seq(1, 11, 2)},
+		{name: "tail and matching", aKeys: seq(0, 3, 1), bKeys: seq(1, 6, 1)},
+		{name: "between and matching", aKeys: seq(0, 8, 2), bKeys: seq(1, 6, 1)},
+		{name: "between, then a's last key", aKeys: seq(0, 6, 2), bKeys: []uint64{1, 3, 4}},
+		{name: "between, tail and matching with many keys", aKeys: seq(0, 40, 2), bKeys: seq(1, 60, 1)},
+		{
+			name:       "empty containers skipped",
+			aKeys:      seq(0, 8, 2),
+			bKeys:      []uint64{1, 2, 9},
+			emptyBKeys: []uint64{3, 4, 5, 8, 10},
+		},
+		{name: "only empty new containers", aKeys: seq(0, 4, 2), bKeys: []uint64{2}, emptyBKeys: []uint64{1, 5}},
+		{
+			name:     "new containers of different sizes",
+			aKeys:    seq(0, 8, 2),
+			bKeys:    []uint64{1, 2, 3, 9, 10},
+			bigBKeys: []uint64{3, 10},
+		},
+		{
+			name:        "full key node, more new keys than a has",
+			aKeys:       seq(0, fullNode, 1),
+			bKeys:       seq(1, 3*fullNode, 1),
+			fullKeyNode: true,
+		},
+	}
+	for _, tc := range tcs {
+		for name, spare := range map[string]int{"no spare capacity": 0, "spare capacity": 1 << 18} {
+			for _, gallop := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/gallop=%v", tc.name, name, gallop), func(t *testing.T) {
+					src := fromKeys(aVal, tc.aKeys).ToBuffer()
+					newA := func() *Bitmap {
+						buf := make([]byte, len(src)+spare)
+						copy(buf, src)
+						return FromBufferUnlimited(buf[:len(src)])
+					}
+					b := fromKeys(bVal, tc.bKeys)
+					for _, k := range tc.emptyBKeys {
+						b.Set(k<<16 | bVal)
+						b.Remove(k<<16 | bVal)
+					}
+					for _, k := range tc.bigBKeys {
+						for v := uint64(0); v < 5000; v++ {
+							b.Set(k<<16 | v)
+						}
+					}
+
+					want := append(fromKeys(aVal, tc.aKeys).ToArray(), b.ToArray()...)
+					wantKeys := map[uint64]struct{}{}
+					for _, k := range tc.aKeys {
+						wantKeys[k] = struct{}{}
+					}
+					var appended []uint64
+					sizeAppended := 0
+					for _, k := range tc.bKeys {
+						if _, ok := wantKeys[k]; !ok {
+							appended = append(appended, k)
+							wantKeys[k] = struct{}{}
+							off, _ := b.keys.getValue(k << 16)
+							sizeAppended += len(b.getContainer(off))
+						}
+					}
+					slices.Sort(want)
+					want = slices.Compact(want)
+
+					// Matched keys merge inside their slots here, so one expansion is all a needs.
+					expanded := newA()
+					expanded.expandConditionally(len(appended), sizeAppended)
+
+					a := newA()
+					if tc.fullKeyNode {
+						require.Equal(t, a.keys.maxKeys()-1, a.keys.numKeys())
+					}
+					orContainersInRange(a, b, 0, b.keys.numKeys(), gallop)
+
+					require.Equal(t, want, a.ToArray())
+					require.Equal(t, len(wantKeys), a.keys.numKeys())
+					require.Equal(t, cap(expanded.data), cap(a.data))
+
+					end := uint64(len(a.data))
+					for i := len(appended) - 1; i >= 0; i-- {
+						off, ok := a.keys.getValue(appended[i] << 16)
+						require.True(t, ok)
+						end -= uint64(len(a.getContainer(off)))
+						require.Equal(t, end, off)
+					}
+				})
+			}
+		}
+	}
+
+	for _, tc := range tcs[:2] {
+		t.Run(tc.name+"/does not allocate with enough capacity", func(t *testing.T) {
+			src := fromKeys(aVal, tc.aKeys).ToBuffer()
+			pool := make([]byte, len(src)+1<<18)
+			b := fromKeys(bVal, tc.bKeys)
+
+			var a Bitmap
+			allocs := testing.AllocsPerRun(10, func() {
+				copy(pool, src)
+				InitFromBufferUnlimited(&a, pool[:len(src)])
+				a.Or(b)
+			})
+			require.Zero(t, allocs)
+		})
+	}
+}
+
 // checks if all exclusive containers from src bitmap
 // are copied to dst bitmap
 func TestIssue_Or_NotMergeContainers(t *testing.T) {

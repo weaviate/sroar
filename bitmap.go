@@ -450,10 +450,18 @@ func (ra *Bitmap) insertAt(offset uint64, src []uint16) {
 func (ra *Bitmap) getContainer(offset uint64) []uint16 {
 	data := ra.data[offset:]
 	if len(data) == 0 {
-		panic(fmt.Sprintf("No container found at offset: %d\n", offset))
+		panic(noContainerAt(offset))
 	}
 	sz := data[0]
 	return data[:sz]
+}
+
+// noContainerAt formats its message only when printed, because fmt.Sprintf in
+// getContainer's panic puts it over the compiler's inline budget.
+type noContainerAt uint64
+
+func (o noContainerAt) Error() string {
+	return fmt.Sprintf("No container found at offset: %d", uint64(o))
 }
 
 func (ra *Bitmap) Clone() *Bitmap {

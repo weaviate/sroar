@@ -951,6 +951,15 @@ func TestAndNot2(t *testing.T) {
 
 }
 
+// A bad offset still panics with the offset in the message once getContainer is inlined.
+func TestGetContainerPanicNamesOffset(t *testing.T) {
+	bm := NewBitmap()
+	offset := uint64(len(bm.data))
+	require.PanicsWithError(t, fmt.Sprintf("No container found at offset: %d", offset), func() {
+		bm.getContainer(offset)
+	})
+}
+
 func TestOr(t *testing.T) {
 	a := NewBitmap()
 	b := NewBitmap()

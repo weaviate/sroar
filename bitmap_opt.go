@@ -1015,6 +1015,7 @@ func (ra *Bitmap) Or(bm *Bitmap) *Bitmap {
 func orContainersInRange(a, b *Bitmap, bi, bj int, useGallopA bool) {
 	buf := make([]uint16, maxContainerSize)
 
+	first := bi
 	bk := b.keys.key(bi)
 	ai := a.keys.search(bk)
 	an := a.keys.numKeys()
@@ -1023,9 +1024,6 @@ func orContainersInRange(a, b *Bitmap, bi, bj int, useGallopA bool) {
 	// expanding underlying data slice and keys subslice once
 	sizeContainers := 0
 	newKeys := 0
-	initialCap := min(bj-bi, 16)
-	bKeys := make([]uint64, 0, initialCap)
-	bContainers := make([][]uint16, 0, initialCap)
 
 	for ai < an && bi < bj {
 		ak := a.keys.key(ai)
@@ -1066,42 +1064,47 @@ func orContainersInRange(a, b *Bitmap, bi, bj int, useGallopA bool) {
 		} else {
 			off := b.keys.val(bi)
 			if getCardinality(b.data[off:]) > 0 {
-				bc := b.getContainer(off)
-				bKeys = append(bKeys, bk)
-				bContainers = append(bContainers, bc)
-				sizeContainers += len(bc)
+				sizeContainers += len(b.getContainer(off))
 				newKeys++
 			}
 			bi++
 		}
 	}
 
-	if remaining := bj - bi; remaining > 0 {
-		// All remaining b keys are b-only. Pre-extend capacity to avoid
-		// append doubling in the tail loop.
-		bKeys = slices.Grow(bKeys, remaining)
-		bContainers = slices.Grow(bContainers, remaining)
-		for ; bi < bj; bi++ {
-			off := b.keys.val(bi)
-			if getCardinality(b.data[off:]) > 0 {
-				bc := b.getContainer(off)
-				bk := b.keys.key(bi)
-				bKeys = append(bKeys, bk)
-				bContainers = append(bContainers, bc)
-				sizeContainers += len(bc)
-				newKeys++
-			}
+	for ; bi < bj; bi++ {
+		off := b.keys.val(bi)
+		if getCardinality(b.data[off:]) > 0 {
+			sizeContainers += len(b.getContainer(off))
+			newKeys++
 		}
 	}
 
 	if sizeContainers > 0 {
 		a.expandConditionally(newKeys, sizeContainers)
 
-		for i, bc := range bContainers {
-			// create a new container and update the key offset to this container.
-			offset := a.newContainerNoClr(uint16(len(bc)))
-			copy(a.data[offset:], bc)
-			a.setKey(bKeys[i], offset)
+		// keys a already has were merged above, the rest are new
+		ai = a.keys.search(b.keys.key(first))
+		for bi = first; bi < bj; bi++ {
+			bk := b.keys.key(bi)
+			for ai < an && a.keys.key(ai) < bk {
+				if useGallopA {
+					ai = a.keys.searchFrom(ai, bk)
+				} else {
+					ai++
+				}
+			}
+			if ai < an && a.keys.key(ai) == bk {
+				continue
+			}
+			off := b.keys.val(bi)
+			if getCardinality(b.data[off:]) > 0 {
+				bc := b.getContainer(off)
+				// create a new container and update the key offset to this container.
+				offset := a.newContainerNoClr(uint16(len(bc)))
+				copy(a.data[offset:], bc)
+				a.setKey(bk, offset)
+				an++
+			}
 		}
 	}
 }
