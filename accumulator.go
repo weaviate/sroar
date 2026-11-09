@@ -14,7 +14,7 @@ import (
 // N-way unions of near-singleton bitmaps quadratic in the source count. The
 // accumulator makes every deposit O(1) by staging each touched 64K key
 // range in one fixed-size dense block, then assembling the exact-size
-// result once (Bitmap, BitmapToBuf or InitBitmapToBuf).
+// result once (Bitmap or BitmapToBuf).
 //
 // AndNot removes elements the same way — bit-clears into the staged ranges,
 // skipping ranges the accumulator never touched — so Or and AndNot can
@@ -70,12 +70,6 @@ type Accumulator struct {
 	// small doc-ID universe hit very few ranges), so checking it first
 	// skips the binary search on runs of same-range deposits.
 	lastIdx int
-
-	// gen counts every non-nil Or/OrAcc/AndNot/AndNotAcc and Reset call.
-	// Builds compare it across the get callback to catch a get that uses
-	// the accumulator mid-build — the layout snapshot would no longer
-	// match the staged bits.
-	gen uint64
 
 	// maxConc caps the goroutines a single deposit call (Or, OrAcc,
 	// AndNot, AndNotAcc) may fan out to; concCap resolves it. Values <= 1
@@ -231,7 +225,6 @@ func (acc *Accumulator) Or(bm *Bitmap) {
 	if bm == nil {
 		return
 	}
-	acc.gen++
 	n := bm.keys.numKeys()
 	conc := calcConcurrency(n, minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
@@ -294,7 +287,6 @@ func (acc *Accumulator) OrAcc(other *Accumulator) {
 	if other == nil {
 		return
 	}
-	acc.gen++
 	n := len(other.keys)
 	conc := calcConcurrency(n, minContainersPerRoutine, acc.concCap())
 	if conc <= 1 {
@@ -377,7 +369,6 @@ func (acc *Accumulator) AndNot(bm *Bitmap) {
 	if bm == nil {
 		return
 	}
-	acc.gen++
 	an, bn := len(acc.keys), bm.keys.numKeys()
 	if an == 0 || bn == 0 {
 		return
@@ -403,7 +394,6 @@ func (acc *Accumulator) AndNotAcc(other *Accumulator) {
 	if other == nil {
 		return
 	}
-	acc.gen++
 	an, bn := len(acc.keys), len(other.keys)
 	if an == 0 || bn == 0 {
 		return
@@ -585,56 +575,24 @@ func (acc *Accumulator) layout(scratch []blockLayout) (layouts []blockLayout, nu
 func (acc *Accumulator) Bitmap() *Bitmap {
 	var scratch [layoutScratchLen]blockLayout
 	layouts, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
-	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
+	ra := layOutEmptyOnHeap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
 	acc.buildInto(ra, layouts)
 	return ra
 }
 
-// BitmapToBuf assembles the union into a buffer obtained from get — for
-// callers that pool result memory — and returns a bitmap backed by it. get
-// is called exactly once, with the exact required size in bytes, and must
-// not itself use the accumulator (doing so panics). Returning a buffer
-// smaller than the requested size panics — the caller was told exactly how
-// much is needed.
-// The buffer is adopted to its full capacity (rounded down to even), not
-// just its length — a length-limited view of a larger backing array hands
-// the whole backing array to the result. The returned bitmap holds a
-// reference to the buffer, so the buffer must not be reused until the
-// bitmap is released. Mutating the result stays within the buffer's
-// capacity until it needs to grow, at which point it migrates to the heap.
-func (acc *Accumulator) BitmapToBuf(get func(sizeBytes int) []byte) *Bitmap {
-	return acc.bitmapToBuf("Accumulator.BitmapToBuf", wrapGetToBuf(get))
-}
-
-// InitBitmapToBuf is BitmapToBuf for callers that pool the result Bitmap
-// struct together with its buffer: get returns both — typically from one
-// pool entry — and the union is built into them, so a warm accumulator
-// building into pooled memory allocates nothing. The struct must be
-// non-nil; its previous fields are overwritten, never freed — it must not
-// own anything the caller still needs. A buffer smaller than the requested
-// size panics, as in BitmapToBuf.
-func (acc *Accumulator) InitBitmapToBuf(get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
-	return acc.bitmapToBuf("Accumulator.InitBitmapToBuf", get)
-}
-
-// bitmapToBuf is the shared body of the ToBuf builds; name is the exported
-// constructor the caller reached it through, so panics name that one.
-func (acc *Accumulator) bitmapToBuf(name string, get func(sizeBytes int) (*Bitmap, []byte)) *Bitmap {
-	if get == nil {
-		panic(name + ": get is nil")
-	}
+// BitmapToBuf assembles the union into a buffer from pool, on [NewBitmapToBuf]'s
+// terms for dst. pool.Get is called once with the exact size in bytes.
+func (acc *Accumulator) BitmapToBuf(dst *Bitmap, pool BufPool) *Bitmap {
+	const name = "Accumulator.BitmapToBuf"
 	var scratch [layoutScratchLen]blockLayout
 	layouts, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
 	// +1 is the spare slot buildInto relies on.
 	sizeKeys := calcSizeKeys(numKeys + 1)
 	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
 
-	gen := acc.gen
-	dst, buf := get(sizeTotal * 2)
-	if acc.gen != gen {
-		panic(name + ": mutated during build — get must not use the accumulator")
-	}
-	initBitmapToBufExact(name, dst, buf, sizeKeys, sizeContainer0, sizeTotal)
+	buf, release := getBuf(name, pool, sizeTotal*2)
+	dst = ensureDst(dst)
+	layOutSizedInBuf(dst, buf, sizeKeys, sizeContainer0).adoptPool(pool, release)
 	acc.buildInto(dst, layouts)
 	return dst
 }
@@ -692,7 +650,6 @@ const retainedSlotFactor = 3
 // dropped before reuse costs no clear. Reset bounds retained memory only —
 // the peak during a union is whatever its spread demands.
 func (acc *Accumulator) Reset() {
-	acc.gen++
 	// Bound free before refilling it, so the top-up never writes into an array
 	// about to be handed back. Only a lowered WithRetainedBlocks gets here:
 	// free never outgrows n on its own.

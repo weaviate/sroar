@@ -84,11 +84,12 @@ func BenchmarkMaskedToBuf(b *testing.B) {
 		bm, mask := buildMaskedBitmap(tc.numKeys, tc.valsPerKey, tc.numUniqueAfterMask)
 		warm := bm.Masked(mask)
 		buf := make([]byte, len(warm.data)*2+4096)
+		pool := getPool(func(int) []byte { return buf })
 
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				bm.MaskedToBuf(mask, buf)
+				bm.MaskedToBuf(nil, mask, pool)
 			}
 		})
 	}
