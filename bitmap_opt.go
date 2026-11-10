@@ -548,6 +548,56 @@ func (ra *Bitmap) compactedToBuf(name string, dst *Bitmap, pool BufPool, headroo
 	return ra.compactInto(name, dst)
 }
 
+// ZeroedLayoutToBuf is [Bitmap.ZeroedLayout] building into a buffer from pool,
+// on [Bitmap.CompactedToBuf]'s terms, except that ToBuffer() carries the
+// buffer's old bytes past each array's cardinality and in dead space.
+func (ra *Bitmap) ZeroedLayoutToBuf(dst *Bitmap, pool BufPool) *Bitmap {
+	return ra.zeroedLayoutToBuf("ZeroedLayoutToBuf", dst, pool, false)
+}
+
+// ZeroedLayoutToBufWithHeadroom is [Bitmap.ZeroedLayoutToBuf] with the surplus
+// split into key slots and tail room as [Bitmap.CompactedToBufWithHeadroom]
+// splits it, so values at new keys also land without moving a container.
+func (ra *Bitmap) ZeroedLayoutToBufWithHeadroom(dst *Bitmap, pool BufPool) *Bitmap {
+	return ra.zeroedLayoutToBuf("ZeroedLayoutToBufWithHeadroom", dst, pool, true)
+}
+
+func (ra *Bitmap) zeroedLayoutToBuf(name string, dst *Bitmap, pool BufPool, headroom bool) *Bitmap {
+	if ra.LenInBytes() == 0 {
+		return ra.compactedToBuf(name, dst, pool, headroom)
+	}
+	dst, delta := ra.layOutKeysToBuf(name, dst, pool, headroom)
+	writeZeroedContainers(ra, dst.data, delta, true)
+	return dst
+}
+
+// layOutKeysToBuf takes a buffer from pool for ra's layout behind a keys node
+// with one spare slot. It returns dst with ra's keys written, offsets delta right
+// of ra's, and the containers left to the caller. headroom adds key slots.
+func (ra *Bitmap) layOutKeysToBuf(name string, dst *Bitmap, pool BufPool, headroom bool) (*Bitmap, uint64) {
+	if dst == ra {
+		panic(name + ": dst is the source bitmap")
+	}
+	numKeys := ra.keys.numKeys()
+	sizeKeys := calcSizeKeys(numKeys + 1)
+	sizeTotal := len(ra.data) + sizeKeys - ra.keys.size()
+
+	buf, release := getBuf(name, pool, sizeTotal*2)
+	dst = ensureDst(dst)
+	if headroom {
+		// Dead space counts towards the other containers, inflating the estimate.
+		sizeContainer0 := int(ra.data[ra.keys.val(0)+uint64(indexSize)])
+		sizeOtherContainers := len(ra.data) - ra.keys.size() - sizeContainer0
+		extraKeys := extraKeySlots(len(buf)/2-sizeTotal, numKeys, sizeContainer0, sizeOtherContainers)
+		sizeTotal += calcSizeKeys(numKeys+1+extraKeys) - sizeKeys
+		sizeKeys = calcSizeKeys(numKeys + 1 + extraKeys)
+	}
+	data := byteToUint16SliceUnsafe(buf)
+	*dst = Bitmap{data: data[:sizeTotal], keys: uint16To64SliceUnsafe(data[:sizeKeys]), _ptr: buf}
+	dst.adoptPool(pool, release)
+	return dst, writeShiftedKeys(ra, dst.data, sizeKeys)
+}
+
 // extraKeySlots divides surplus uint16s between key slots and the container
 // each new key needs, so neither runs out first, estimating a new container
 // from the layout's own. One slot is the floor, whatever that estimate says.

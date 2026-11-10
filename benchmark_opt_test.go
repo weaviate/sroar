@@ -995,3 +995,129 @@ func BenchmarkOrArrayBitmap(b *testing.B) {
 		}
 	}
 }
+
+// layoutSink keeps each benchmarked result alive, so its Bitmap struct is
+// heap-allocated as a caller's would be rather than left on the stack.
+var layoutSink *Bitmap
+
+// onceBufPool hands out buf for the first Get after each reset and heap memory
+// after, so growth never copies into the buffer it is copying from.
+type onceBufPool struct {
+	buf  []byte
+	used bool
+}
+
+func (p *onceBufPool) Get(minBytes int) ([]byte, func()) {
+	if p.used {
+		return make([]byte, minBytes), nil
+	}
+	p.used = true
+	return p.buf, nil
+}
+
+func (p *onceBufPool) reset() BufPool {
+	p.used = false
+	return p
+}
+
+// BenchmarkZeroedLayout compares the zeroed-layout builds against cloning and
+// zeroing. whole_clear clears all containers at once instead of only bitmap
+// payloads. OR_tail's new keys move every container of the plain result only.
+func BenchmarkZeroedLayout(b *testing.B) {
+	for _, bc := range layoutBenchSources() {
+		src := bc.src
+		dirty := &onceBufPool{buf: dirtyBuf(max(src.LenInBytes(), src.ZeroedLayout().LenInBytes()))}
+		roomy := &onceBufPool{buf: dirtyBuf(src.ZeroedLayout().LenInBytes() * 5 / 4)}
+		tail := tailKeys(src, src.ZeroedLayoutToBufWithHeadroom(nil, roomy.reset()))
+
+		b.Run(bc.name, func(b *testing.B) {
+			b.Run("Clone+ZeroOut", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					bm := src.Clone()
+					bm.ZeroOut()
+					layoutSink = bm
+				}
+			})
+			b.Run("ZeroedLayout", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayout()
+				}
+			})
+			b.Run("CloneToBuf+ZeroOut", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					bm := src.CloneToBuf(nil, dirty.reset())
+					bm.ZeroOut()
+					layoutSink = bm
+				}
+			})
+			b.Run("ZeroedLayoutToBuf", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutToBuf(nil, dirty.reset())
+				}
+			})
+			b.Run("ZeroedLayoutToBuf_whole_clear", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					dst, delta := src.layOutKeysToBuf("", nil, dirty.reset(), false)
+					clear(dst.data[dst.keys.size():])
+					writeZeroedContainers(src, dst.data, delta, false)
+					layoutSink = dst
+				}
+			})
+			b.Run("ZeroedLayoutToBufWithHeadroom", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutToBufWithHeadroom(nil, roomy.reset())
+				}
+			})
+			b.Run("ZeroedLayoutToBuf+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutToBuf(nil, roomy.reset()).Or(tail)
+				}
+			})
+			b.Run("ZeroedLayoutToBufWithHeadroom+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutToBufWithHeadroom(nil, roomy.reset()).Or(tail)
+				}
+			})
+		})
+	}
+}
+
+func layoutBenchSources() []struct {
+	name string
+	src  *Bitmap
+} {
+	mixed := fillKeys(1000, 100)
+	for k := 0; k < 1000; k += 4 {
+		for i := 0; i < 5000; i++ {
+			mixed.Set(uint64(k)<<16 | uint64(i))
+		}
+	}
+	return []struct {
+		name string
+		src  *Bitmap
+	}{
+		{"arrays_1k", fillKeys(1000, 100)},
+		{"bitmaps_100", fillKeys(100, 5000)},
+		{"mixed_1k", mixed},
+	}
+}
+
+// tailKeys returns one value at each key past src's last that withHeadroom's
+// spare key slots hold, leaving the one spare slot every bitmap keeps.
+func tailKeys(src, withHeadroom *Bitmap) *Bitmap {
+	tail := NewBitmap()
+	numKeys := src.keys.numKeys()
+	lastKey := src.keys.key(numKeys - 1)
+	for k := 1; k < withHeadroom.keys.maxKeys()-numKeys; k++ {
+		tail.Set(lastKey + uint64(k)<<16)
+	}
+	return tail
+}
