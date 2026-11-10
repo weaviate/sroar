@@ -527,6 +527,53 @@ func (ra *Bitmap) Clone() *Bitmap {
 	return FromBufferWithCopy(ra.ToBuffer())
 }
 
+// ZeroedLayout returns an empty bitmap with ra's keys, container sizes and
+// types, laid out as ra's. [Bitmap.Or]-ing a subset of ra into it never grows
+// it, but a key ra lacks moves every container.
+func (ra *Bitmap) ZeroedLayout() *Bitmap {
+	if ra.LenInBytes() == 0 {
+		return NewBitmap()
+	}
+	sizeKeys := calcSizeKeys(ra.keys.numKeys() + 1)
+	data := make([]uint16, len(ra.data)+sizeKeys-ra.keys.size())
+	delta := writeShiftedKeys(ra, data, sizeKeys)
+	writeZeroedContainers(ra, data, delta, false)
+	return &Bitmap{data: data, keys: uint16To64SliceUnsafe(data[:sizeKeys])}
+}
+
+// writeShiftedKeys writes src's keys into a keys node of sizeKeys at the start
+// of data, clearing its spare slots, and returns how far that moves src's
+// containers. It may be negative, which wraps in uint64 and still adds.
+func writeShiftedKeys(src *Bitmap, data []uint16, sizeKeys int) (delta uint64) {
+	numKeys := src.keys.numKeys()
+	keys := node(uint16To64SliceUnsafe(data[:sizeKeys]))
+	keys.setNodeSize(sizeKeys)
+	keys.setNumKeys(numKeys)
+	delta = uint64(sizeKeys - src.keys.size())
+	srcPairs, pairs := src.keys[keyOffset(0):keyOffset(numKeys)], keys[keyOffset(0):keyOffset(numKeys)]
+	for i := 0; i+1 < len(pairs); i += 2 {
+		pairs[i], pairs[i+1] = srcPairs[i], srcPairs[i+1]+delta
+	}
+	clear(keys[keyOffset(numKeys):])
+	return delta
+}
+
+// writeZeroedContainers writes an empty header for each of src's containers
+// into data, delta right of src's. clearBitmaps also clears bitmap payloads, for
+// data holding old values. An array's payload is never read past its cardinality.
+func writeZeroedContainers(src *Bitmap, data []uint16, delta uint64, clearBitmaps bool) {
+	for i, n := 0, src.keys.numKeys(); i < n; i++ {
+		off := src.keys.val(i)
+		size, typ := src.data[off+uint64(indexSize)], src.data[off+uint64(indexType)]
+		c := data[off+delta : off+delta+uint64(size)]
+		c[indexSize], c[indexType] = size, typ
+		c[indexCardinality], c[indexCardinality+1] = 0, 0
+		if clearBitmaps && typ == typeBitmap {
+			clear(c[startIdx:])
+		}
+	}
+}
+
 func (ra *Bitmap) IsEmpty() bool {
 	if ra == nil {
 		return true
