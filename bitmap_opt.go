@@ -1207,13 +1207,14 @@ func concurrentlyInRanges(numContainers, concurrency int, callback func(from, to
 }
 
 func (ra *Bitmap) ConvertToBitmapContainers() {
+	var scratch [maxContainerSize]uint16
 	for ai, an := 0, ra.keys.numKeys(); ai < an; ai++ {
 		ak := ra.keys.key(ai)
 		off := ra.keys.val(ai)
 		ac := ra.getContainer(off)
 
 		if ac[indexType] == typeArray {
-			c := array(ac).toBitmapContainer(nil)
+			c := array(ac).toBitmapContainer(scratch[:])
 			offset := ra.newContainer(uint16(len(c)))
 			copy(ra.data[offset:], c)
 			ra.setKey(ak, offset)

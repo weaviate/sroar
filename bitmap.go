@@ -406,11 +406,17 @@ func (ra *Bitmap) expandContainer(offset uint64) {
 		ra.data[offset] = sz + bySize
 
 	} else {
-		// Convert to bitmap container.
-		src := array(ra.getContainer(offset))
-		buf := src.toBitmapContainer(nil)
-		assert(copy(ra.data[offset:], buf) == maxContainerSize)
+		ra.convertToBitmapContainer(offset)
 	}
+}
+
+// convertToBitmapContainer rewrites the array container at offset, whose room
+// is already maxContainerSize, as a bitmap container. The array is read from the
+// memory the bitmap is written to, so it is built in a stack scratch first.
+func (ra *Bitmap) convertToBitmapContainer(offset uint64) {
+	var scratch [maxContainerSize]uint16
+	buf := array(ra.getContainer(offset)).toBitmapContainer(scratch[:])
+	assert(copy(ra.data[offset:], buf) == maxContainerSize)
 }
 
 // stepSize is used for container expansion. For a container of given size n,

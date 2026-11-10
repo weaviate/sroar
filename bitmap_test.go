@@ -1807,3 +1807,33 @@ func TestAndNotOldKeepsOversizedArrayContainer(t *testing.T) {
 
 	require.Equal(t, want, FromBuffer(a.ToBuffer()).ToArray())
 }
+
+// TestArrayToBitmapConversionAllocatesNothing pins the array-to-bitmap container
+// conversion to a stack scratch, in a bitmap with room to convert in place.
+func TestArrayToBitmapConversionAllocatesNothing(t *testing.T) {
+	bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, 0, 64<<10)))
+	tests := []struct {
+		name string
+		run  func()
+	}{
+		{"Set past the array limit", func() {
+			for i := uint64(0); i < 2100; i++ {
+				bm.Set(i * 3)
+			}
+		}},
+		{"ConvertToBitmapContainers", func() {
+			bm.Set(1)
+			bm.ConvertToBitmapContainers()
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(20, func() {
+				bm.Reset()
+				tc.run()
+			})
+			require.Zero(t, allocs)
+			require.Greater(t, bm.GetCardinality(), 0)
+		})
+	}
+}
