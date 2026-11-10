@@ -508,16 +508,16 @@ func BenchmarkFromSortedList(b *testing.B) {
 		return vals
 	}
 
-	// newGetBuf hands each sub-benchmark its own buffer, grown once and
-	// reused across iterations so the build is measured, not the allocation.
-	newGetBuf := func() func(sizeBytes int) []byte {
+	// newPool hands each sub-benchmark its own buffer, grown once and reused
+	// across iterations so the build is measured, not the allocation.
+	newPool := func() BufPool {
 		var buf []byte
-		return func(sizeBytes int) []byte {
+		return getPool(func(sizeBytes int) []byte {
 			if cap(buf) < sizeBytes {
 				buf = make([]byte, sizeBytes)
 			}
 			return buf[:sizeBytes]
-		}
+		})
 	}
 
 	for _, bc := range []struct {
@@ -545,11 +545,11 @@ func BenchmarkFromSortedList(b *testing.B) {
 			}
 		})
 		b.Run(bc.name+"/ToBuf", func(b *testing.B) {
-			getBuf := newGetBuf()
+			pool := newPool()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				FromSortedListToBuf(bc.vals, getBuf)
+				FromSortedListToBuf(nil, bc.vals, pool)
 			}
 		})
 
@@ -563,11 +563,11 @@ func BenchmarkFromSortedList(b *testing.B) {
 			}
 		})
 		b.Run(bc.name+"/32/ToBuf", func(b *testing.B) {
-			getBuf := newGetBuf()
+			pool := newPool()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				FromSortedList32ToBuf(vals32, getBuf)
+				FromSortedList32ToBuf(nil, vals32, pool)
 			}
 		})
 	}

@@ -566,13 +566,13 @@ func TestAccumulatorAndNotSerializationRoundTrip(t *testing.T) {
 	acc.AndNot(bitmapOf(0, 1, 2, 1<<40))
 	want := []uint64{1 << 20, 1<<20 | 1}
 
-	serialized := acc.BitmapToBuf(func(n int) []byte {
+	serialized := acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 		buf := make([]byte, n)
 		for i := range buf {
 			buf[i] = 0xFF
 		}
 		return buf
-	}).ToBufferWithCopy()
+	})).ToBufferWithCopy()
 	require.Equal(t, want, FromBuffer(serialized).ToArray())
 }
 
@@ -1239,10 +1239,10 @@ func TestAccumulatorBuildIntoClearsOutsideWindow(t *testing.T) {
 		dirty[i] = 0xEE
 	}
 	var dst Bitmap
-	got := acc.InitBitmapToBuf(func(n int) (*Bitmap, []byte) {
+	got := acc.BitmapToBuf(&dst, getPool(func(n int) []byte {
 		require.LessOrEqual(t, n, len(dirty))
-		return &dst, dirty[:n]
-	})
+		return dirty[:n]
+	}))
 
 	off, ok := got.keys.getValue(base)
 	require.True(t, ok)
@@ -1279,23 +1279,16 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 	t.Run("dirty pooled buffer", func(t *testing.T) {
 		acc := build()
 		var buf []byte
-		got := acc.BitmapToBuf(func(n int) []byte {
+		got := acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 			buf = make([]byte, n)
 			for i := range buf {
 				buf[i] = 0xFF // pooled buffers arrive dirty
 			}
 			return buf
-		})
+		}))
 		require.Equal(t, want, got.ToArray())
 		// The result must actually live in the obtained buffer, not on the heap.
 		require.Equal(t, &buf[0], &got._ptr[0])
-	})
-
-	t.Run("too small panics", func(t *testing.T) {
-		acc := build()
-		require.Panics(t, func() {
-			acc.BitmapToBuf(func(int) []byte { return make([]byte, 16) })
-		})
 	})
 
 	t.Run("one uint16 short panics leaving the buffer untouched", func(t *testing.T) {
@@ -1305,10 +1298,10 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		acc := build()
 		var buf []byte
 		require.Panics(t, func() {
-			acc.BitmapToBuf(func(n int) []byte {
+			acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 				buf = make([]byte, n-2)
 				return buf
-			})
+			}))
 		})
 		require.Equal(t, make([]byte, len(buf)), buf)
 	})
@@ -1316,10 +1309,10 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 	t.Run("Or between builds is reflected", func(t *testing.T) {
 		acc := build()
 		var size, sizeGrown int
-		acc.BitmapToBuf(func(n int) []byte { size = n; return make([]byte, n) })
+		acc.BitmapToBuf(nil, getPool(func(n int) []byte { size = n; return make([]byte, n) }))
 		// Force a new range into existence: the requested size must grow.
 		acc.Or(bitmapOf(1 << 40))
-		got := acc.BitmapToBuf(func(n int) []byte { sizeGrown = n; return make([]byte, n) })
+		got := acc.BitmapToBuf(nil, getPool(func(n int) []byte { sizeGrown = n; return make([]byte, n) }))
 		require.Greater(t, sizeGrown, size)
 		require.Equal(t, append(append([]uint64{}, want...), 1<<40), got.ToArray())
 	})
@@ -1330,7 +1323,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		// serialized result smaller than the buffer it was built into.
 		acc := build()
 		var size int
-		got := acc.BitmapToBuf(func(n int) []byte { size = n; return make([]byte, n) })
+		got := acc.BitmapToBuf(nil, getPool(func(n int) []byte { size = n; return make([]byte, n) }))
 		require.Len(t, got.ToBuffer(), size)
 		require.Len(t, acc.Bitmap().ToBuffer(), size)
 	})
@@ -1344,7 +1337,7 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 			acc.Or(bitmapOf(uint64(i) << 16))
 		}
 		var size int
-		got := acc.BitmapToBuf(func(n int) []byte { size = n; return make([]byte, n) })
+		got := acc.BitmapToBuf(nil, getPool(func(n int) []byte { size = n; return make([]byte, n) }))
 		require.Len(t, got.ToBuffer(), size)
 		require.Len(t, acc.Bitmap().ToBuffer(), size)
 	})
@@ -1355,13 +1348,13 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 		// of the buffer's prior contents.
 		serialize := func(fill byte) []byte {
 			acc := build()
-			return acc.BitmapToBuf(func(n int) []byte {
+			return acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 				buf := make([]byte, n)
 				for i := range buf {
 					buf[i] = fill
 				}
 				return buf
-			}).ToBufferWithCopy()
+			})).ToBufferWithCopy()
 		}
 		require.Equal(t, serialize(0x00), serialize(0xFF))
 	})
@@ -1375,13 +1368,13 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 			for i := 1; i <= 40; i++ {
 				acc.Or(bitmapOf(uint64(i)<<16 | uint64(i)))
 			}
-			return acc.BitmapToBuf(func(n int) []byte {
+			return acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 				buf := make([]byte, n)
 				for i := range buf {
 					buf[i] = fill
 				}
 				return buf
-			}).ToBufferWithCopy()
+			})).ToBufferWithCopy()
 		}
 		require.Equal(t, serialize(0x00), serialize(0xFF))
 	})
@@ -1389,123 +1382,35 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 	t.Run("odd-capacity buffer", func(t *testing.T) {
 		acc := build()
 		var buf []byte
-		got := acc.BitmapToBuf(func(n int) []byte {
+		got := acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 			buf = make([]byte, n, n+1) // odd spare byte the bitmap cannot use
 			return buf
-		})
+		}))
 		require.Equal(t, want, got.ToArray())
 		require.Equal(t, &buf[0], &got._ptr[0])
-	})
-
-	t.Run("nil buffer panics", func(t *testing.T) {
-		acc := build()
-		require.Panics(t, func() {
-			acc.BitmapToBuf(func(int) []byte { return nil })
-		})
 	})
 
 	// Misuse names the constructor the caller reached, not the shared body
 	// both of them delegate to.
 	t.Run("panics name the calling constructor", func(t *testing.T) {
-		require.PanicsWithValue(t, "Accumulator.BitmapToBuf: get is nil",
-			func() { build().BitmapToBuf(nil) })
-		require.PanicsWithValue(t, "Accumulator.InitBitmapToBuf: get is nil",
-			func() { build().InitBitmapToBuf(nil) })
-
 		acc := build()
 		need := len(acc.Bitmap().ToBuffer())
 		require.PanicsWithValue(t,
 			fmt.Sprintf("Accumulator.BitmapToBuf: buf too small: need %d bytes, got 4", need),
 			func() {
-				build().BitmapToBuf(func(int) []byte { return make([]byte, 4) })
+				build().BitmapToBuf(nil, getPool(func(int) []byte { return make([]byte, 4) }))
 			})
-		require.PanicsWithValue(t,
-			fmt.Sprintf("Accumulator.InitBitmapToBuf: buf too small: need %d bytes, got 4", need),
-			func() {
-				build().InitBitmapToBuf(func(int) (*Bitmap, []byte) {
-					return &Bitmap{}, make([]byte, 4)
-				})
-			})
-	})
-
-	t.Run("get using the accumulator panics", func(t *testing.T) {
-		// A deposit inside get would desync the staged bits from the layout
-		// snapshot the build was sized with, silently corrupting the result.
-		acc := NewAccumulator()
-		acc.Or(bitmapOf(100, 200, 300))
-		require.PanicsWithValue(t,
-			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
-			func() {
-				acc.BitmapToBuf(func(n int) []byte {
-					acc.Or(bitmapOf(1, 2, 3))
-					return make([]byte, n)
-				})
-			})
-	})
-
-	t.Run("get subtracting from the accumulator panics", func(t *testing.T) {
-		acc := NewAccumulator()
-		acc.Or(bitmapOf(100, 200, 300))
-		require.PanicsWithValue(t,
-			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
-			func() {
-				acc.BitmapToBuf(func(n int) []byte {
-					acc.AndNot(bitmapOf(100))
-					return make([]byte, n)
-				})
-			})
-	})
-
-	t.Run("get merging an accumulator panics", func(t *testing.T) {
-		other := NewAccumulator()
-		other.Or(bitmapOf(1))
-		acc := NewAccumulator()
-		acc.Or(bitmapOf(100, 200, 300))
-		require.PanicsWithValue(t,
-			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
-			func() {
-				acc.BitmapToBuf(func(n int) []byte {
-					acc.OrAcc(other)
-					return make([]byte, n)
-				})
-			})
-	})
-
-	t.Run("get subtracting an accumulator panics", func(t *testing.T) {
-		other := NewAccumulator()
-		other.Or(bitmapOf(100))
-		acc := NewAccumulator()
-		acc.Or(bitmapOf(100, 200, 300))
-		require.PanicsWithValue(t,
-			"Accumulator.BitmapToBuf: mutated during build — get must not use the accumulator",
-			func() {
-				acc.BitmapToBuf(func(n int) []byte {
-					acc.AndNotAcc(other)
-					return make([]byte, n)
-				})
-			})
-	})
-
-	t.Run("get resetting the accumulator panics", func(t *testing.T) {
-		acc := NewAccumulator()
-		acc.Or(bitmapOf(100, 200, 300))
-		require.Panics(t, func() {
-			acc.BitmapToBuf(func(n int) []byte {
-				acc.Reset()
-				return make([]byte, n)
-			})
-		})
 	})
 
 	t.Run("ToBuffer FromBuffer round-trip", func(t *testing.T) {
 		acc := build()
-		serialized := acc.BitmapToBuf(func(n int) []byte {
+		serialized := acc.BitmapToBuf(nil, getPool(func(n int) []byte {
 			buf := make([]byte, n)
 			for i := range buf {
 				buf[i] = 0xFF
 			}
 			return buf
-		}).ToBufferWithCopy()
+		})).ToBufferWithCopy()
 		require.Equal(t, want, FromBuffer(serialized).ToArray())
 	})
 
@@ -1518,14 +1423,14 @@ func TestAccumulatorBitmapToBuf(t *testing.T) {
 			}
 			return buf[:n]
 		}
-		require.Equal(t, want, acc.BitmapToBuf(grab).ToArray())
+		require.Equal(t, want, acc.BitmapToBuf(nil, getPool(grab)).ToArray())
 		acc.Reset()
 		acc.Or(bitmapOf(7, 8, 9))
-		require.Equal(t, []uint64{7, 8, 9}, acc.BitmapToBuf(grab).ToArray())
+		require.Equal(t, []uint64{7, 8, 9}, acc.BitmapToBuf(nil, getPool(grab)).ToArray())
 	})
 }
 
-func TestAccumulatorInitBitmapToBuf(t *testing.T) {
+func TestAccumulatorBitmapToBufPooledStruct(t *testing.T) {
 	a := bitmapOf(1, 2, 3, 100_000)
 	b := bitmapOf(42, 1<<40)
 
@@ -1534,59 +1439,24 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 		// must be reused on every build.
 		var bm Bitmap
 		buf := make([]byte, 4096)
-		get := func(n int) (*Bitmap, []byte) {
+		pool := getPool(func(n int) []byte {
 			require.LessOrEqual(t, n, len(buf))
-			return &bm, buf
-		}
+			return buf
+		})
 
 		acc := NewAccumulator()
 		acc.Or(a)
-		got := acc.InitBitmapToBuf(get)
+		got := acc.BitmapToBuf(&bm, pool)
 		require.Same(t, &bm, got)
 		require.Equal(t, a.ToArray(), got.ToArray())
 		require.Equal(t, &buf[0], &got._ptr[0])
 
 		acc.Reset()
 		acc.Or(b)
-		got = acc.InitBitmapToBuf(get)
+		got = acc.BitmapToBuf(&bm, pool)
 		require.Same(t, &bm, got)
 		require.Equal(t, b.ToArray(), got.ToArray())
 		require.Equal(t, &buf[0], &got._ptr[0])
-	})
-
-	t.Run("too small panics", func(t *testing.T) {
-		var bm Bitmap
-		acc := NewAccumulator()
-		acc.Or(a)
-		require.Panics(t, func() {
-			acc.InitBitmapToBuf(func(int) (*Bitmap, []byte) {
-				return &bm, make([]byte, 16)
-			})
-		})
-	})
-
-	t.Run("dirty buffer serializes deterministically at exact size", func(t *testing.T) {
-		// Same guarantees the BitmapToBuf subtests assert, routed directly
-		// through the Init path: byte-deterministic serialization filling
-		// the buffer exactly. The union holds array containers, so padding
-		// tails are exercised.
-		var size int
-		serialize := func(fill byte) []byte {
-			var bm Bitmap
-			acc := NewAccumulator()
-			acc.Or(a)
-			return acc.InitBitmapToBuf(func(n int) (*Bitmap, []byte) {
-				size = n
-				buf := make([]byte, n)
-				for i := range buf {
-					buf[i] = fill
-				}
-				return &bm, buf
-			}).ToBufferWithCopy()
-		}
-		s0, s1 := serialize(0x00), serialize(0xFF)
-		require.Equal(t, s0, s1)
-		require.Len(t, s0, size)
 	})
 
 	t.Run("warm accumulator with pooled memory allocates nothing", func(t *testing.T) {
@@ -1596,7 +1466,7 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 		other.Or(bitmapOf(5))
 		var bm Bitmap
 		buf := make([]byte, 4096)
-		get := func(int) (*Bitmap, []byte) { return &bm, buf }
+		pool := getPool(func(int) []byte { return buf })
 
 		// Reuse is opt-in: retention must be configured for a warm pooled
 		// accumulator to allocate nothing across Reset.
@@ -1609,7 +1479,7 @@ func TestAccumulatorInitBitmapToBuf(t *testing.T) {
 			acc.AndNot(sub)
 			acc.OrAcc(other)
 			acc.AndNotAcc(other)
-			acc.InitBitmapToBuf(get)
+			acc.BitmapToBuf(&bm, pool)
 		})
 		require.Zero(t, allocs)
 	})

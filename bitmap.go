@@ -28,26 +28,51 @@ import (
 
 const mask = uint64(0xFFFFFFFFFFFF0000)
 
+// BufPool provides the buffers a pool-backed bitmap lives in, both the one a
+// ToBuf constructor builds into and each one the bitmap grows into.
+// Implementations must be safe for concurrent use.
+//
+// Get returns a buffer of at least minBytes capacity and the func that frees
+// it, which may be nil. The buffer may be dirty, and its whole capacity is used.
+// A smaller capacity panics, naming the ToBuf method that asked, or BufPool.Get
+// during growth.
+type BufPool interface {
+	Get(minBytes int) (buf []byte, release func())
+}
+
 type Bitmap struct {
 	data []uint16
 	keys node
 
-	// This _ptr is only used when we start with a []byte instead of a
-	// []uint16. Because we do an unsafe conversion to []uint16 data, and hence,
-	// do NOT own a valid pointer to the underlying array.
+	// This _ptr is set when we start with a []byte instead of a []uint16, or grow
+	// into one through pool. Because we do an unsafe conversion to []uint16 data,
+	// and hence, do NOT own a valid pointer to the underlying array.
 	_ptr []byte
 
 	// memMoved keeps track of how many uint16 moves we had to do. The smaller
 	// this number, the more efficient we have been.
 	memMoved int
+
+	// pool is what expandConditionally and expandNoLengthChange grow through
+	// instead of the heap.
+	pool BufPool
+	// releaseBuf frees ra's pool buffer. FillUp can move ra to the heap while that
+	// buffer stays held.
+	releaseBuf func()
 }
 
 // FromBuffer returns a pointer to bitmap corresponding to the given buffer. This bitmap shouldn't
 // be modified because it might corrupt the given buffer.
 func FromBuffer(data []byte) *Bitmap {
 	// Capping capacity at length keeps the bitmap from using bytes past
-	// len(data) — the only difference from FromBufferUnlimited.
-	return InitFromBufferUnlimited(&Bitmap{}, data[:len(data):len(data)])
+	// len(data).
+	return pointAtSerialized(&Bitmap{}, data[:len(data):len(data)])
+}
+
+// FromBufferWithCap is FromBuffer, except that growth uses buf's spare capacity
+// before moving to the heap.
+func FromBufferWithCap(buf []byte) *Bitmap {
+	return pointAtSerialized(&Bitmap{}, buf)
 }
 
 // FromBufferWithCopy creates a copy of the given buffer and returns a bitmap based on the copied
@@ -58,6 +83,8 @@ func FromBufferWithCopy(src []byte) *Bitmap {
 	return FromBuffer(buf)
 }
 
+// ToBuffer returns a view of the bitmap's memory, which growth through a pool or
+// ReleaseBuf frees.
 func (ra *Bitmap) ToBuffer() []byte {
 	if ra.IsEmpty() {
 		return nil
@@ -79,51 +106,92 @@ func NewBitmap() *Bitmap {
 }
 
 func NewBitmapWith(numKeys int) *Bitmap {
-	return initBitmapWithCap(&Bitmap{}, numKeys, minContainerSize, 0)
+	return layOutEmptyOnHeap(&Bitmap{}, numKeys, minContainerSize, 0)
 }
 
-// NewBitmapToBuf creates a new bitmap using the provided byte slice as the
-// underlying data buffer. If the buffer is too small to hold the initial
-// bitmap structure, a heap-allocated bitmap is returned instead. The _ptr
-// field is set to keep a GC reference to buf, since the bitmap operates on an
-// unsafe []uint16 view of the same memory.
-func NewBitmapToBuf(buf []byte) *Bitmap {
-	return initBitmapToBuf(&Bitmap{}, buf)
-}
-
-// initBitmapToBuf is the in-place body of NewBitmapToBuf; returns dst.
-func initBitmapToBuf(dst *Bitmap, buf []byte) *Bitmap {
-	// Use full capacity, rounded down to an even number of bytes since
-	// the bitmap operates on []uint16 (2 bytes per element).
-	buf = buf[:cap(buf)/2*2]
-
-	sizeKeys := calcSizeKeys(2)
-	if minLen := (sizeKeys + minContainerSize) * 2; minLen > len(buf) {
-		return initBitmapWithCap(dst, 2, minContainerSize, 0)
+// ReleaseBuf frees the bitmap's pool buffer, after which the bitmap must not be
+// used. It does nothing on a nil, heap or FromBuffer bitmap, or a second time.
+func (ra *Bitmap) ReleaseBuf() {
+	if ra == nil || ra.releaseBuf == nil {
+		return
 	}
+	release := ra.releaseBuf
+	ra.releaseBuf = nil
+	release()
+}
 
+// NewBitmapToBuf creates an empty bitmap in a buffer from pool, and in dst if it
+// is not nil, overwriting dst's fields without releasing them. Growth uses dst
+// after releasing the outgrown buffer, so no release func may free or reuse dst.
+func NewBitmapToBuf(dst *Bitmap, pool BufPool) *Bitmap {
+	return newBitmapToBuf("NewBitmapToBuf", dst, pool, 0)
+}
+
+// emptyBitmapBytes is the size of a bitmap with no values.
+var emptyBitmapBytes = (calcSizeKeys(2) + minContainerSize) * 2
+
+// newBitmapToBuf is NewBitmapToBuf reporting panics under name, the exported
+// method called, with room for extraBytes past the empty layout.
+func newBitmapToBuf(name string, dst *Bitmap, pool BufPool, extraBytes int) *Bitmap {
+	buf, release := getBuf(name, pool, emptyBitmapBytes+extraBytes)
+	dst = ensureDst(dst)
+	return layOutEmptyInBuf(dst, buf).adoptPool(pool, release)
+}
+
+// getBuf takes a buffer from pool at full capacity, rounded down to an even
+// number of bytes since the bitmap operates on []uint16. name is the exported
+// method reported on panic.
+func getBuf(name string, pool BufPool, minBytes int) ([]byte, func()) {
+	if pool == nil {
+		panic(name + ": pool is nil")
+	}
+	buf, release := pool.Get(minBytes)
+	if cap(buf) < minBytes {
+		panic(fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, minBytes, cap(buf)))
+	}
+	return buf[:cap(buf)/2*2], release
+}
+
+// ensureDst returns dst, or a new struct for a ToBuf result when dst is nil.
+func ensureDst(dst *Bitmap) *Bitmap {
+	if dst == nil {
+		return &Bitmap{}
+	}
+	return dst
+}
+
+// adoptPool makes ra grow through pool and ReleaseBuf run release.
+func (ra *Bitmap) adoptPool(pool BufPool, release func()) *Bitmap {
+	ra.pool = pool
+	ra.releaseBuf = release
+	return ra
+}
+
+// layOutEmptyInBuf clears buf, which holds at least emptyBitmapBytes, and lays
+// out a ready-to-use empty bitmap over it. Returns dst.
+func layOutEmptyInBuf(dst *Bitmap, buf []byte) *Bitmap {
+	sizeKeys := calcSizeKeys(2)
 	bufU16 := byteToUint16SliceUnsafe(buf)
 	clear(bufU16)
-	initBitmapCore(dst, sizeKeys, minContainerSize, bufU16)
+	layOutEmpty(dst, sizeKeys, minContainerSize, bufU16)
 	dst._ptr = buf
 	return dst
 }
 
-// initBitmapWithCap initializes dst over freshly allocated memory sized for
-// numKeys keys plus additionalCapacity; the heap fallback of the buffer-based
-// initializers. Returns dst.
-func initBitmapWithCap(dst *Bitmap, numKeys, sizeContainer0, additionalCapacity int) *Bitmap {
+// layOutEmptyOnHeap lays out an empty bitmap in new heap memory with room for
+// numKeys keys and extraU16 more uint16s. Returns dst.
+func layOutEmptyOnHeap(dst *Bitmap, numKeys, sizeContainer0, extraU16 int) *Bitmap {
 	if numKeys < 2 {
 		panic("Must contain at least two keys.")
 	}
 	sizeKeys := calcSizeKeys(numKeys)
-	buf := make([]uint16, sizeKeys+sizeContainer0+additionalCapacity)
-	return initBitmapCore(dst, sizeKeys, sizeContainer0, buf)
+	buf := make([]uint16, sizeKeys+sizeContainer0+extraU16)
+	return layOutEmpty(dst, sizeKeys, sizeContainer0, buf)
 }
 
-// initBitmapCore lays out an empty bitmap — keys node plus the mandatory
-// key-0 container — over buf; every initializer funnels here. Returns dst.
-func initBitmapCore(dst *Bitmap, sizeKeys, sizeContainer0 int, buf []uint16) *Bitmap {
+// layOutEmpty writes an empty bitmap, the keys node and the mandatory key-0
+// container, into buf without clearing it or setting _ptr. Returns dst.
+func layOutEmpty(dst *Bitmap, sizeKeys, sizeContainer0 int, buf []uint16) *Bitmap {
 	*dst = Bitmap{data: buf[:sizeKeys]}
 	dst.keys = uint16To64SliceUnsafe(dst.data)
 	dst.keys.setNodeSize(sizeKeys)
@@ -147,42 +215,15 @@ func calcSizeKeys(numKeys int) int {
 	return keySlotU16 * (numKeys + 1)
 }
 
-// initBitmapToBufExact lays an empty bitmap for the given layout over a
-// caller-supplied buffer and returns dst backed by it. The buffer is
-// adopted at its full capacity, rounded down to an even number of bytes
-// since the bitmap operates on []uint16; a buffer smaller than sizeTotal panics
-// with the caller's name. The keys node is cleared so a dirty pooled
-// buffer cannot leak into the serialized form — every other exposed byte
-// is written by the container build. Shared by the exact-size ToBuf builds
-// (FromSortedList, Accumulator).
-func initBitmapToBufExact(name string, dst *Bitmap, buf []byte, sizeKeys, sizeContainer0, sizeTotal int) *Bitmap {
-	if dst == nil {
-		panic(name + ": get returned a nil *Bitmap")
-	}
-	buf = buf[:cap(buf)/2*2]
-	if len(buf)/2 < sizeTotal {
-		// Report cap: it matches what the caller passed, and with sizeTotal*2
-		// always even the rounded-down len could only confuse.
-		panic(fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, sizeTotal*2, cap(buf)))
-	}
+// layOutSizedInBuf lays out an empty bitmap with the given sizes over buf for a
+// build to fill. Only the keys node is cleared, so the build must write every
+// other byte it exposes. Returns dst.
+func layOutSizedInBuf(dst *Bitmap, buf []byte, sizeKeys, sizeContainer0 int) *Bitmap {
 	bufU16 := byteToUint16SliceUnsafe(buf)
 	clear(bufU16[:sizeKeys])
-	initBitmapCore(dst, sizeKeys, sizeContainer0, bufU16)
-	dst._ptr = buf // Keep a GC reference to buf, mirroring NewBitmapToBuf.
+	layOutEmpty(dst, sizeKeys, sizeContainer0, bufU16)
+	dst._ptr = buf // Keep a GC reference to buf, mirroring layOutEmptyInBuf.
 	return dst
-}
-
-// wrapGetToBuf adapts a buffer-only get to the struct-and-buffer form the Init
-// constructors take, heap-allocating the result Bitmap. nil is passed through
-// rather than wrapped, so a shared body can name the constructor instead of
-// leaving a nil call to fail as a plain nil dereference.
-func wrapGetToBuf(get func(sizeBytes int) []byte) func(sizeBytes int) (*Bitmap, []byte) {
-	if get == nil {
-		return nil
-	}
-	return func(sizeBytes int) (*Bitmap, []byte) {
-		return &Bitmap{}, get(sizeBytes)
-	}
 }
 
 // setKey sets a key and container offset.
@@ -236,14 +277,35 @@ func (ra *Bitmap) expandNoLengthChange(bySize uint64) (toSize int) {
 	if toSize <= cap(ra.data) {
 		return
 	}
-	out := make([]uint16, len(ra.data), grownCap(cap(ra.data), int(bySize)))
+	out, ptr, release := ra.grownData(len(ra.data), grownCap(cap(ra.data), int(bySize)))
 	copy(out, ra.data)
 	prev := len(ra.keys) * 4 // Multiply by 4 to convert from u16 to u64.
-	ra.data = out
-	ra._ptr = nil // Allow Go to GC whatever this was pointing to.
-	// Re-reference ra.keys correctly because underlying array has changed.
-	ra.keys = uint16To64SliceUnsafe(ra.data[:prev])
+	ra.switchTo(out, ptr, release, prev)
 	return
+}
+
+// grownData allocates the slice ra grows into, of length ln and capacity at least
+// cp, from the pool if ra has one. ptr and release are nil on the heap.
+func (ra *Bitmap) grownData(ln, cp int) (out []uint16, ptr []byte, release func()) {
+	if ra.pool == nil {
+		return make([]uint16, ln, cp), nil, nil
+	}
+	ptr, release = getBuf("BufPool.Get", ra.pool, cp*2)
+	return byteToUint16SliceUnsafe(ptr)[:ln], ptr, release
+}
+
+// switchTo points ra at memory from grownData whose first sizeKeys uint16s are
+// the keys node, then frees the old buffer. Nothing may read that buffer after.
+func (ra *Bitmap) switchTo(out []uint16, ptr []byte, release func(), sizeKeys int) {
+	oldRelease := ra.releaseBuf
+	ra.data = out
+	ra._ptr = ptr // Hold the new buffer and drop the old one.
+	ra.releaseBuf = release
+	// Re-reference ra.keys correctly because underlying array has changed.
+	ra.keys = uint16To64SliceUnsafe(ra.data[:sizeKeys])
+	if oldRelease != nil {
+		oldRelease()
+	}
 }
 
 // growDoubleLimit is the buffer size past which grownCap stops doubling, so a
@@ -274,11 +336,10 @@ func grownCapWith(cp, need, limit, div int) int {
 // bySize at the given offset in ra.data. The offset doesn't need to line up
 // with a container.
 func (ra *Bitmap) scootRight(offset uint64, bySize uint64) {
-	left := ra.data[offset:]
+	ln := uint64(len(ra.data))
 
-	ra.fastExpand(bySize) // Expand the buffer.
-	right := ra.data[len(ra.data)-len(left):]
-	n := copy(right, left) // Move data right.
+	ra.fastExpand(bySize)                                  // Expand the buffer. This can free the old one.
+	n := copy(ra.data[offset+bySize:], ra.data[offset:ln]) // Move data right.
 	ra.memMoved += n
 
 	clear(ra.data[offset : offset+uint64(bySize)]) // Zero out the space in the middle.
@@ -345,11 +406,17 @@ func (ra *Bitmap) expandContainer(offset uint64) {
 		ra.data[offset] = sz + bySize
 
 	} else {
-		// Convert to bitmap container.
-		src := array(ra.getContainer(offset))
-		buf := src.toBitmapContainer(nil)
-		assert(copy(ra.data[offset:], buf) == maxContainerSize)
+		ra.convertToBitmapContainer(offset)
 	}
+}
+
+// convertToBitmapContainer rewrites the array container at offset, whose room
+// is already maxContainerSize, as a bitmap container. The array is read from the
+// memory the bitmap is written to, so it is built in a stack scratch first.
+func (ra *Bitmap) convertToBitmapContainer(offset uint64) {
+	var scratch [maxContainerSize]uint16
+	buf := array(ra.getContainer(offset)).toBitmapContainer(scratch[:])
+	assert(copy(ra.data[offset:], buf) == maxContainerSize)
 }
 
 // stepSize is used for container expansion. For a container of given size n,
@@ -521,8 +588,8 @@ func FromSortedList32(vals []uint32) *Bitmap {
 
 func fromSortedList[T sortedListVal](name string, vals []T) *Bitmap {
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(name, vals)
-	ra := initBitmapWithCap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
-	return buildFromSortedInto(ra, vals, name, false)
+	ra := layOutEmptyOnHeap(&Bitmap{}, numKeys+1, sizeContainer0, sizeOtherContainers)
+	return buildFromSortedInto(ra, vals)
 }
 
 // TODO: Potentially this can be optimized.
@@ -936,6 +1003,8 @@ func (ra *Bitmap) AndNotOld(bm *Bitmap) {
 
 			// TODO: See if we can do containerAndNot operation in-place.
 			c := containerAndNot(ac, bc, buf)
+			// c can be ac itself, and newContainer can free the buffer ac is in.
+			c = append(buf[:0], c...)
 			// create a new container and update the key offset to this container.
 			offset := a.newContainer(uint16(len(c)))
 			copy(a.data[offset:], c)
