@@ -1090,6 +1090,44 @@ func BenchmarkZeroedLayout(b *testing.B) {
 	}
 }
 
+// BenchmarkCloneToBufWithHeadroom compares CloneToBuf against
+// CloneToBufWithHeadroom, each alone and followed by an OR of new keys past
+// the source's last, which moves every container of the plain clone.
+func BenchmarkCloneToBufWithHeadroom(b *testing.B) {
+	for _, bc := range layoutBenchSources() {
+		src := bc.src
+		roomy := &onceBufPool{buf: dirtyBuf(src.ZeroedLayout().LenInBytes() * 5 / 4)}
+		tail := tailKeys(src, src.CloneToBufWithHeadroom(nil, roomy.reset()))
+
+		b.Run(bc.name, func(b *testing.B) {
+			b.Run("CloneToBuf", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneToBuf(nil, roomy.reset())
+				}
+			})
+			b.Run("CloneToBufWithHeadroom", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneToBufWithHeadroom(nil, roomy.reset())
+				}
+			})
+			b.Run("CloneToBuf+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneToBuf(nil, roomy.reset()).Or(tail)
+				}
+			})
+			b.Run("CloneToBufWithHeadroom+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneToBufWithHeadroom(nil, roomy.reset()).Or(tail)
+				}
+			})
+		})
+	}
+}
+
 func layoutBenchSources() []struct {
 	name string
 	src  *Bitmap

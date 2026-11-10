@@ -1187,10 +1187,10 @@ func layoutSources(t *testing.T) []struct {
 	}
 }
 
-// requireZeroedLayoutOf asserts got holds src's keys in order, behind a keys
-// node of 1+extraKeys spare slots. Each has an empty container of src's size
-// and type, at src's offset shifted by the keys node's change in size.
-func requireZeroedLayoutOf(t *testing.T, src, got *Bitmap, extraKeys int) {
+// requireLayoutOf asserts got holds src's keys in order, behind a keys node of
+// 1+extraKeys spare slots. Each has src's container, or an empty one of its
+// size and type when zeroed, at src's offset shifted by the keys node's change.
+func requireLayoutOf(t *testing.T, src, got *Bitmap, extraKeys int, zeroed bool) {
 	t.Helper()
 	if src.LenInBytes() == 0 {
 		src = NewBitmap()
@@ -1205,25 +1205,36 @@ func requireZeroedLayoutOf(t *testing.T, src, got *Bitmap, extraKeys int) {
 		require.Equal(t, key, got.keys.key(i))
 		require.Equal(t, off+uint64(delta), got.keys.val(i), "offset of key %d", key)
 		want, c := src.getContainer(off), got.getContainer(got.keys.val(i))
+		if !zeroed {
+			require.Equal(t, want, c, "container of key %d", key)
+			continue
+		}
 		require.Equal(t, []uint16{want[indexSize], want[indexType], 0, 0}, c[:startIdx], "header of key %d", key)
 		if c[indexType] == typeBitmap {
 			require.Equal(t, make([]uint16, len(c)-int(startIdx)), c[startIdx:], "payload of key %d", key)
 		}
 	}
 	require.Equal(t, src.LenInBytes()+2*delta, got.LenInBytes())
-	require.Zero(t, got.GetCardinality())
+	if zeroed {
+		require.Zero(t, got.GetCardinality())
+	}
 }
 
 // requireSubsetOrKeepsLayout ORs a subset of src into got, its zeroed layout,
-// and asserts the values arrive with no container moved and no reallocation.
-func requireSubsetOrKeepsLayout(t *testing.T, src, got *Bitmap) {
+// or takes it out of got, src's clone, and ORs it back. The values must arrive
+// with no container moved and no reallocation.
+func requireSubsetOrKeepsLayout(t *testing.T, src, got *Bitmap, zeroed bool) {
 	t.Helper()
 	data, lenBytes, capBytes, offsets := &got.data[0], got.LenInBytes(), got.CapInBytes(), offsetsOf(got)
 
-	subset := sparseSubset(src)
+	subset, want := sparseSubset(src), sparseSubset(src)
+	if !zeroed {
+		want.Or(src)
+		got.AndNot(subset)
+	}
 	got.Or(subset)
 
-	require.Equal(t, subset.ToArray(), got.ToArray())
+	require.Equal(t, want.ToArray(), got.ToArray())
 	require.Same(t, data, &got.data[0], "data reallocated")
 	require.Equal(t, lenBytes, got.LenInBytes())
 	require.Equal(t, capBytes, got.CapInBytes())
@@ -1256,9 +1267,9 @@ func TestZeroedLayout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.src.ZeroedLayout()
 
-			requireZeroedLayoutOf(t, tc.src, got, 0)
+			requireLayoutOf(t, tc.src, got, 0, true)
 			require.Equal(t, got.LenInBytes(), got.CapInBytes())
-			requireSubsetOrKeepsLayout(t, tc.src, got)
+			requireSubsetOrKeepsLayout(t, tc.src, got, true)
 		})
 	}
 }

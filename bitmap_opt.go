@@ -571,6 +571,19 @@ func (ra *Bitmap) zeroedLayoutToBuf(name string, dst *Bitmap, pool BufPool, head
 	return dst
 }
 
+// CloneToBufWithHeadroom is [Bitmap.CloneToBuf] on
+// [Bitmap.CompactedToBufWithHeadroom]'s terms, with only the key slots the
+// surplus buys. Containers keep their relative offsets, dead space included.
+func (ra *Bitmap) CloneToBufWithHeadroom(dst *Bitmap, pool BufPool) *Bitmap {
+	const name = "CloneToBufWithHeadroom"
+	if ra.LenInBytes() == 0 {
+		return ra.compactedToBuf(name, dst, pool, true)
+	}
+	dst, _ = ra.layOutKeysToBuf(name, dst, pool, true)
+	copy(dst.data[dst.keys.size():], ra.data[ra.keys.size():])
+	return dst
+}
+
 // layOutKeysToBuf takes a buffer from pool for ra's layout behind a keys node
 // with one spare slot. It returns dst with ra's keys written, offsets delta right
 // of ra's, and the containers left to the caller. headroom adds key slots.

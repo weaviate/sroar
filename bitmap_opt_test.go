@@ -1314,15 +1314,17 @@ func TestCloneToBuf(t *testing.T) {
 	})
 }
 
-type zeroedLayoutToBufVariant struct {
-	name     string
-	headroom bool
-	build    func(src, dst *Bitmap, pool BufPool) *Bitmap
+type layoutToBufVariant struct {
+	name             string
+	headroom, zeroed bool
+	build            func(src, dst *Bitmap, pool BufPool) *Bitmap
 }
 
-var zeroedLayoutToBufVariants = []zeroedLayoutToBufVariant{
-	{"ZeroedLayoutToBuf", false, (*Bitmap).ZeroedLayoutToBuf},
-	{"ZeroedLayoutToBufWithHeadroom", true, (*Bitmap).ZeroedLayoutToBufWithHeadroom},
+// layoutToBufVariants covers each pool-based zeroed-layout and clone build.
+var layoutToBufVariants = []layoutToBufVariant{
+	{"ZeroedLayoutToBuf", false, true, (*Bitmap).ZeroedLayoutToBuf},
+	{"ZeroedLayoutToBufWithHeadroom", true, true, (*Bitmap).ZeroedLayoutToBufWithHeadroom},
+	{"CloneToBufWithHeadroom", true, false, (*Bitmap).CloneToBufWithHeadroom},
 }
 
 // dirtyBuf returns a buffer of size bytes holding old data.
@@ -1339,11 +1341,11 @@ func headroomExtraKeys(src *Bitmap, surplus int) int {
 	return extraKeySlots(surplus, numKeys, sizeContainer0, len(src.data)-sizeKeys-sizeContainer0)
 }
 
-func TestZeroedLayoutToBuf(t *testing.T) {
+func TestLayoutToBuf(t *testing.T) {
 	for _, tc := range layoutSources(t) {
-		for _, v := range zeroedLayoutToBufVariants {
-			// Neither no surplus nor an odd one short of a key slot and its
-			// container buys headroom.
+		for _, v := range layoutToBufVariants {
+			// No surplus, and an odd one a uint16 short of a key slot and its
+			// container, both leave the layout without headroom.
 			for _, surplus := range []int{0, 2*(keySlotU16+minContainerSize) - 1} {
 				for _, reused := range []*Bitmap{nil, bitmapOf(99, 100_000)} {
 					t.Run(fmt.Sprintf("%s/%s/surplus %d/reused %t", tc.name, v.name, surplus, reused != nil), func(t *testing.T) {
@@ -1357,14 +1359,14 @@ func TestZeroedLayoutToBuf(t *testing.T) {
 						if reused != nil {
 							require.Same(t, reused, got)
 						}
-						requireZeroedLayoutOf(t, tc.src, got, 0)
+						requireLayoutOf(t, tc.src, got, 0, v.zeroed)
 						require.Equal(t, asked, got.LenInBytes())
 						require.Equal(t, (asked+surplus)/2*2, got.CapInBytes())
-						if v.headroom {
+						if v.headroom && v.zeroed {
 							plain := tc.src.ZeroedLayoutToBuf(nil, getPool(func(sizeBytes int) []byte { return dirtyBuf(sizeBytes + surplus) }))
 							require.Equal(t, plain.data, got.data)
 						}
-						requireSubsetOrKeepsLayout(t, tc.src, got)
+						requireSubsetOrKeepsLayout(t, tc.src, got, v.zeroed)
 					})
 				}
 			}
@@ -1372,9 +1374,9 @@ func TestZeroedLayoutToBuf(t *testing.T) {
 	}
 }
 
-func TestZeroedLayoutToBufWithHeadroom(t *testing.T) {
+func TestLayoutToBufWithHeadroom(t *testing.T) {
 	for _, tc := range layoutSources(t) {
-		for _, v := range zeroedLayoutToBufVariants {
+		for _, v := range layoutToBufVariants {
 			t.Run(tc.name+"/"+v.name, func(t *testing.T) {
 				var asked, capBytes int
 				got := v.build(tc.src, nil, getPool(func(sizeBytes int) []byte {
@@ -1389,17 +1391,17 @@ func TestZeroedLayoutToBufWithHeadroom(t *testing.T) {
 					extraKeys = headroomExtraKeys(tc.src, (capBytes-asked)/2)
 					require.Positive(t, extraKeys)
 				}
-				requireZeroedLayoutOf(t, tc.src, got, extraKeys)
-				requireHeadroomOrKeepsLayout(t, tc.src, got, extraKeys)
+				requireLayoutOf(t, tc.src, got, extraKeys, v.zeroed)
+				requireHeadroomOrKeepsLayout(t, tc.src, got, extraKeys, v.zeroed)
 			})
 		}
 	}
 }
 
-// requireHeadroomOrKeepsLayout ORs into got a subset of src, an overflow of its
-// last array and up to extraKeys new keys. Only the overflowed array may
-// move, as Or rebuilds it at the tail.
-func requireHeadroomOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int) {
+// requireHeadroomOrKeepsLayout ORs into got, src's zeroed layout or clone, a
+// subset of src, an overflow of its last array and up to extraKeys new keys.
+// Only the overflowed array may move, as Or rebuilds it at the tail.
+func requireHeadroomOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int, zeroed bool) {
 	t.Helper()
 	if extraKeys == 0 {
 		return
@@ -1416,6 +1418,9 @@ func requireHeadroomOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int)
 	// Overflowing an array doubles it, which a small layout's room may not hold
 	// next to a new key's container.
 	want := sparseSubset(src)
+	if !zeroed {
+		want.Or(src)
+	}
 	lastKey := got.keys.key(numKeys - 1)
 	room := cap(got.data) - len(got.data)
 	if last := got.getContainer(offsets[numKeys-1]); last[indexType] == typeArray && room >= int(last[indexSize])+minContainerSize {
@@ -1441,7 +1446,7 @@ func requireHeadroomOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int)
 	require.Equal(t, want.ToArray(), got.ToArray())
 }
 
-func TestZeroedLayoutToBufContract(t *testing.T) {
+func TestLayoutToBufContract(t *testing.T) {
 	bm := fillKeys(3, 100)
 	empty := NewBitmap()
 	var nilSrc *Bitmap
@@ -1451,7 +1456,7 @@ func TestZeroedLayoutToBufContract(t *testing.T) {
 		return fmt.Sprintf("%s: buf too small: need %d bytes, got %d", name, size, size-2)
 	}
 
-	for _, v := range zeroedLayoutToBufVariants {
+	for _, v := range layoutToBufVariants {
 		for _, tc := range []struct {
 			want string
 			call func()
@@ -1471,7 +1476,7 @@ func TestZeroedLayoutToBufContract(t *testing.T) {
 	t.Run("allocates nothing with pooled struct and buffer", func(t *testing.T) {
 		pooled, buf := &Bitmap{}, make([]byte, 1<<16)
 		pool := getPool(func(sizeBytes int) []byte { return buf[:sizeBytes] })
-		for _, v := range zeroedLayoutToBufVariants {
+		for _, v := range layoutToBufVariants {
 			require.Zero(t, testing.AllocsPerRun(10, func() { v.build(bm, pooled, pool) }), v.name)
 		}
 	})
@@ -1479,13 +1484,17 @@ func TestZeroedLayoutToBufContract(t *testing.T) {
 	// New keys outgrow the build's buffer, so the result must grow through pool.
 	t.Run("grows through pool and releases each buffer once", func(t *testing.T) {
 		newKeys := fillKeys(40, 10)
-		for _, v := range zeroedLayoutToBufVariants {
+		for _, v := range layoutToBufVariants {
 			t.Run(v.name, func(t *testing.T) {
 				pool := &trackedPool{}
 				got := v.build(bm, nil, pool)
 				got.Or(newKeys)
 
-				require.Equal(t, newKeys.ToArray(), got.ToArray())
+				want := newKeys.Clone()
+				if !v.zeroed {
+					want.Or(bm)
+				}
+				require.Equal(t, want.ToArray(), got.ToArray())
 				require.Greater(t, pool.gets(), 1)
 				pool.requireReleasedOnce(t, 1)
 				got.ReleaseBuf()
