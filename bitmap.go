@@ -578,21 +578,11 @@ func (ra *Bitmap) Clone() *Bitmap {
 	return FromBufferWithCopy(ra.ToBuffer())
 }
 
-// writeShiftedKeys writes src's keys into a keys node of sizeKeys at the start
-// of data, clearing its spare slots, and returns how far that moves src's
-// containers. It may be negative, which wraps in uint64 and still adds.
-func writeShiftedKeys(src *Bitmap, data []uint16, sizeKeys int) (delta uint64) {
-	numKeys := src.keys.numKeys()
-	keys := node(uint16To64SliceUnsafe(data[:sizeKeys]))
-	keys.setNodeSize(sizeKeys)
-	keys.setNumKeys(numKeys)
-	delta = uint64(sizeKeys - src.keys.size())
-	srcPairs, pairs := src.keys[keyOffset(0):keyOffset(numKeys)], keys[keyOffset(0):keyOffset(numKeys)]
-	for i := 0; i+1 < len(pairs); i += 2 {
-		pairs[i], pairs[i+1] = srcPairs[i], srcPairs[i+1]+delta
-	}
-	clear(data[4*keyOffset(numKeys) : sizeKeys]) // sizeKeys may not be a multiple of 4.
-	return delta
+// ZeroedLayout returns an empty bitmap with ra's layout, free key slots and dead
+// space included, so [Bitmap.Or]-ing a subset of ra into it never grows it. Where
+// ra holds no values, [Bitmap.Clone] drops that layout and ZeroedLayout keeps it.
+func (ra *Bitmap) ZeroedLayout() *Bitmap {
+	return ra.zeroedLayoutTo("ZeroedLayout", nil, BuildOpts{})
 }
 
 func (ra *Bitmap) IsEmpty() bool {

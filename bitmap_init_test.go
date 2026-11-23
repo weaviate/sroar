@@ -443,6 +443,8 @@ type toBuild struct {
 	layout *Bitmap
 	// src is a source dst must not be, nil if there is none.
 	src *Bitmap
+	// exposesOld is whether the result carries the buffer's old bytes.
+	exposesOld bool
 }
 
 // toBuilds covers each build taking BuildOpts.
@@ -539,6 +541,7 @@ func toBuilds() []toBuild {
 				return bm.Clone()
 			}, size: cloneSize, layout: layout, src: bm},
 			toBuild{name: "CompactedTo", label: src.label, build: bm.CompactedTo, heap: bm.Compacted, size: bm.Compacted().LenInBytes(), layout: bm.Compacted(), src: bm},
+			toBuild{name: "ZeroedLayoutTo", label: src.label, build: bm.ZeroedLayoutTo, heap: bm.ZeroedLayout, size: cloneSize, layout: layout, src: bm, exposesOld: true},
 		)
 	}
 	return builds
@@ -620,7 +623,9 @@ func TestBuildsTo(t *testing.T) {
 							cleanOpts := opts
 							cleanOpts.Pool = getPool(func(n int) []byte { return make([]byte, n+surplus) })
 							clean := tc.build(nil, cleanOpts)
-							require.Equal(t, clean.data, got.data, "the buffer's old bytes show")
+							if !tc.exposesOld {
+								require.Equal(t, clean.data, got.data, "the buffer's old bytes show")
+							}
 
 							// A buffer as large bought by surplus alone grows the same way.
 							unpadded := &trackedPool{surplus: surplus + size - tc.size}
@@ -629,7 +634,9 @@ func TestBuildsTo(t *testing.T) {
 							for _, x := range growUntilGet(t, got, pool, 2) {
 								clean.Set(x)
 							}
-							require.Equal(t, clean.data, got.data, "growth shows the buffers' old bytes")
+							if !tc.exposesOld {
+								require.Equal(t, clean.data, got.data, "growth shows the buffers' old bytes")
+							}
 							growUntilGet(t, ref, unpadded, 2)
 							require.Len(t, pool.bufs[1].data, len(unpadded.bufs[1].data))
 							require.Equal(t, ref.ToArray(), got.ToArray())

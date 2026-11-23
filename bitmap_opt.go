@@ -524,14 +524,6 @@ func (ra *Bitmap) requireNotDst(name string, dst *Bitmap) {
 	}
 }
 
-// layOutKeysInBuf lays out ra over buf behind a keys node of sizeKeys. It writes
-// ra's keys, offsets delta right of ra's, and leaves the containers to the caller.
-func (ra *Bitmap) layOutKeysInBuf(dst *Bitmap, buf []byte, sizeKeys int) (delta uint64) {
-	data := byteToUint16SliceUnsafe(buf)[:len(ra.data)+sizeKeys-ra.keys.size()]
-	*dst = Bitmap{data: data, keys: uint16To64SliceUnsafe(data[:sizeKeys]), _ptr: buf}
-	return writeShiftedKeys(ra, data, sizeKeys)
-}
-
 // compactLayout sizes a compacted copy of ra from container headers alone.
 // Key 0 is counted up front and sized separately, as in fromSortedLayout.
 func (ra *Bitmap) compactLayout() (numKeys, sizeContainer0, sizeOtherContainers int) {
@@ -1215,8 +1207,8 @@ func (ra *Bitmap) CapInBytes() int {
 	return cap(ra.data) * 2
 }
 
-// CloneTo clones ra per opts, on [NewBitmapTo]'s terms for dst, which must not
-// be ra. The clone keeps ra's layout, dead space included, apart from the key
+// CloneTo clones ra per opts, on [Bitmap.CompactedTo]'s terms for dst and the
+// pool. The clone keeps ra's layout, dead space included, apart from the key
 // slots spare capacity adds. A nil or zero-value ra clones to an empty bitmap.
 func (ra *Bitmap) CloneTo(dst *Bitmap, opts BuildOpts) *Bitmap {
 	return ra.cloneTo("CloneTo", dst, opts)
@@ -1224,26 +1216,83 @@ func (ra *Bitmap) CloneTo(dst *Bitmap, opts BuildOpts) *Bitmap {
 
 // cloneTo is CloneTo reporting panics under name, the exported method called.
 func (ra *Bitmap) cloneTo(name string, dst *Bitmap, opts BuildOpts) *Bitmap {
+	dst, hasContainers := ra.layOutKeysTo(name, dst, opts)
+	if hasContainers {
+		copy(dst.data[dst.keys.size():], ra.data[ra.keys.size():])
+	}
+	return dst
+}
+
+// ZeroedLayoutTo is [Bitmap.CloneTo] without ra's values. From a pool, ToBuffer()
+// carries the buffer's old bytes past each array's cardinality and in dead space.
+func (ra *Bitmap) ZeroedLayoutTo(dst *Bitmap, opts BuildOpts) *Bitmap {
+	return ra.zeroedLayoutTo("ZeroedLayoutTo", dst, opts)
+}
+
+// zeroedLayoutTo reports panics under name, the exported method called.
+func (ra *Bitmap) zeroedLayoutTo(name string, dst *Bitmap, opts BuildOpts) *Bitmap {
+	dst, hasContainers := ra.layOutKeysTo(name, dst, opts)
+	if hasContainers {
+		// A pool's buffer may be dirty, heap memory is zero.
+		writeZeroedContainers(ra, dst, opts.Pool != nil)
+	}
+	return dst
+}
+
+// layOutKeysTo lays out dst per opts as a copy of ra whose containers the caller
+// writes. A nil, zero-value or zero-length ra has none, so dst is complete.
+func (ra *Bitmap) layOutKeysTo(name string, dst *Bitmap, opts BuildOpts) (_ *Bitmap, hasContainers bool) {
 	ra.requireNotDst(name, dst)
-	// Nothing to clone, and parsing an empty ra would fail.
 	if ra.LenInBytes() == 0 {
-		return newBitmapTo(name, dst, opts)
+		return newBitmapTo(name, dst, opts), false
 	}
 	numKeys, sizeContainer0, sizeOtherContainers := ra.layoutSizes()
 	buf, release := opts.getBuf(name, ra.LenInBytes())
 	spareKeys := opts.spareKeySlots(buf, len(ra.data), numKeys, sizeContainer0, sizeOtherContainers)
 
 	dst = ensureDst(dst)
+	ra.layOutKeysInBuf(dst, buf, spareKeys)
+	return dst.adoptPool(opts.Pool, release), true
+}
+
+// layOutKeysInBuf points dst at buf and writes ra's keys node into it, widened
+// by spareKeys slots, with each container offset shifted to match. Its free key
+// slots are kept.
+func (ra *Bitmap) layOutKeysInBuf(dst *Bitmap, buf []byte, spareKeys int) {
+	shift := keySlotU16 * spareKeys
+	sizeKeys := ra.keys.size() + shift
+	data := byteToUint16SliceUnsafe(buf)[:len(ra.data)+shift]
+	*dst = Bitmap{data: data, keys: uint16To64SliceUnsafe(data[:sizeKeys]), _ptr: buf}
 	if spareKeys == 0 {
-		copy(byteToUint16SliceUnsafe(buf), ra.data)
-		pointAtSerialized(dst, buf)
-		dst.data = dst.data[:len(ra.data)] // The rest of buf stays as capacity.
-		return dst.adoptPool(opts.Pool, release)
+		copy(data[:sizeKeys], ra.data)
+		return
 	}
-	sizeKeys := ra.keys.size() + keySlotU16*spareKeys // Keeps ra's free key slots.
-	ra.layOutKeysInBuf(dst, buf, sizeKeys)
-	copy(dst.data[sizeKeys:], ra.data[ra.keys.size():])
-	return dst.adoptPool(opts.Pool, release)
+
+	numKeys := ra.keys.numKeys()
+	dst.keys.setNodeSize(sizeKeys)
+	dst.keys.setNumKeys(numKeys)
+	srcPairs, pairs := ra.keys[keyOffset(0):keyOffset(numKeys)], dst.keys[keyOffset(0):keyOffset(numKeys)]
+	for i := 0; i+1 < len(pairs); i += 2 {
+		pairs[i], pairs[i+1] = srcPairs[i], srcPairs[i+1]+uint64(shift)
+	}
+	clear(data[4*keyOffset(numKeys) : sizeKeys]) // sizeKeys may not be a multiple of 4.
+}
+
+// writeZeroedContainers writes an empty header into dst for each of src's
+// containers. clearBitmaps also clears bitmap payloads, for memory holding old
+// values. An array's payload is never read past its cardinality.
+func writeZeroedContainers(src, dst *Bitmap, clearBitmaps bool) {
+	data, delta := dst.data, uint64(dst.keys.size()-src.keys.size())
+	for i, n := 0, src.keys.numKeys(); i < n; i++ {
+		off := src.keys.val(i)
+		size, typ := src.data[off+uint64(indexSize)], src.data[off+uint64(indexType)]
+		c := data[off+delta : off+delta+uint64(size)]
+		c[indexSize], c[indexType] = size, typ
+		c[indexCardinality], c[indexCardinality+1] = 0, 0
+		if clearBitmaps && typ == typeBitmap {
+			clear(c[startIdx:])
+		}
+	}
 }
 
 // FromBufferOwned points the result at the serialized bitmap in buf without

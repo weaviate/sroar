@@ -1020,6 +1020,78 @@ func (p *onceBufPool) reset() BufPool {
 	return p
 }
 
+// BenchmarkZeroedLayout compares the zeroed-layout builds against cloning and
+// zeroing. whole_clear clears all containers at once instead of only bitmap
+// payloads. OR_tail's new keys move every container of the plain result only.
+func BenchmarkZeroedLayout(b *testing.B) {
+	for _, bc := range layoutBenchSources() {
+		src := bc.src
+		dirty := &onceBufPool{buf: dirtyBuf(src.LenInBytes())}
+		roomy := &onceBufPool{buf: dirtyBuf(src.LenInBytes() * 5 / 4)}
+		tail := tailKeys(src, src.ZeroedLayoutTo(nil, BuildOpts{Pool: roomy.reset()}))
+
+		b.Run(bc.name, func(b *testing.B) {
+			b.Run("Clone+ZeroOut", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					bm := src.Clone()
+					bm.ZeroOut()
+					layoutSink = bm
+				}
+			})
+			b.Run("ZeroedLayout", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayout()
+				}
+			})
+			b.Run("CloneTo_tail+ZeroOut", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					bm := src.CloneTo(nil, tailOnly(dirty.reset()))
+					bm.ZeroOut()
+					layoutSink = bm
+				}
+			})
+			b.Run("ZeroedLayoutTo_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutTo(nil, tailOnly(dirty.reset()))
+				}
+			})
+			b.Run("ZeroedLayoutTo_tail_whole_clear", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					buf, _ := dirty.reset().Get(0)
+					dst := &Bitmap{}
+					src.layOutKeysInBuf(dst, buf, 0)
+					clear(dst.data[dst.keys.size():])
+					writeZeroedContainers(src, dst, false)
+					layoutSink = dst
+				}
+			})
+			b.Run("ZeroedLayoutTo_split", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutTo(nil, BuildOpts{Pool: roomy.reset()})
+				}
+			})
+			b.Run("ZeroedLayoutTo_tail+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutTo(nil, tailOnly(roomy.reset())).Or(tail)
+				}
+			})
+			b.Run("ZeroedLayoutTo_split+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.ZeroedLayoutTo(nil, BuildOpts{Pool: roomy.reset()}).Or(tail)
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkCloneTo compares CloneTo with and without SpareTailOnly, each alone
 // and followed by an OR of new keys past the source's last, which moves every
 // container of the plain clone.

@@ -1159,13 +1159,18 @@ func layoutSources(t *testing.T) []struct {
 	}
 	require.Less(t, used, len(deadSpace.data), "dead space source has no dead space")
 
-	// Clone drops the containers of an empty bitmap; CloneTo keeps them.
+	// Clone drops the containers of an empty bitmap. CloneTo and ZeroedLayout keep them.
 	emptied := fillKeys(5, 100)
 	emptied.ZeroOut()
 
 	spareSlots := NewBitmapWith(40)
 	spareSlots.Or(fillKeys(3, 100))
 	require.Greater(t, spareSlots.keys.maxKeys(), spareSlots.keys.numKeys()+1)
+
+	// expandKeys caps its growth at an odd number of uint16s.
+	oddKeys := fillKeys(3, 100)
+	oddKeys.expandKeys(math.MaxUint16)
+	require.NotZero(t, oddKeys.keys.size()%4)
 
 	small := fillKeys(8, 100)
 	oversizedCap := small.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, 0, 4*small.LenInBytes()))))
@@ -1183,7 +1188,98 @@ func layoutSources(t *testing.T) []struct {
 		{"dead space", deadSpace},
 		{"emptied", emptied},
 		{"spare key slots", spareSlots},
+		{"odd keys node", oddKeys},
 		{"oversized cap", oversizedCap},
+	}
+}
+
+// requireLayoutOf asserts got holds src's keys in order, with extraKeys key slots
+// past src's. Each key has src's container, or an empty one of its size and type
+// when zeroed, at src's offset shifted by the keys node's change.
+func requireLayoutOf(t *testing.T, src, got *Bitmap, extraKeys int, zeroed bool) {
+	t.Helper()
+	if src.LenInBytes() == 0 {
+		src = NewBitmap()
+	}
+	numKeys := src.keys.numKeys()
+	require.Equal(t, numKeys, got.keys.numKeys())
+	require.Equal(t, src.keys.size()+keySlotU16*extraKeys, got.keys.size())
+	require.Equal(t, got.keys.size()/4, len(got.keys))
+	// Read from data, as the keys view drops an odd node's remainder.
+	spare := got.data[4*keyOffset(numKeys) : got.keys.size()]
+	require.Equal(t, make([]uint16, len(spare)), spare, "spare key slots")
+	delta := got.keys.size() - src.keys.size()
+	for i := 0; i < numKeys; i++ {
+		key, off := src.keys.key(i), src.keys.val(i)
+		require.Equal(t, key, got.keys.key(i))
+		require.Equal(t, off+uint64(delta), got.keys.val(i), "offset of key %d", key)
+		want, c := src.getContainer(off), got.getContainer(got.keys.val(i))
+		if !zeroed {
+			require.Equal(t, want, c, "container of key %d", key)
+			continue
+		}
+		require.Equal(t, []uint16{want[indexSize], want[indexType], 0, 0}, c[:startIdx], "header of key %d", key)
+		if c[indexType] == typeBitmap {
+			require.Equal(t, make([]uint16, len(c)-int(startIdx)), c[startIdx:], "payload of key %d", key)
+		}
+	}
+	require.Equal(t, src.LenInBytes()+2*delta, got.LenInBytes())
+	if zeroed {
+		require.Zero(t, got.GetCardinality())
+	}
+}
+
+// requireSubsetOrKeepsLayout ORs a subset of src into got, its zeroed layout,
+// or takes it out of got, src's clone, and ORs it back. The values must arrive
+// with no container moved and no reallocation.
+func requireSubsetOrKeepsLayout(t *testing.T, src, got *Bitmap, zeroed bool) {
+	t.Helper()
+	data, lenBytes, capBytes, offsets := &got.data[0], got.LenInBytes(), got.CapInBytes(), offsetsOf(got)
+
+	subset, want := sparseSubset(src), sparseSubset(src)
+	if !zeroed {
+		want.Or(src)
+		got.AndNot(subset)
+	}
+	got.Or(subset)
+
+	require.Equal(t, want.ToArray(), got.ToArray())
+	require.Same(t, data, &got.data[0], "data reallocated")
+	require.Equal(t, lenBytes, got.LenInBytes())
+	require.Equal(t, capBytes, got.CapInBytes())
+	require.Equal(t, offsets, offsetsOf(got))
+}
+
+func offsetsOf(bm *Bitmap) []uint64 {
+	offsets := make([]uint64, bm.keys.numKeys())
+	for i := range offsets {
+		offsets[i] = bm.keys.val(i)
+	}
+	return offsets
+}
+
+// sparseSubset returns every 50th value of src, sparse enough that a bitmap
+// container's subset is an array, which ORs into the bitmap's payload instead
+// of replacing it.
+func sparseSubset(src *Bitmap) *Bitmap {
+	subset := NewBitmap()
+	for i, v := range src.ToArray() {
+		if i%50 == 0 {
+			subset.Set(v)
+		}
+	}
+	return subset
+}
+
+func TestZeroedLayout(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.src.ZeroedLayout()
+
+			requireLayoutOf(t, tc.src, got, 0, true)
+			require.Equal(t, got.LenInBytes(), got.CapInBytes())
+			requireSubsetOrKeepsLayout(t, tc.src, got, true)
+		})
 	}
 }
 

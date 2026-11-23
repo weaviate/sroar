@@ -1314,6 +1314,24 @@ func TestCloneTo(t *testing.T) {
 	})
 }
 
+type layoutToVariant struct {
+	name         string
+	split, clone bool
+	build        func(src, dst *Bitmap, opts BuildOpts) *Bitmap
+}
+
+// layoutToVariants covers each way ZeroedLayoutTo and CloneTo spend a surplus.
+var layoutToVariants = []layoutToVariant{
+	{"ZeroedLayoutTo", false, false, (*Bitmap).ZeroedLayoutTo},
+	{"ZeroedLayoutTo", true, false, (*Bitmap).ZeroedLayoutTo},
+	{"CloneTo", false, true, (*Bitmap).CloneTo},
+	{"CloneTo", true, true, (*Bitmap).CloneTo},
+}
+
+func (v layoutToVariant) opts(pool BufPool) BuildOpts {
+	return BuildOpts{Pool: pool, SpareTailOnly: !v.split}
+}
+
 // dirtyBuf returns a buffer of size bytes holding old data.
 func dirtyBuf(size int) []byte { return bytes.Repeat([]byte{0xFF}, size) }
 
@@ -1326,6 +1344,218 @@ func spareExtraKeys(src *Bitmap, surplus int) int {
 	numKeys, sizeKeys := src.keys.numKeys(), src.keys.size()
 	sizeContainer0 := int(src.getContainer(src.keys.val(0))[indexSize])
 	return BuildOpts{}.spareKeySlots(make([]byte, 2*surplus), 0, numKeys, sizeContainer0, len(src.data)-sizeKeys-sizeContainer0)
+}
+
+func TestLayoutTo(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, v := range layoutToVariants {
+			// No surplus, and an odd one a uint16 short of a key slot and its
+			// container, both leave the layout without extra key slots.
+			for _, surplus := range []int{0, 2*(keySlotU16+minContainerSize) - 1} {
+				for _, reused := range []*Bitmap{nil, bitmapOf(99, 100_000)} {
+					t.Run(fmt.Sprintf("%s/%s/split %t/surplus %d/reused %t", tc.name, v.name, v.split, surplus, reused != nil), func(t *testing.T) {
+						var asked, calls int
+						got := v.build(tc.src, reused, v.opts(getPool(func(sizeBytes int) []byte {
+							asked, calls = sizeBytes, calls+1
+							return dirtyBuf(sizeBytes + surplus)
+						})))
+
+						require.Equal(t, 1, calls)
+						if reused != nil {
+							require.Same(t, reused, got)
+						}
+						requireLayoutOf(t, tc.src, got, 0, !v.clone)
+						require.Equal(t, asked, got.LenInBytes())
+						require.Equal(t, (asked+surplus)/2*2, got.CapInBytes())
+						if v.split && !v.clone {
+							plain := tc.src.ZeroedLayoutTo(nil, tailOnly(getPool(func(sizeBytes int) []byte { return dirtyBuf(sizeBytes + surplus) })))
+							require.Equal(t, plain.data, got.data)
+						}
+						requireSubsetOrKeepsLayout(t, tc.src, got, !v.clone)
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestLayoutToSurplus(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, v := range layoutToVariants {
+			t.Run(fmt.Sprintf("%s/%s/split %t", tc.name, v.name, v.split), func(t *testing.T) {
+				var asked, capBytes int
+				got := v.build(tc.src, nil, v.opts(getPool(func(sizeBytes int) []byte {
+					asked = sizeBytes
+					buf := dirtyBuf(max(sizeBytes*5/4, sizeBytes+16*(keySlotU16+minContainerSize)))
+					capBytes = cap(buf)
+					return buf[:sizeBytes]
+				})))
+
+				extraKeys := 0
+				if v.split {
+					extraKeys = spareExtraKeys(tc.src, (capBytes-asked)/2)
+					require.Positive(t, extraKeys)
+				}
+				requireLayoutOf(t, tc.src, got, extraKeys, !v.clone)
+				requireSpareOrKeepsLayout(t, tc.src, got, extraKeys, !v.clone)
+			})
+		}
+	}
+}
+
+func TestZeroedLayoutToMatchesCloneTo(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, pooled := range []bool{false, true} {
+			for _, ratio := range []float64{0, 1.3001} {
+				for _, tailOnly := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/pooled %t/ratio %v/tail only %t", tc.name, pooled, ratio, tailOnly), func(t *testing.T) {
+						build := func(to func(*Bitmap, BuildOpts) *Bitmap) (bm *Bitmap, asked int) {
+							opts := BuildOpts{InitialSpareRatio: ratio, SpareTailOnly: tailOnly}
+							if pooled {
+								opts.Pool = getPool(func(sizeBytes int) []byte {
+									asked = sizeBytes
+									return dirtyBuf(sizeBytes)
+								})
+							}
+							return to(nil, opts), asked
+						}
+						clone, cloneAsked := build(tc.src.CloneTo)
+						got, asked := build(tc.src.ZeroedLayoutTo)
+
+						require.Equal(t, cloneAsked, asked)
+						require.Equal(t, clone.LenInBytes(), got.LenInBytes())
+						require.Equal(t, clone.CapInBytes(), got.CapInBytes())
+						sizeKeys := clone.keys.size()
+						require.Equal(t, sizeKeys, got.keys.size())
+						require.Equal(t, clone.keys.maxKeys(), got.keys.maxKeys())
+						// This compares keys, offsets, free slots and any odd remainder.
+						require.Equal(t, clone.data[:sizeKeys], got.data[:sizeKeys])
+						for i, off := range offsetsOf(clone) {
+							want, c := clone.getContainer(off), got.getContainer(off)
+							require.Equal(t, want[indexSize], c[indexSize], "size of container %d", i)
+							require.Equal(t, want[indexType], c[indexType], "type of container %d", i)
+							require.Zero(t, getCardinality(c), "container %d", i)
+						}
+						require.Empty(t, got.ToArray())
+						if !tailOnly && ratio > 0 {
+							plainSize := NewBitmap().keys.size()
+							if tc.src.LenInBytes() > 0 {
+								plainSize = tc.src.keys.size()
+							}
+							require.Greater(t, sizeKeys, plainSize, "the spare bought no key slots")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// requireSpareOrKeepsLayout ORs into got, src's zeroed layout or clone, a subset
+// of src, an overflow of its last array and the new keys its slots and tail room
+// hold. Only the overflowed array may move, as Or rebuilds it at the tail.
+func requireSpareOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int, zeroed bool) {
+	t.Helper()
+	if src.LenInBytes() == 0 {
+		src = NewBitmap()
+	}
+	numKeys := got.keys.numKeys()
+	freeKeys := src.keys.maxKeys() - numKeys - 1 + extraKeys // One slot always stays free.
+	if freeKeys == 0 {
+		return
+	}
+	data, capBytes, offsets := &got.data[0], got.CapInBytes(), offsetsOf(got)
+	requireUnmoved := func() {
+		t.Helper()
+		require.Same(t, data, &got.data[0], "data reallocated")
+		require.Equal(t, capBytes, got.CapInBytes())
+		require.Equal(t, offsets[:numKeys-1], offsetsOf(got)[:numKeys-1])
+	}
+
+	// Overflowing an array doubles it, which a small layout's room may not hold
+	// next to a new key's container.
+	want := sparseSubset(src)
+	if !zeroed {
+		want.Or(src)
+	}
+	lastKey := got.keys.key(numKeys - 1)
+	room := cap(got.data) - len(got.data)
+	if last := got.getContainer(offsets[numKeys-1]); last[indexType] == typeArray && room >= int(last[indexSize])+minContainerSize {
+		overflow := NewBitmap()
+		for v := 0; v <= int(last[indexSize]-startIdx); v++ {
+			overflow.Set(lastKey | uint64(v))
+		}
+		want.Or(overflow)
+	}
+	got.Or(want)
+	requireUnmoved()
+
+	newKeys := min(freeKeys, (cap(got.data)-len(got.data))/minContainerSize)
+	require.Positive(t, newKeys, "the overflow left no room for a new key")
+	tail := NewBitmap()
+	for k := 1; k <= newKeys; k++ {
+		tail.Set(lastKey + uint64(k)<<16)
+	}
+	got.Or(tail)
+	want.Or(tail)
+	requireUnmoved()
+	require.Equal(t, numKeys+newKeys, got.keys.numKeys())
+	require.Equal(t, want.ToArray(), got.ToArray())
+}
+
+func TestLayoutToContract(t *testing.T) {
+	bm := fillKeys(3, 100)
+	empty := NewBitmap()
+	short := getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes-2) })
+	tooSmall := func(v layoutToVariant) string {
+		size := bm.LenInBytes()
+		return fmt.Sprintf("%s: buf too small: need %d bytes, got %d", v.name, size, size-2)
+	}
+
+	for _, v := range layoutToVariants {
+		for _, tc := range []struct {
+			want string
+			call func()
+		}{
+			{tooSmall(v), func() { v.build(bm, nil, v.opts(short)) }},
+			{v.name + ": dst is the source bitmap", func() { v.build(bm, bm, v.opts(heapPool)) }},
+			{v.name + ": dst is the source bitmap", func() { v.build(empty, empty, v.opts(heapPool)) }},
+		} {
+			t.Run(fmt.Sprintf("%s/split %t", tc.want, v.split), func(t *testing.T) {
+				require.PanicsWithValue(t, tc.want, tc.call)
+			})
+		}
+	}
+
+	t.Run("allocates nothing with pooled struct and buffer", func(t *testing.T) {
+		pooled, buf := &Bitmap{}, make([]byte, 1<<16)
+		pool := getPool(func(sizeBytes int) []byte { return buf[:sizeBytes] })
+		for _, v := range layoutToVariants {
+			require.Zero(t, testing.AllocsPerRun(10, func() { v.build(bm, pooled, v.opts(pool)) }), v.name)
+		}
+	})
+
+	// New keys outgrow the build's buffer, so the result must grow through pool.
+	t.Run("grows through pool and releases each buffer once", func(t *testing.T) {
+		newKeys := fillKeys(40, 10)
+		for _, v := range layoutToVariants {
+			t.Run(fmt.Sprintf("%s/split %t", v.name, v.split), func(t *testing.T) {
+				pool := &trackedPool{}
+				got := v.build(bm, nil, v.opts(pool))
+				got.Or(newKeys)
+
+				want := newKeys.Clone()
+				if v.clone {
+					want.Or(bm)
+				}
+				require.Equal(t, want.ToArray(), got.ToArray())
+				require.Greater(t, pool.gets(), 1)
+				pool.requireReleasedOnce(t, 1)
+				got.ReleaseBuf()
+				pool.requireReleasedOnce(t, 0)
+			})
+		}
+	})
 }
 
 func TestFromBufferOwnedCapacity(t *testing.T) {
