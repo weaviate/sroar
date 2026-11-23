@@ -14,7 +14,7 @@ import (
 // N-way unions of near-singleton bitmaps quadratic in the source count. The
 // accumulator makes every deposit O(1) by staging each touched 64K key
 // range in one fixed-size dense block, then assembling the exact-size
-// result once (Bitmap or BitmapToBuf).
+// result once (Bitmap or BitmapTo).
 //
 // AndNot removes elements the same way — bit-clears into the staged ranges,
 // skipping ranges the accumulator never touched — so Or and AndNot can
@@ -580,26 +580,19 @@ func (acc *Accumulator) Bitmap() *Bitmap {
 	return ra
 }
 
-// BitmapToBuf assembles the union into a buffer from pool, on [NewBitmapToBuf]'s
-// terms for dst. pool.Get is called once with the exact size in bytes.
-func (acc *Accumulator) BitmapToBuf(dst *Bitmap, pool BufPool) *Bitmap {
-	const name = "Accumulator.BitmapToBuf"
+// BitmapTo is [Accumulator.Bitmap] building per opts, on [NewBitmapTo]'s terms
+// for dst.
+func (acc *Accumulator) BitmapTo(dst *Bitmap, opts BuildOpts) *Bitmap {
 	var scratch [layoutScratchLen]blockLayout
 	layouts, numKeys, sizeContainer0, sizeOtherContainers := acc.layout(scratch[:])
-	// +1 is the spare slot buildInto relies on.
-	sizeKeys := calcSizeKeys(numKeys + 1)
-	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
-
-	buf, release := getBuf(name, pool, sizeTotal*2)
-	dst = ensureDst(dst)
-	layOutSizedInBuf(dst, buf, sizeKeys, sizeContainer0).adoptPool(pool, release)
+	dst = layOutSizedTo("Accumulator.BitmapTo", dst, opts, numKeys, sizeContainer0, sizeOtherContainers)
 	acc.buildInto(dst, layouts)
 	return dst
 }
 
 // buildInto builds the result containers into ra, which must already have
-// capacity for the full layout plus one spare key slot (the numKeys+1 at the
-// call sites). The spare is what lets setKey's return — a possibly shifted
+// capacity for the full layout plus one spare key slot (numKeys+1 in
+// Bitmap and layOutSizedTo). The spare is what lets setKey's return — a possibly shifted
 // offset — be discarded: the node never fills mid-build, so it never expands
 // and never moves containers. acc.keys is sorted, so containers are appended
 // in key order and no append can reallocate. Each block is written from its

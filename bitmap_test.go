@@ -30,10 +30,10 @@ func TestModify(t *testing.T) {
 	}
 }
 
-func TestNewBitmapToBuf(t *testing.T) {
+func TestNewBitmapTo(t *testing.T) {
 	t.Run("basic set and contains", func(t *testing.T) {
 		buf := make([]byte, 4096)
-		bm := NewBitmapToBuf(nil, bufPoolOf(buf))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(buf)))
 
 		bm.Set(1)
 		bm.Set(100)
@@ -47,7 +47,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("uses provided buffer memory", func(t *testing.T) {
 		buf := make([]byte, 4096)
-		bm := NewBitmapToBuf(nil, bufPoolOf(buf))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(buf)))
 		bm.Set(42)
 
 		// The bitmap's data should be backed by buf: the buffer
@@ -64,7 +64,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("len=0 cap=valid works", func(t *testing.T) {
 		buf := make([]byte, 0, 4096)
-		bm := NewBitmapToBuf(nil, bufPoolOf(buf))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(buf)))
 		bm.Set(1)
 		bm.Set(100)
 		require.Equal(t, 2, bm.GetCardinality())
@@ -74,14 +74,14 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("odd length buffer is truncated", func(t *testing.T) {
 		buf := make([]byte, 4097) // odd
-		bm := NewBitmapToBuf(nil, bufPoolOf(buf))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(buf)))
 		bm.Set(7)
 		require.True(t, bm.Contains(7))
 	})
 
 	t.Run("behaves like NewBitmap", func(t *testing.T) {
 		buf := make([]byte, 1<<20) // 1MB
-		bm1 := NewBitmapToBuf(nil, bufPoolOf(buf))
+		bm1 := NewBitmapTo(nil, tailOnly(bufPoolOf(buf)))
 		bm2 := NewBitmap()
 
 		for i := uint64(0); i < 5000; i++ {
@@ -97,7 +97,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("no allocation when buffer is large enough for many containers", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
-		bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, bufSize)))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Equal(t, bufSize, bm.CapInBytes())
 
@@ -117,7 +117,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("no allocation as keys expand", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
-		bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, bufSize)))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Equal(t, bufSize, bm.CapInBytes())
 
@@ -133,7 +133,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("no allocation with bitmap containers", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
-		bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, bufSize)))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Equal(t, bufSize, bm.CapInBytes())
 
@@ -149,7 +149,7 @@ func TestNewBitmapToBuf(t *testing.T) {
 
 	t.Run("length grows but capacity stays", func(t *testing.T) {
 		bufSize := 1 << 20 // 1MB
-		bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, bufSize)))
+		bm := NewBitmapTo(nil, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		initialLenInBytes := bm.LenInBytes()
 
@@ -564,7 +564,7 @@ func TestSetIntoCompactedArrayContainer(t *testing.T) {
 	}
 }
 
-// testMaskedCommon runs the shared correctness cases for Masked and MaskedToBuf.
+// testMaskedCommon runs the shared correctness cases for Masked and MaskedTo.
 // masker abstracts the call so each test function can pass its own implementation.
 func testMaskedCommon(t *testing.T, masker func(bm *Bitmap, mask uint64) *Bitmap) {
 	t.Helper()
@@ -786,9 +786,9 @@ func TestMasked(t *testing.T) {
 	})
 }
 
-func TestMaskedToBuf(t *testing.T) {
+func TestMaskedTo(t *testing.T) {
 	testMaskedCommon(t, func(bm *Bitmap, mask uint64) *Bitmap {
-		return bm.MaskedToBuf(nil, mask, bufPoolOf(make([]byte, 1<<20)))
+		return bm.MaskedTo(nil, mask, tailOnly(bufPoolOf(make([]byte, 1<<20))))
 	})
 
 	t.Run("matches Masked results", func(t *testing.T) {
@@ -802,7 +802,7 @@ func TestMaskedToBuf(t *testing.T) {
 		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
 		for _, m := range masks {
 			expected := bm.Masked(m)
-			got := bm.MaskedToBuf(nil, m, bufPoolOf(make([]byte, 1<<20)))
+			got := bm.MaskedTo(nil, m, tailOnly(bufPoolOf(make([]byte, 1<<20))))
 
 			require.Equal(t, expected.GetCardinality(), got.GetCardinality())
 			for _, v := range expected.ToArray() {
@@ -823,7 +823,7 @@ func TestMaskedToBuf(t *testing.T) {
 		}
 
 		bufSize := 1 << 20 // 1MB
-		result := bm.MaskedToBuf(nil, 0x0000FFFFFFFFFFFF, bufPoolOf(make([]byte, bufSize)))
+		result := bm.MaskedTo(nil, 0x0000FFFFFFFFFFFF, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Equal(t, int(numValues), result.GetCardinality())
 		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
@@ -836,7 +836,7 @@ func TestMaskedToBuf(t *testing.T) {
 		}
 
 		bufSize := 1 << 20 // 1MB
-		result := bm.MaskedToBuf(nil, math.MaxUint64, bufPoolOf(make([]byte, bufSize)))
+		result := bm.MaskedTo(nil, math.MaxUint64, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Equal(t, 50, result.GetCardinality())
 		require.Greater(t, result.LenInBytes(), 0)
@@ -1120,6 +1120,71 @@ func TestClone(t *testing.T) {
 	b := a.Clone()
 	require.Equal(t, a.GetCardinality(), b.GetCardinality())
 	require.Equal(t, a.ToArray(), b.ToArray())
+}
+
+// fillKeys sets perKey values 13 apart in each of keys containers, so 5000
+// values span a bitmap container's whole payload.
+func fillKeys(keys, perKey int) *Bitmap {
+	bm := NewBitmap()
+	for k := 0; k < keys; k++ {
+		for i := 0; i < perKey; i++ {
+			bm.Set(uint64(k)<<16 | uint64(i*13))
+		}
+	}
+	return bm
+}
+
+func layoutSources(t *testing.T) []struct {
+	name string
+	src  *Bitmap
+} {
+	mixed := fillKeys(6, 50)
+	for k := uint64(1); k < 6; k += 2 {
+		for i := uint64(0); i < 5000; i++ {
+			mixed.Set(k<<16 | i)
+		}
+	}
+
+	// Or appends a container that outgrows its slot once the target has more
+	// than 10 keys, leaving the old slot as dead space.
+	deadSpace := fillKeys(12, 10)
+	grow := NewBitmap()
+	for i := uint64(0); i < 5000; i++ {
+		grow.Set(i)
+	}
+	deadSpace.Or(grow)
+	used := deadSpace.keys.size()
+	for i := 0; i < deadSpace.keys.numKeys(); i++ {
+		used += int(deadSpace.data[deadSpace.keys.val(i)])
+	}
+	require.Less(t, used, len(deadSpace.data), "dead space source has no dead space")
+
+	// Clone drops the containers of an empty bitmap; CloneTo keeps them.
+	emptied := fillKeys(5, 100)
+	emptied.ZeroOut()
+
+	spareSlots := NewBitmapWith(40)
+	spareSlots.Or(fillKeys(3, 100))
+	require.Greater(t, spareSlots.keys.maxKeys(), spareSlots.keys.numKeys()+1)
+
+	small := fillKeys(8, 100)
+	oversizedCap := small.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, 0, 4*small.LenInBytes()))))
+
+	return []struct {
+		name string
+		src  *Bitmap
+	}{
+		{"nil", nil},
+		{"empty", NewBitmap()},
+		{"key 0 only", fillKeys(1, 100)},
+		{"all arrays", fillKeys(20, 100)},
+		{"all bitmaps", fillKeys(5, 5000)},
+		{"mixed", mixed},
+		{"dead space", deadSpace},
+		{"emptied", emptied},
+		{"spare key slots", spareSlots},
+		{"oversized cap", oversizedCap},
+	}
 }
 
 func TestContainerFull(t *testing.T) {
@@ -1664,7 +1729,7 @@ func TestZeroOut(t *testing.T) {
 
 	clone := func(template *Bitmap) *Bitmap {
 		buf := make([]byte, 0, template.CapInBytes())
-		return template.CloneToBuf(nil, bufPoolOf(buf))
+		return template.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 	}
 
 	t.Run("empty after zero out, no size has changed", func(t *testing.T) {
@@ -1811,7 +1876,7 @@ func TestAndNotOldKeepsOversizedArrayContainer(t *testing.T) {
 // TestArrayToBitmapConversionAllocatesNothing pins the array-to-bitmap container
 // conversion to a stack scratch, in a bitmap with room to convert in place.
 func TestArrayToBitmapConversionAllocatesNothing(t *testing.T) {
-	bm := NewBitmapToBuf(nil, bufPoolOf(make([]byte, 0, 64<<10)))
+	bm := NewBitmapTo(nil, tailOnly(bufPoolOf(make([]byte, 0, 64<<10))))
 	tests := []struct {
 		name string
 		run  func()

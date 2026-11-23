@@ -544,12 +544,12 @@ func BenchmarkFromSortedList(b *testing.B) {
 				FromSortedList(bc.vals)
 			}
 		})
-		b.Run(bc.name+"/ToBuf", func(b *testing.B) {
+		b.Run(bc.name+"/To", func(b *testing.B) {
 			pool := newPool()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				FromSortedListToBuf(nil, bc.vals, pool)
+				FromSortedListTo(nil, bc.vals, tailOnly(pool))
 			}
 		})
 
@@ -562,12 +562,12 @@ func BenchmarkFromSortedList(b *testing.B) {
 				FromSortedList32(vals32)
 			}
 		})
-		b.Run(bc.name+"/32/ToBuf", func(b *testing.B) {
+		b.Run(bc.name+"/32/To", func(b *testing.B) {
 			pool := newPool()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				FromSortedList32ToBuf(nil, vals32, pool)
+				FromSortedList32To(nil, vals32, tailOnly(pool))
 			}
 		})
 	}
@@ -994,4 +994,98 @@ func BenchmarkOrArrayBitmap(b *testing.B) {
 			}
 		}
 	}
+}
+
+// layoutSink keeps each benchmarked result alive, so its Bitmap struct is
+// heap-allocated as a caller's would be rather than left on the stack.
+var layoutSink *Bitmap
+
+// onceBufPool hands out buf for the first Get after each reset and heap memory
+// after, so growth never copies into the buffer it is copying from.
+type onceBufPool struct {
+	buf  []byte
+	used bool
+}
+
+func (p *onceBufPool) Get(minBytes int) ([]byte, func()) {
+	if p.used {
+		return make([]byte, minBytes), nil
+	}
+	p.used = true
+	return p.buf, nil
+}
+
+func (p *onceBufPool) reset() BufPool {
+	p.used = false
+	return p
+}
+
+// BenchmarkCloneTo compares CloneTo with and without SpareTailOnly, each alone
+// and followed by an OR of new keys past the source's last, which moves every
+// container of the plain clone.
+func BenchmarkCloneTo(b *testing.B) {
+	for _, bc := range layoutBenchSources() {
+		src := bc.src
+		roomy := &onceBufPool{buf: dirtyBuf(src.LenInBytes() * 5 / 4)}
+		tail := tailKeys(src, src.CloneTo(nil, BuildOpts{Pool: roomy.reset()}))
+
+		b.Run(bc.name, func(b *testing.B) {
+			b.Run("CloneTo_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneTo(nil, tailOnly(roomy.reset()))
+				}
+			})
+			b.Run("CloneTo_split", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneTo(nil, BuildOpts{Pool: roomy.reset()})
+				}
+			})
+			b.Run("CloneTo_tail+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneTo(nil, tailOnly(roomy.reset())).Or(tail)
+				}
+			})
+			b.Run("CloneTo_split+OR_tail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					layoutSink = src.CloneTo(nil, BuildOpts{Pool: roomy.reset()}).Or(tail)
+				}
+			})
+		})
+	}
+}
+
+func layoutBenchSources() []struct {
+	name string
+	src  *Bitmap
+} {
+	mixed := fillKeys(1000, 100)
+	for k := 0; k < 1000; k += 4 {
+		for i := 0; i < 5000; i++ {
+			mixed.Set(uint64(k)<<16 | uint64(i))
+		}
+	}
+	return []struct {
+		name string
+		src  *Bitmap
+	}{
+		{"arrays_1k", fillKeys(1000, 100)},
+		{"bitmaps_100", fillKeys(100, 5000)},
+		{"mixed_1k", mixed},
+	}
+}
+
+// tailKeys returns one value at each key past src's last that split's
+// spare key slots hold, leaving the one spare slot every bitmap keeps.
+func tailKeys(src, split *Bitmap) *Bitmap {
+	tail := NewBitmap()
+	numKeys := src.keys.numKeys()
+	lastKey := src.keys.key(numKeys - 1)
+	for k := 1; k < split.keys.maxKeys()-numKeys; k++ {
+		tail.Set(lastKey + uint64(k)<<16)
+	}
+	return tail
 }
