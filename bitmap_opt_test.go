@@ -1,6 +1,7 @@
 package sroar
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/bits"
@@ -1175,7 +1176,7 @@ func TestCapBytes(t *testing.T) {
 	})
 }
 
-func TestCloneToBuf(t *testing.T) {
+func TestCloneTo(t *testing.T) {
 	assertEqualBitmaps := func(t *testing.T, bm, cloned *Bitmap) {
 		require.Equal(t, bm.GetCardinality(), cloned.GetCardinality())
 		require.Equal(t, bm.LenInBytes(), cloned.LenInBytes())
@@ -1217,7 +1218,7 @@ func TestCloneToBuf(t *testing.T) {
 					"buf less len greater cap": make([]byte, lenInBytes/2, lenInBytes*3/2),
 				} {
 					t.Run(name, func(t *testing.T) {
-						cloned := bm.CloneToBuf(nil, bufPoolOf(buf))
+						cloned := bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 
 						assertEqualBitmaps(t, bm, cloned)
 						require.Equal(t, cap(buf), cloned.CapInBytes())
@@ -1232,7 +1233,7 @@ func TestCloneToBuf(t *testing.T) {
 		bmEmpty := NewBitmap()
 
 		buf := make([]byte, 0, bmEmpty.LenInBytes()*2)
-		cloned := bmNil.CloneToBuf(nil, bufPoolOf(buf))
+		cloned := bmNil.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 
 		assertEqualBitmaps(t, bmEmpty, cloned)
 		require.Equal(t, cap(buf), cloned.CapInBytes())
@@ -1245,7 +1246,7 @@ func TestCloneToBuf(t *testing.T) {
 		bmCap := bm.CapInBytes()
 
 		buf := make([]byte, 0, bm.LenInBytes()*4)
-		cloned := bm.CloneToBuf(nil, bufPoolOf(buf))
+		cloned := bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 		cloned.Set(1 + uint64(maxCardinality))
 		cloned.Set(1 + uint64(maxCardinality)*2)
 
@@ -1266,7 +1267,7 @@ func TestCloneToBuf(t *testing.T) {
 
 		// buf big enough for additional containers
 		buf := make([]byte, 0, bm.LenInBytes()*4)
-		cloned := bm.CloneToBuf(nil, bufPoolOf(buf))
+		cloned := bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 		clonedLen := cloned.LenInBytes()
 		clonedCap := cloned.CapInBytes()
 
@@ -1277,17 +1278,17 @@ func TestCloneToBuf(t *testing.T) {
 		require.Equal(t, clonedCap, cloned.CapInBytes())
 
 		// Verify that expansion reuses the pre-allocated buffer without
-		// allocating new memory. CloneToBuf allocates at most its one Bitmap
+		// allocating new memory. CloneTo allocates at most its one Bitmap
 		// struct (zero when it inlines and the struct stays on the stack);
 		// the Set that triggers data expansion must not allocate since the
 		// buffer has sufficient capacity.
 		pool := getPool(func(int) []byte { return buf })
 		allocs := testing.AllocsPerRun(10, func() {
-			c := bm.CloneToBuf(nil, pool)
+			c := bm.CloneTo(nil, tailOnly(pool))
 			c.Set(1 + uint64(maxCardinality))
 		})
 		require.LessOrEqual(t, allocs, float64(1),
-			"at most the Bitmap struct from CloneToBuf; expansion into pre-allocated buffer must not allocate")
+			"at most the Bitmap struct from CloneTo; expansion into pre-allocated buffer must not allocate")
 	})
 
 	// The panic names the constructor the caller reached it through, not the
@@ -1296,8 +1297,8 @@ func TestCloneToBuf(t *testing.T) {
 		bm := NewBitmap()
 		bm.Set(1)
 		buf := make([]byte, 0, bm.LenInBytes()-1)
-		want := fmt.Sprintf("CloneToBuf: buf too small: need %d bytes, got %d", bm.LenInBytes(), cap(buf))
-		require.PanicsWithValue(t, want, func() { bm.CloneToBuf(nil, bufPoolOf(buf)) })
+		want := fmt.Sprintf("CloneTo: buf too small: need %d bytes, got %d", bm.LenInBytes(), cap(buf))
+		require.PanicsWithValue(t, want, func() { bm.CloneTo(nil, tailOnly(bufPoolOf(buf))) })
 	})
 
 	t.Run("allow buffer of odd size", func(t *testing.T) {
@@ -1306,14 +1307,258 @@ func TestCloneToBuf(t *testing.T) {
 		bmLen := bm.LenInBytes()
 
 		buf := make([]byte, 0, bmLen+3)
-		cloned := bm.CloneToBuf(nil, bufPoolOf(buf))
+		cloned := bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
 
 		require.Equal(t, bmLen, cloned.LenInBytes())
 		require.Equal(t, bmLen+2, cloned.CapInBytes())
 	})
 }
 
-func TestFromBufferToBufCapacity(t *testing.T) {
+type layoutToVariant struct {
+	name         string
+	split, clone bool
+	build        func(src, dst *Bitmap, opts BuildOpts) *Bitmap
+}
+
+// layoutToVariants covers each way ZeroedLayoutTo and CloneTo spend a surplus.
+var layoutToVariants = []layoutToVariant{
+	{"ZeroedLayoutTo", false, false, (*Bitmap).ZeroedLayoutTo},
+	{"ZeroedLayoutTo", true, false, (*Bitmap).ZeroedLayoutTo},
+	{"CloneTo", false, true, (*Bitmap).CloneTo},
+	{"CloneTo", true, true, (*Bitmap).CloneTo},
+}
+
+func (v layoutToVariant) opts(pool BufPool) BuildOpts {
+	return BuildOpts{Pool: pool, SpareTailOnly: !v.split}
+}
+
+// dirtyBuf returns a buffer of size bytes holding old data.
+func dirtyBuf(size int) []byte { return bytes.Repeat([]byte{0xFF}, size) }
+
+// spareExtraKeys is the number of key slots a build over src
+// spends surplus uint16s on.
+func spareExtraKeys(src *Bitmap, surplus int) int {
+	if src.LenInBytes() == 0 {
+		src = NewBitmap()
+	}
+	numKeys, sizeKeys := src.keys.numKeys(), src.keys.size()
+	sizeContainer0 := int(src.getContainer(src.keys.val(0))[indexSize])
+	return BuildOpts{}.spareKeySlots(make([]byte, 2*surplus), 0, numKeys, sizeContainer0, len(src.data)-sizeKeys-sizeContainer0)
+}
+
+func TestLayoutTo(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, v := range layoutToVariants {
+			// No surplus, and an odd one a uint16 short of a key slot and its
+			// container, both leave the layout without extra key slots.
+			for _, surplus := range []int{0, 2*(keySlotU16+minContainerSize) - 1} {
+				for _, reused := range []*Bitmap{nil, bitmapOf(99, 100_000)} {
+					t.Run(fmt.Sprintf("%s/%s/split %t/surplus %d/reused %t", tc.name, v.name, v.split, surplus, reused != nil), func(t *testing.T) {
+						var asked, calls int
+						got := v.build(tc.src, reused, v.opts(getPool(func(sizeBytes int) []byte {
+							asked, calls = sizeBytes, calls+1
+							return dirtyBuf(sizeBytes + surplus)
+						})))
+
+						require.Equal(t, 1, calls)
+						if reused != nil {
+							require.Same(t, reused, got)
+						}
+						requireLayoutOf(t, tc.src, got, 0, !v.clone)
+						require.Equal(t, asked, got.LenInBytes())
+						require.Equal(t, (asked+surplus)/2*2, got.CapInBytes())
+						if v.split && !v.clone {
+							plain := tc.src.ZeroedLayoutTo(nil, tailOnly(getPool(func(sizeBytes int) []byte { return dirtyBuf(sizeBytes + surplus) })))
+							require.Equal(t, plain.data, got.data)
+						}
+						requireSubsetOrKeepsLayout(t, tc.src, got, !v.clone)
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestLayoutToSurplus(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, v := range layoutToVariants {
+			t.Run(fmt.Sprintf("%s/%s/split %t", tc.name, v.name, v.split), func(t *testing.T) {
+				var asked, capBytes int
+				got := v.build(tc.src, nil, v.opts(getPool(func(sizeBytes int) []byte {
+					asked = sizeBytes
+					buf := dirtyBuf(max(sizeBytes*5/4, sizeBytes+16*(keySlotU16+minContainerSize)))
+					capBytes = cap(buf)
+					return buf[:sizeBytes]
+				})))
+
+				extraKeys := 0
+				if v.split {
+					extraKeys = spareExtraKeys(tc.src, (capBytes-asked)/2)
+					require.Positive(t, extraKeys)
+				}
+				requireLayoutOf(t, tc.src, got, extraKeys, !v.clone)
+				requireSpareOrKeepsLayout(t, tc.src, got, extraKeys, !v.clone)
+			})
+		}
+	}
+}
+
+func TestZeroedLayoutToMatchesCloneTo(t *testing.T) {
+	for _, tc := range layoutSources(t) {
+		for _, pooled := range []bool{false, true} {
+			for _, ratio := range []float64{0, 1.3001} {
+				for _, tailOnly := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/pooled %t/ratio %v/tail only %t", tc.name, pooled, ratio, tailOnly), func(t *testing.T) {
+						build := func(to func(*Bitmap, BuildOpts) *Bitmap) (bm *Bitmap, asked int) {
+							opts := BuildOpts{InitialSpareRatio: ratio, SpareTailOnly: tailOnly}
+							if pooled {
+								opts.Pool = getPool(func(sizeBytes int) []byte {
+									asked = sizeBytes
+									return dirtyBuf(sizeBytes)
+								})
+							}
+							return to(nil, opts), asked
+						}
+						clone, cloneAsked := build(tc.src.CloneTo)
+						got, asked := build(tc.src.ZeroedLayoutTo)
+
+						require.Equal(t, cloneAsked, asked)
+						require.Equal(t, clone.LenInBytes(), got.LenInBytes())
+						require.Equal(t, clone.CapInBytes(), got.CapInBytes())
+						sizeKeys := clone.keys.size()
+						require.Equal(t, sizeKeys, got.keys.size())
+						require.Equal(t, clone.keys.maxKeys(), got.keys.maxKeys())
+						// This compares keys, offsets, free slots and any odd remainder.
+						require.Equal(t, clone.data[:sizeKeys], got.data[:sizeKeys])
+						for i, off := range offsetsOf(clone) {
+							want, c := clone.getContainer(off), got.getContainer(off)
+							require.Equal(t, want[indexSize], c[indexSize], "size of container %d", i)
+							require.Equal(t, want[indexType], c[indexType], "type of container %d", i)
+							require.Zero(t, getCardinality(c), "container %d", i)
+						}
+						require.Empty(t, got.ToArray())
+						if !tailOnly && ratio > 0 {
+							plainSize := NewBitmap().keys.size()
+							if tc.src.LenInBytes() > 0 {
+								plainSize = tc.src.keys.size()
+							}
+							require.Greater(t, sizeKeys, plainSize, "the spare bought no key slots")
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// requireSpareOrKeepsLayout ORs into got, src's zeroed layout or clone, a subset
+// of src, an overflow of its last array and the new keys its slots and tail room
+// hold. Only the overflowed array may move, as Or rebuilds it at the tail.
+func requireSpareOrKeepsLayout(t *testing.T, src, got *Bitmap, extraKeys int, zeroed bool) {
+	t.Helper()
+	if src.LenInBytes() == 0 {
+		src = NewBitmap()
+	}
+	numKeys := got.keys.numKeys()
+	freeKeys := src.keys.maxKeys() - numKeys - 1 + extraKeys // One slot always stays free.
+	if freeKeys == 0 {
+		return
+	}
+	data, capBytes, offsets := &got.data[0], got.CapInBytes(), offsetsOf(got)
+	requireUnmoved := func() {
+		t.Helper()
+		require.Same(t, data, &got.data[0], "data reallocated")
+		require.Equal(t, capBytes, got.CapInBytes())
+		require.Equal(t, offsets[:numKeys-1], offsetsOf(got)[:numKeys-1])
+	}
+
+	// Overflowing an array doubles it, which a small layout's room may not hold
+	// next to a new key's container.
+	want := sparseSubset(src)
+	if !zeroed {
+		want.Or(src)
+	}
+	lastKey := got.keys.key(numKeys - 1)
+	room := cap(got.data) - len(got.data)
+	if last := got.getContainer(offsets[numKeys-1]); last[indexType] == typeArray && room >= int(last[indexSize])+minContainerSize {
+		overflow := NewBitmap()
+		for v := 0; v <= int(last[indexSize]-startIdx); v++ {
+			overflow.Set(lastKey | uint64(v))
+		}
+		want.Or(overflow)
+	}
+	got.Or(want)
+	requireUnmoved()
+
+	newKeys := min(freeKeys, (cap(got.data)-len(got.data))/minContainerSize)
+	require.Positive(t, newKeys, "the overflow left no room for a new key")
+	tail := NewBitmap()
+	for k := 1; k <= newKeys; k++ {
+		tail.Set(lastKey + uint64(k)<<16)
+	}
+	got.Or(tail)
+	want.Or(tail)
+	requireUnmoved()
+	require.Equal(t, numKeys+newKeys, got.keys.numKeys())
+	require.Equal(t, want.ToArray(), got.ToArray())
+}
+
+func TestLayoutToContract(t *testing.T) {
+	bm := fillKeys(3, 100)
+	empty := NewBitmap()
+	short := getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes-2) })
+	tooSmall := func(v layoutToVariant) string {
+		size := bm.LenInBytes()
+		return fmt.Sprintf("%s: buf too small: need %d bytes, got %d", v.name, size, size-2)
+	}
+
+	for _, v := range layoutToVariants {
+		for _, tc := range []struct {
+			want string
+			call func()
+		}{
+			{tooSmall(v), func() { v.build(bm, nil, v.opts(short)) }},
+			{v.name + ": dst is the source bitmap", func() { v.build(bm, bm, v.opts(heapPool)) }},
+			{v.name + ": dst is the source bitmap", func() { v.build(empty, empty, v.opts(heapPool)) }},
+		} {
+			t.Run(fmt.Sprintf("%s/split %t", tc.want, v.split), func(t *testing.T) {
+				require.PanicsWithValue(t, tc.want, tc.call)
+			})
+		}
+	}
+
+	t.Run("allocates nothing with pooled struct and buffer", func(t *testing.T) {
+		pooled, buf := &Bitmap{}, make([]byte, 1<<16)
+		pool := getPool(func(sizeBytes int) []byte { return buf[:sizeBytes] })
+		for _, v := range layoutToVariants {
+			require.Zero(t, testing.AllocsPerRun(10, func() { v.build(bm, pooled, v.opts(pool)) }), v.name)
+		}
+	})
+
+	// New keys outgrow the build's buffer, so the result must grow through pool.
+	t.Run("grows through pool and releases each buffer once", func(t *testing.T) {
+		newKeys := fillKeys(40, 10)
+		for _, v := range layoutToVariants {
+			t.Run(fmt.Sprintf("%s/split %t", v.name, v.split), func(t *testing.T) {
+				pool := &trackedPool{}
+				got := v.build(bm, nil, v.opts(pool))
+				got.Or(newKeys)
+
+				want := newKeys.Clone()
+				if v.clone {
+					want.Or(bm)
+				}
+				require.Equal(t, want.ToArray(), got.ToArray())
+				require.Greater(t, pool.gets(), 1)
+				pool.requireReleasedOnce(t, 1)
+				got.ReleaseBuf()
+				pool.requireReleasedOnce(t, 0)
+			})
+		}
+	})
+}
+
+func TestFromBufferOwnedCapacity(t *testing.T) {
 	assertEqualBitmaps := func(t *testing.T, bm, fromBuf *Bitmap) {
 		require.Equal(t, bm.GetCardinality(), fromBuf.GetCardinality())
 		require.Equal(t, bm.LenInBytes(), fromBuf.LenInBytes())
@@ -1352,8 +1597,8 @@ func TestFromBufferToBufCapacity(t *testing.T) {
 					"buf greater cap": make([]byte, lenInBytes, lenInBytes*3/2),
 				} {
 					t.Run(name, func(t *testing.T) {
-						bm.CloneToBuf(nil, bufPoolOf(buf))
-						fromBuf := FromBufferToBuf(nil, buf, nil, heapPool)
+						bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
+						fromBuf := FromBufferOwned(nil, buf, nil, heapPool)
 
 						assertEqualBitmaps(t, bm, fromBuf)
 						require.Equal(t, cap(buf), fromBuf.CapInBytes())
@@ -1366,7 +1611,7 @@ func TestFromBufferToBufCapacity(t *testing.T) {
 	t.Run("small buffer, empty bitmap", func(t *testing.T) {
 		bmEmpty := NewBitmap()
 		buf := make([]byte, 6)
-		fromBuf := FromBufferToBuf(nil, buf, nil, heapPool)
+		fromBuf := FromBufferOwned(nil, buf, nil, heapPool)
 
 		assertEqualBitmaps(t, bmEmpty, fromBuf)
 		require.Equal(t, bmEmpty.CapInBytes(), fromBuf.CapInBytes())
@@ -1378,8 +1623,8 @@ func TestFromBufferToBufCapacity(t *testing.T) {
 
 		// buf big enough for additional containers
 		buf := make([]byte, bm.LenInBytes(), bm.LenInBytes()*4)
-		bm.CloneToBuf(nil, bufPoolOf(buf))
-		fromBuf := FromBufferToBuf(nil, buf, nil, heapPool)
+		bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
+		fromBuf := FromBufferOwned(nil, buf, nil, heapPool)
 		fromBufLen := fromBuf.LenInBytes()
 		fromBufCap := fromBuf.CapInBytes()
 
@@ -1396,8 +1641,8 @@ func TestFromBufferToBufCapacity(t *testing.T) {
 		bmLen := bm.LenInBytes()
 
 		buf := make([]byte, bmLen, bmLen+3)
-		bm.CloneToBuf(nil, bufPoolOf(buf))
-		fromBuf := FromBufferToBuf(nil, buf, nil, heapPool)
+		bm.CloneTo(nil, tailOnly(bufPoolOf(buf)))
+		fromBuf := FromBufferOwned(nil, buf, nil, heapPool)
 
 		require.Equal(t, bmLen, fromBuf.LenInBytes())
 		require.Equal(t, bmLen+2, fromBuf.CapInBytes())
@@ -2689,7 +2934,7 @@ func TestExpandConditionally(t *testing.T) {
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 0; k <= additionalKeys; k++ {
 				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
-					res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, expCapBytes)))
+					res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, expCapBytes))))
 
 					res.expandConditionally(k, k*minContainerSize)
 
@@ -2704,7 +2949,7 @@ func TestExpandConditionally(t *testing.T) {
 			for k, bms := range keysToBms {
 				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
 					for _, bm := range bms {
-						res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, expCapBytes)))
+						res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, expCapBytes))))
 						resIds := append(expIds, bm.ToArray()...)
 
 						res.Or(bm)
@@ -2731,7 +2976,7 @@ func TestExpandConditionally(t *testing.T) {
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
 				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
-					res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, expCapBytes)))
+					res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, expCapBytes))))
 					// keys are extended to fit up to max of [current num of keys] or [num new keys]
 					expKeysSize := bm024.keys.size() + max(k, bm024.keys.numKeys())*8
 
@@ -2751,7 +2996,7 @@ func TestExpandConditionally(t *testing.T) {
 					expKeysSize := bm024.keys.size() + max(k, bm024.keys.numKeys())*8
 
 					for _, bm := range bms {
-						res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, expCapBytes)))
+						res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, expCapBytes))))
 						resIds := append(expIds, bm.ToArray()...)
 
 						res.Or(bm)
@@ -2777,7 +3022,7 @@ func TestExpandConditionally(t *testing.T) {
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
 				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
-					res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, capBytes)))
+					res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, capBytes))))
 					expKeysSize := keysSize + k*8
 					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+k*8)*2)
 
@@ -2798,7 +3043,7 @@ func TestExpandConditionally(t *testing.T) {
 					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+k*8)*2)
 
 					for _, bm := range bms {
-						res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, capBytes)))
+						res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, capBytes))))
 						resIds := append(expIds, bm.ToArray()...)
 
 						res.Or(bm)
@@ -2823,7 +3068,7 @@ func TestExpandConditionally(t *testing.T) {
 		t.Run("direct expand conditionally", func(t *testing.T) {
 			for k := 1; k <= additionalKeys; k++ {
 				t.Run(fmt.Sprintf("keys=%d", k), func(t *testing.T) {
-					res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, capBytes)))
+					res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, capBytes))))
 					numNewKeys := max(bm024.keys.numKeys(), k)
 					expKeysSize := keysSize + numNewKeys*8
 					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+numNewKeys*8)*2)
@@ -2846,7 +3091,7 @@ func TestExpandConditionally(t *testing.T) {
 					expCapBytes := capBytes + max(capBytes, (k*minContainerSize+numNewKeys*8)*2)
 
 					for _, bm := range bms {
-						res := bm024.CloneToBuf(nil, bufPoolOf(make([]byte, capBytes)))
+						res := bm024.CloneTo(nil, tailOnly(bufPoolOf(make([]byte, capBytes))))
 						resIds := append(expIds, bm.ToArray()...)
 
 						res.Or(bm)
@@ -3025,10 +3270,10 @@ func TestMaskedAnd(t *testing.T) {
 	})
 }
 
-func TestMaskedAndToBuf(t *testing.T) {
+func TestMaskedAndTo(t *testing.T) {
 	t.Run("nil inputs", func(t *testing.T) {
 		var a, b *Bitmap
-		result := MaskedAndToBuf(nil, a, b, math.MaxUint64, bufPoolOf(make([]byte, 4096)))
+		result := MaskedAndTo(nil, a, b, math.MaxUint64, tailOnly(bufPoolOf(make([]byte, 4096))))
 		require.Equal(t, 0, result.GetCardinality())
 	})
 
@@ -3045,7 +3290,7 @@ func TestMaskedAndToBuf(t *testing.T) {
 		masks := []uint64{0, 0x0000FFFFFFFFFFFF, math.MaxUint64, 0x00000000FFFF0000}
 		for _, m := range masks {
 			expected := MaskedAnd(a, b, m)
-			got := MaskedAndToBuf(nil, a, b, m, bufPoolOf(make([]byte, 1<<20)))
+			got := MaskedAndTo(nil, a, b, m, tailOnly(bufPoolOf(make([]byte, 1<<20))))
 
 			require.Equal(t, expected.GetCardinality(), got.GetCardinality(), "mask %#x", m)
 			for _, v := range expected.ToArray() {
@@ -3065,7 +3310,7 @@ func TestMaskedAndToBuf(t *testing.T) {
 		}
 
 		bufSize := 1 << 20
-		result := MaskedAndToBuf(nil, a, b, 0x0000FFFFFFFFFFFF, bufPoolOf(make([]byte, bufSize)))
+		result := MaskedAndTo(nil, a, b, 0x0000FFFFFFFFFFFF, tailOnly(bufPoolOf(make([]byte, bufSize))))
 
 		require.Greater(t, result.GetCardinality(), 0)
 		require.Equal(t, bufSize, result.CapInBytes(), "capacity should not change")
@@ -3579,8 +3824,8 @@ func TestCopresenceByMask(t *testing.T) {
 		t.Run("plain", func(t *testing.T) {
 			check(t, CopresenceByMask(inputs, mask))
 		})
-		t.Run("ToBuf", func(t *testing.T) {
-			check(t, CopresenceByMaskToBuf(nil, inputs, mask, heapPool))
+		t.Run("To", func(t *testing.T) {
+			check(t, CopresenceByMaskTo(nil, inputs, mask, tailOnly(heapPool)))
 		})
 	}
 
@@ -4033,10 +4278,10 @@ func TestCopresenceByMaskProperties(t *testing.T) {
 	})
 }
 
-func TestCopresenceByMaskToBuf(t *testing.T) {
+func TestCopresenceByMaskTo(t *testing.T) {
 	// TestCopresenceByMask runs every table case through both
-	// CopresenceByMask and CopresenceByMaskToBuf, so result-correctness is
-	// covered there. The subtests below verify ToBuf-specific behaviour
+	// CopresenceByMask and CopresenceByMaskTo, so result-correctness is
+	// covered there. The subtests below verify To-specific behaviour
 	// that the unified table can't observe.
 	pos := func(hi, mid, lo uint64) uint64 {
 		return (hi << 50) | (mid << 36) | lo
@@ -4060,7 +4305,7 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 		}
 		bufBytes := 64 * 1024
 		buf := make([]byte, bufBytes)
-		got := CopresenceByMaskToBuf(nil, inputs, maskZeroMid, bufPoolOf(buf))
+		got := CopresenceByMaskTo(nil, inputs, maskZeroMid, tailOnly(bufPoolOf(buf)))
 
 		require.Greater(t, got.GetCardinality(), 0)
 		require.Equal(t, bufBytes, got.CapInBytes(),
@@ -4068,7 +4313,7 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 	})
 
 	t.Run("an empty input takes only the empty layout", func(t *testing.T) {
-		got := CopresenceByMaskToBuf(nil, []*Bitmap{fullContainersBitmap(3), NewBitmap()}, maskZeroMid, heapPool)
+		got := CopresenceByMaskTo(nil, []*Bitmap{fullContainersBitmap(3), NewBitmap()}, maskZeroMid, tailOnly(heapPool))
 		require.True(t, got.IsEmpty())
 		require.Equal(t, emptyBitmapBytes, got.CapInBytes())
 	})
@@ -4077,7 +4322,7 @@ func TestCopresenceByMaskToBuf(t *testing.T) {
 		// Single-input short-circuit returns a Clone-backed-by-buf. Verify
 		// the result is independent of the source.
 		a := bm(pos(1, 1, 5), pos(2, 7, 9))
-		got := CopresenceByMaskToBuf(nil, []*Bitmap{a}, maskZeroMid, bufPoolOf(make([]byte, 4096)))
+		got := CopresenceByMaskTo(nil, []*Bitmap{a}, maskZeroMid, tailOnly(bufPoolOf(make([]byte, 4096))))
 		require.Equal(t, a.ToArray(), got.ToArray())
 		got.Set(pos(99, 0, 0))
 		require.False(t, a.Contains(pos(99, 0, 0)), "result must be a clone, not aliased")
@@ -4249,7 +4494,7 @@ func narrow(t testing.TB, vals []uint64) []uint32 {
 // built with Set, and requires the same bytes the Accumulator produces for
 // that content.
 func runFromSortedListCases[T sortedListVal](t *testing.T, build func([]T) *Bitmap,
-	toBuf func(*Bitmap, []T, BufPool) *Bitmap, cases map[string][]T,
+	buildTo func(*Bitmap, []T, BuildOpts) *Bitmap, cases map[string][]T,
 ) {
 	t.Helper()
 	for name, vals := range cases {
@@ -4274,13 +4519,13 @@ func runFromSortedListCases[T sortedListVal](t *testing.T, build func([]T) *Bitm
 			require.Equal(t, expected.GetCardinality(), rt.GetCardinality())
 			require.Equal(t, expected.ToArray(), rt.ToArray())
 
-			// ToBuf must produce the identical bitmap from a dirty, oversized
+			// A To build must produce the identical bitmap from a dirty, oversized
 			// buffer, asking once.
 			var askedBytes, getCalls int
-			bmBuf := toBuf(nil, vals, getPool(func(sizeBytes int) []byte {
+			bmBuf := buildTo(nil, vals, tailOnly(getPool(func(sizeBytes int) []byte {
 				askedBytes, getCalls = sizeBytes, getCalls+1
 				return fillBytes(make([]byte, sizeBytes+100), 0xff)
-			}))
+			})))
 			switch {
 			case bm.IsEmpty():
 				// Empty input still asks for a buffer (the minimal live
@@ -4305,7 +4550,7 @@ type toleratedCase[T sortedListVal] struct {
 }
 
 func runFromSortedListPanicCases[T sortedListVal](t *testing.T, build func([]T) *Bitmap,
-	toBuf func(*Bitmap, []T, BufPool) *Bitmap,
+	buildTo func(*Bitmap, []T, BuildOpts) *Bitmap,
 	unsorted map[string][]T, tolerated map[string]toleratedCase[T],
 ) {
 	t.Helper()
@@ -4316,10 +4561,10 @@ func runFromSortedListPanicCases[T sortedListVal](t *testing.T, build func([]T) 
 			// A panic after Get would strand the pool buffer it took.
 			gets := 0
 			require.Panics(t, func() {
-				toBuf(nil, vals, getPool(func(sizeBytes int) []byte {
+				buildTo(nil, vals, tailOnly(getPool(func(sizeBytes int) []byte {
 					gets++
 					return make([]byte, sizeBytes)
-				}))
+				})))
 			})
 			require.Zero(t, gets)
 		})
@@ -4341,7 +4586,7 @@ func TestFromSortedList(t *testing.T) {
 	cases["keys beyond uint32"] = []uint64{1, 2, 3, 1 << 40, 1<<40 + 1, 1 << 48}
 	cases["not starting at a low key"] = []uint64{1 << 20, 1<<20 + 5, 1 << 33}
 	cases["random across 40 bits"] = sortedRandom(rnd, 50_000, 1<<40)
-	runFromSortedListCases(t, FromSortedList, FromSortedListToBuf, cases)
+	runFromSortedListCases(t, FromSortedList, FromSortedListTo, cases)
 }
 
 // fromSortedListUnsortedCases must panic; fromSortedListToleratedCases must
@@ -4362,7 +4607,7 @@ func fromSortedListToleratedCases() map[string]toleratedCase[uint64] {
 }
 
 func TestFromSortedListPanicsOnUnsortedInput(t *testing.T) {
-	runFromSortedListPanicCases(t, FromSortedList, FromSortedListToBuf,
+	runFromSortedListPanicCases(t, FromSortedList, FromSortedListTo,
 		fromSortedListUnsortedCases(), fromSortedListToleratedCases())
 }
 
@@ -4409,7 +4654,7 @@ func fromSortedListDuplicateCases() map[string]toleratedCase[uint64] {
 // that the resulting layout is the one a duplicate-free build of the same
 // distinct values would produce.
 func runFromSortedListDuplicateCases[T sortedListVal](t *testing.T, build func([]T) *Bitmap,
-	toBuf func(*Bitmap, []T, BufPool) *Bitmap,
+	buildTo func(*Bitmap, []T, BuildOpts) *Bitmap,
 	cases map[string]toleratedCase[T],
 ) {
 	t.Helper()
@@ -4431,10 +4676,10 @@ func runFromSortedListDuplicateCases[T sortedListVal](t *testing.T, build func([
 			// where the requested size is an upper bound for duplicate
 			// input.
 			var askedBytes int
-			bmBuf := toBuf(nil, tc.vals, getPool(func(sizeBytes int) []byte {
+			bmBuf := buildTo(nil, tc.vals, tailOnly(getPool(func(sizeBytes int) []byte {
 				askedBytes = sizeBytes
 				return fillBytes(make([]byte, sizeBytes), 0xff)
-			}))
+			})))
 			require.GreaterOrEqual(t, askedBytes, len(bm.ToBuffer()))
 			require.Equal(t, bm.ToBuffer(), bmBuf.ToBuffer())
 		})
@@ -4478,7 +4723,7 @@ func TestFromSortedListDuplicates(t *testing.T) {
 		vals:     append(sortedDup(1500, 2, 2), 1<<40),
 		expected: append(sortedSeq(1500, 2), 1<<40),
 	}
-	runFromSortedListDuplicateCases(t, FromSortedList, FromSortedListToBuf, cases)
+	runFromSortedListDuplicateCases(t, FromSortedList, FromSortedListTo, cases)
 }
 
 func TestFromSortedList32Duplicates(t *testing.T) {
@@ -4486,7 +4731,7 @@ func TestFromSortedList32Duplicates(t *testing.T) {
 	for name, tc := range fromSortedListDuplicateCases() {
 		cases[name] = toleratedCase[uint32]{vals: narrow(t, tc.vals), expected: tc.expected}
 	}
-	runFromSortedListDuplicateCases(t, FromSortedList32, FromSortedList32ToBuf, cases)
+	runFromSortedListDuplicateCases(t, FromSortedList32, FromSortedList32To, cases)
 }
 
 // widen converts 32-bit values to the []uint64 the 64-bit constructors take.
@@ -4504,7 +4749,7 @@ func TestFromSortedList32(t *testing.T) {
 		cases[name] = narrow(t, vals)
 	}
 	cases["max uint32 values"] = []uint32{1, math.MaxUint32 - 1, math.MaxUint32}
-	runFromSortedListCases(t, FromSortedList32, FromSortedList32ToBuf, cases)
+	runFromSortedListCases(t, FromSortedList32, FromSortedList32To, cases)
 
 	// The two widths must agree byte for byte, not merely in content.
 	for name, vals := range cases {
@@ -4523,13 +4768,13 @@ func TestFromSortedList32PanicsOnUnsortedInput(t *testing.T) {
 	for name, tc := range fromSortedListToleratedCases() {
 		tolerated[name] = toleratedCase[uint32]{vals: narrow(t, tc.vals), expected: tc.expected}
 	}
-	runFromSortedListPanicCases(t, FromSortedList32, FromSortedList32ToBuf, unsorted, tolerated)
+	runFromSortedListPanicCases(t, FromSortedList32, FromSortedList32To, unsorted, tolerated)
 }
 
-func TestFromSortedListToBufStaysOnItsBuffer(t *testing.T) {
+func TestFromSortedListToStaysOnItsBuffer(t *testing.T) {
 	vals := []uint64{1, 2, 3, 1 << 20}
 	pool := &trackedPool{surplus: 1024}
-	bm := FromSortedListToBuf(nil, vals, pool)
+	bm := FromSortedListTo(nil, vals, tailOnly(pool))
 	oracle := FromSortedList(vals)
 
 	// Mutations that fit the buffer's spare capacity stay on it.
@@ -4545,15 +4790,15 @@ func TestFromSortedListToBufStaysOnItsBuffer(t *testing.T) {
 	pool.requireReleasedOnce(t, 0)
 }
 
-func TestFromSortedListToBufAllocatesNothing(t *testing.T) {
+func TestFromSortedListToAllocatesNothing(t *testing.T) {
 	pooled := &Bitmap{}
 	buf := make([]byte, 1<<12)
 	pool := getPool(func(sizeBytes int) []byte { return buf[:sizeBytes] })
 	vals := []uint64{1, 2, 3, 1 << 20, 1 << 40}
 	vals32 := []uint32{1, 2, 3, 1 << 20, 1 << 28}
 
-	require.Zero(t, testing.AllocsPerRun(10, func() { FromSortedListToBuf(pooled, vals, pool) }))
-	require.Zero(t, testing.AllocsPerRun(10, func() { FromSortedList32ToBuf(pooled, vals32, pool) }))
+	require.Zero(t, testing.AllocsPerRun(10, func() { FromSortedListTo(pooled, vals, tailOnly(pool)) }))
+	require.Zero(t, testing.AllocsPerRun(10, func() { FromSortedList32To(pooled, vals32, tailOnly(pool)) }))
 }
 
 // Every entry point of the family passes its own name down, so a panic
@@ -4562,10 +4807,10 @@ func TestFromSortedListPanicNamesCaller(t *testing.T) {
 	unsorted64, unsorted32 := []uint64{1, 3, 2}, []uint32{1, 3, 2}
 
 	unsortedCallers := map[string]func(){
-		"FromSortedList":        func() { FromSortedList(unsorted64) },
-		"FromSortedList32":      func() { FromSortedList32(unsorted32) },
-		"FromSortedListToBuf":   func() { FromSortedListToBuf(nil, unsorted64, heapPool) },
-		"FromSortedList32ToBuf": func() { FromSortedList32ToBuf(nil, unsorted32, heapPool) },
+		"FromSortedList":     func() { FromSortedList(unsorted64) },
+		"FromSortedList32":   func() { FromSortedList32(unsorted32) },
+		"FromSortedListTo":   func() { FromSortedListTo(nil, unsorted64, tailOnly(heapPool)) },
+		"FromSortedList32To": func() { FromSortedList32To(nil, unsorted32, tailOnly(heapPool)) },
 	}
 	for name, call := range unsortedCallers {
 		t.Run("unsorted/"+name, func(t *testing.T) {
@@ -4848,10 +5093,10 @@ func TestCompactedEmptySources(t *testing.T) {
 			// Get is asked for the layout's own size, so an empty source
 			// over-counting its containers shows up here and nowhere else.
 			var asked int
-			buf := tc.src.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+			buf := tc.src.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 				asked = sizeBytes
 				return make([]byte, sizeBytes)
-			}))
+			})))
 			require.True(t, buf.IsEmpty())
 			require.Equal(t, got.ToBuffer(), buf.ToBuffer())
 			require.Equal(t, FromSortedList(nil).LenInBytes(), asked)
@@ -4859,7 +5104,7 @@ func TestCompactedEmptySources(t *testing.T) {
 	}
 }
 
-func TestCompactedToBufContract(t *testing.T) {
+func TestCompactedToContract(t *testing.T) {
 	// The sparse bitmap container makes these cases cover padding clearing.
 	bm := bitmapWithSparseBitmapContainer()
 	for _, v := range sortedSeq(20, 1<<16) {
@@ -4869,24 +5114,24 @@ func TestCompactedToBufContract(t *testing.T) {
 
 	t.Run("asks for exactly what the result occupies", func(t *testing.T) {
 		var asked, calls int
-		got := bm.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+		got := bm.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 			calls++
 			asked = sizeBytes
 			return make([]byte, sizeBytes)
-		}))
+		})))
 		require.Equal(t, 1, calls, "Get must be called exactly once")
 		require.Equal(t, len(want), asked)
 		require.Equal(t, want, got.ToBuffer())
 	})
 
 	t.Run("writes over a dirty oversized buffer", func(t *testing.T) {
-		got := bm.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+		got := bm.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 			buf := make([]byte, sizeBytes+100)
 			for i := range buf {
 				buf[i] = 0xff
 			}
 			return buf
-		}))
+		})))
 		require.Equal(t, want, got.ToBuffer())
 	})
 
@@ -4894,13 +5139,13 @@ func TestCompactedToBufContract(t *testing.T) {
 		dense := bm.Clone()
 		dense.Or(Prefill(1 << 18))
 		wantDense := dense.Compacted().ToBuffer()
-		got := dense.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+		got := dense.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 			buf := make([]byte, sizeBytes)
 			for i := range buf {
 				buf[i] = 0xff
 			}
 			return buf
-		}))
+		})))
 		require.Equal(t, typeBitmap, got.getContainer(got.keys.val(1))[indexType],
 			"the fixture must reach the bitmap to bitmap arm")
 		require.Equal(t, wantDense, got.ToBuffer())
@@ -4928,13 +5173,13 @@ func TestCompactedToBufContract(t *testing.T) {
 				src.Set(1<<16 | 5)
 
 				var asked int
-				got := src.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+				got := src.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 					if asked == 0 {
 						asked = sizeBytes
 						tc.grow(src)
 					}
 					return make([]byte, sizeBytes)
-				}))
+				})))
 				require.Equal(t, src.ToArray(), got.ToArray())
 				require.Greater(t, got.LenInBytes(), asked,
 					"the fill must have outgrown the buffer Get was asked for")
@@ -4943,13 +5188,13 @@ func TestCompactedToBufContract(t *testing.T) {
 	})
 
 	t.Run("adopts full capacity of length limited buffer", func(t *testing.T) {
-		got := bm.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte { return make([]byte, 0, sizeBytes) }))
+		got := bm.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte { return make([]byte, 0, sizeBytes) })))
 		require.Equal(t, want, got.ToBuffer())
 	})
 
 	t.Run("builds into the provided struct", func(t *testing.T) {
 		reused := bitmapOf(99, 100_000)
-		got := bm.CompactedToBuf(reused, heapPool)
+		got := bm.CompactedTo(reused, tailOnly(heapPool))
 		require.Same(t, reused, got)
 		require.Equal(t, want, got.ToBuffer())
 	})
@@ -4958,13 +5203,13 @@ func TestCompactedToBufContract(t *testing.T) {
 		pooled := &Bitmap{}
 		buf := make([]byte, 1<<16)
 		pool := getPool(func(sizeBytes int) []byte { return buf[:sizeBytes] })
-		allocs := testing.AllocsPerRun(10, func() { bm.CompactedToBuf(pooled, pool) })
+		allocs := testing.AllocsPerRun(10, func() { bm.CompactedTo(pooled, tailOnly(pool)) })
 		require.Zero(t, allocs)
 	})
 
 	t.Run("nil receiver with nil dst is not the source", func(t *testing.T) {
 		var nilBM *Bitmap
-		require.True(t, nilBM.CompactedToBuf(nil, heapPool).IsEmpty())
+		require.True(t, nilBM.CompactedTo(nil, tailOnly(heapPool)).IsEmpty())
 	})
 
 	t.Run("panics naming the caller", func(t *testing.T) {
@@ -4973,23 +5218,23 @@ func TestCompactedToBufContract(t *testing.T) {
 			want string
 			call func()
 		}{
-			{name: "dst is the source", want: "CompactedToBuf: dst is the source bitmap", call: func() {
-				bm.CompactedToBuf(bm, heapPool)
+			{name: "dst is the source", want: "CompactedTo: dst is the source bitmap", call: func() {
+				bm.CompactedTo(bm, tailOnly(heapPool))
 			}},
-			{name: "headroom dst is the source", want: "CompactedToBufWithHeadroom: dst is the source bitmap", call: func() {
-				bm.CompactedToBufWithHeadroom(bm, heapPool)
+			{name: "split dst is the source", want: "CompactedTo: dst is the source bitmap", call: func() {
+				bm.CompactedTo(bm, BuildOpts{Pool: heapPool})
 			}},
-			{name: "masked dst is the source", want: "MaskedToBuf: dst is the source bitmap", call: func() {
-				bm.MaskedToBuf(bm, math.MaxUint64, heapPool)
+			{name: "masked dst is the source", want: "MaskedTo: dst is the source bitmap", call: func() {
+				bm.MaskedTo(bm, math.MaxUint64, tailOnly(heapPool))
 			}},
-			{name: "masked and dst is a", want: "MaskedAndToBuf: dst is a source bitmap", call: func() {
-				MaskedAndToBuf(bm, bm, NewBitmap(), math.MaxUint64, heapPool)
+			{name: "masked and dst is a", want: "MaskedAndTo: dst is a source bitmap", call: func() {
+				MaskedAndTo(bm, bm, NewBitmap(), math.MaxUint64, tailOnly(heapPool))
 			}},
-			{name: "masked and dst is a source", want: "MaskedAndToBuf: dst is a source bitmap", call: func() {
-				MaskedAndToBuf(bm, NewBitmap(), bm, math.MaxUint64, heapPool)
+			{name: "masked and dst is a source", want: "MaskedAndTo: dst is a source bitmap", call: func() {
+				MaskedAndTo(bm, NewBitmap(), bm, math.MaxUint64, tailOnly(heapPool))
 			}},
-			{name: "copresence dst is a source", want: "CopresenceByMaskToBuf: dst is a source bitmap", call: func() {
-				CopresenceByMaskToBuf(bm, []*Bitmap{bm}, math.MaxUint64, heapPool)
+			{name: "copresence dst is a source", want: "CopresenceByMaskTo: dst is a source bitmap", call: func() {
+				CopresenceByMaskTo(bm, []*Bitmap{bm}, math.MaxUint64, tailOnly(heapPool))
 			}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -5050,13 +5295,13 @@ func TestCompactedRewritesOversizedArrayContainerToDirtyBuffer(t *testing.T) {
 	bm := oversizedArrayContainerAt(t, 1)
 
 	want := bm.Compacted().ToBuffer()
-	got := bm.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte {
+	got := bm.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte {
 		buf := make([]byte, sizeBytes)
 		for i := range buf {
 			buf[i] = 0xff
 		}
 		return buf
-	}))
+	})))
 	require.Equal(t, typeBitmap, got.getContainer(got.keys.val(1))[indexType])
 	require.Equal(t, want, got.ToBuffer())
 	require.Equal(t, bm.ToArray(), got.ToArray())
@@ -5067,11 +5312,11 @@ func TestCompactedPanicsOnUnknownContainerType(t *testing.T) {
 	bm.data[bm.keys.val(0)+uint64(indexType)] = 7
 
 	require.PanicsWithValue(t, "Compacted: unknown container type 7", func() { bm.Compacted() })
-	require.PanicsWithValue(t, "CompactedToBuf: unknown container type 7", func() {
-		bm.CompactedToBuf(nil, getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes) }))
+	require.PanicsWithValue(t, "CompactedTo: unknown container type 7", func() {
+		bm.CompactedTo(nil, tailOnly(getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes) })))
 	})
-	require.PanicsWithValue(t, "CompactedToBufWithHeadroom: unknown container type 7", func() {
-		bm.CompactedToBufWithHeadroom(nil, getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes) }))
+	require.PanicsWithValue(t, "CompactedTo: unknown container type 7", func() {
+		bm.CompactedTo(nil, BuildOpts{Pool: getPool(func(sizeBytes int) []byte { return make([]byte, sizeBytes) })})
 	})
 }
 
@@ -5121,7 +5366,7 @@ func TestCompactedMatchesExactSizeBuild(t *testing.T) {
 	}
 }
 
-// exactCompactedBuf opts out of headroom by capping at the size asked for.
+// exactCompactedBuf leaves no spare by capping at the size asked for.
 func exactCompactedBuf(sizeBytes int) []byte {
 	buf := make([]byte, sizeBytes)
 	return buf[:sizeBytes:sizeBytes]
@@ -5146,13 +5391,13 @@ func avgOtherContainerSize(bm *Bitmap) int {
 	return total / (n - 1)
 }
 
-func TestCompactedToBufWithHeadroomExactBuffer(t *testing.T) {
+func TestCompactedToSplitExactBuffer(t *testing.T) {
 	for _, tc := range compactionCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			want := bm.CompactedToBuf(nil, getPool(exactCompactedBuf))
+			want := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf)))
 
-			got := bm.CompactedToBufWithHeadroom(nil, getPool(exactCompactedBuf))
+			got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(exactCompactedBuf)})
 
 			require.Equal(t, want.ToBuffer(), got.ToBuffer())
 			require.Equal(t, bm.Compacted().ToBuffer(), got.ToBuffer())
@@ -5164,14 +5409,14 @@ func TestCompactedToBufWithHeadroomExactBuffer(t *testing.T) {
 }
 
 // A surplus buffer buys the exact-size constructors nothing.
-func TestCompactedToBufIgnoresSurplus(t *testing.T) {
+func TestCompactedToIgnoresSurplus(t *testing.T) {
 	const extraBytes = 1 << 14
 	for _, tc := range compactionCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			want := bm.CompactedToBuf(nil, getPool(exactCompactedBuf))
+			want := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf)))
 
-			got := bm.CompactedToBuf(nil, getPool(surplusCompactedBuf(extraBytes)))
+			got := bm.CompactedTo(nil, tailOnly(getPool(surplusCompactedBuf(extraBytes))))
 
 			require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
 			require.Equal(t, want.LenInBytes(), got.LenInBytes())
@@ -5180,14 +5425,14 @@ func TestCompactedToBufIgnoresSurplus(t *testing.T) {
 	}
 }
 
-func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
+func TestCompactedToSplitSpendsTheSurplus(t *testing.T) {
 	const extraBytes = 1 << 14
 	for _, tc := range compactionCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			exact := bm.CompactedToBuf(nil, getPool(exactCompactedBuf))
+			exact := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf)))
 
-			got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+			got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 
 			extraKeys := got.keys.maxKeys() - exact.keys.maxKeys()
 			require.Positive(t, extraKeys)
@@ -5195,7 +5440,7 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 			require.Equal(t, exact.LenInBytes()+2*keySlotU16*extraKeys, got.LenInBytes())
 			require.Equal(t, bm.ToArray(), got.ToArray())
 			require.LessOrEqual(t, got.LenInBytes(), exact.LenInBytes()+extraBytes,
-				"the headroom must fit in the surplus")
+				"the spare key slots must fit in the surplus")
 
 			// minContainerSize and maxContainerSize bracket every other case.
 			require.LessOrEqual(t, extraKeys, extraBytes/2/(keySlotU16+minContainerSize))
@@ -5205,28 +5450,28 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 
 	t.Run("min-sized array containers spend the most on slots", func(t *testing.T) {
 		bm := bitmapOf(sortedSeq(20, 1<<16)...)
-		got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+		got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 		require.Equal(t, minContainerSize, avgOtherContainerSize(got))
 		require.Equal(t, extraBytes/2/(keySlotU16+minContainerSize),
-			got.keys.maxKeys()-bm.CompactedToBuf(nil, getPool(exactCompactedBuf)).keys.maxKeys())
+			got.keys.maxKeys()-bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf))).keys.maxKeys())
 	})
 
 	t.Run("a surplus buys slots at one slot plus one container, not below", func(t *testing.T) {
 		const slotWithContainer = 2 * (keySlotU16 + minContainerSize)
 		bm := bitmapOf(sortedSeq(20, 1<<16)...)
-		exact := bm.CompactedToBuf(nil, getPool(exactCompactedBuf)).keys.maxKeys()
+		exact := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf))).keys.maxKeys()
 
-		require.Equal(t, exact, bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(slotWithContainer-2))).keys.maxKeys())
-		require.Equal(t, exact+1, bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(slotWithContainer))).keys.maxKeys())
+		require.Equal(t, exact, bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(slotWithContainer - 2))}).keys.maxKeys())
+		require.Equal(t, exact+1, bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(slotWithContainer))}).keys.maxKeys())
 	})
 
 	t.Run("a length limited buffer is split by its capacity", func(t *testing.T) {
 		bm := bitmapOf(sortedSeq(20, 1<<16)...)
-		want := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+		want := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 
-		got := bm.CompactedToBufWithHeadroom(nil, getPool(func(sizeBytes int) []byte {
+		got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(func(sizeBytes int) []byte {
 			return make([]byte, 0, sizeBytes+extraBytes)
-		}))
+		})})
 
 		require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
 		require.Equal(t, want.ToBuffer(), got.ToBuffer())
@@ -5234,10 +5479,10 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 
 	t.Run("an odd or tiny surplus rounds down the way the buffer does", func(t *testing.T) {
 		bm := bitmapOf(sortedSeq(20, 1<<16)...)
-		exact := bm.CompactedToBuf(nil, getPool(exactCompactedBuf))
+		exact := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf)))
 		for _, spare := range []int{1, 2, 143, 145, 1 << 22} {
 			t.Run(fmt.Sprint(spare), func(t *testing.T) {
-				got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(spare)))
+				got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(spare))})
 				require.Equal(t, exact.keys.maxKeys()+spare/2/(keySlotU16+minContainerSize),
 					got.keys.maxKeys())
 				require.Equal(t, bm.ToArray(), got.ToArray())
@@ -5248,7 +5493,7 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 
 	t.Run("a surplus below one average container still buys one slot", func(t *testing.T) {
 		bm := Prefill(1<<18 - 1) // every container a full bitmap container
-		exact := bm.CompactedToBuf(nil, getPool(exactCompactedBuf)).keys.maxKeys()
+		exact := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf))).keys.maxKeys()
 		for _, tc := range []struct{ spare, want int }{
 			{2*(keySlotU16+minContainerSize) - 2, 0},
 			{2 * (keySlotU16 + minContainerSize), 1},
@@ -5256,7 +5501,7 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 			{2 * (keySlotU16 + maxContainerSize), 1},
 		} {
 			t.Run(fmt.Sprint(tc.spare), func(t *testing.T) {
-				got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(tc.spare)))
+				got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(tc.spare))})
 				require.Equal(t, exact+tc.want, got.keys.maxKeys())
 				if tc.want > 0 {
 					require.True(t, got.Set(1<<40))
@@ -5269,14 +5514,14 @@ func TestCompactedToBufWithHeadroomSpendsTheSurplus(t *testing.T) {
 	t.Run("full bitmap containers spend the least", func(t *testing.T) {
 		// Prefill is inclusive, so one past the last key would hold a value.
 		bm := Prefill(1<<18 - 1)
-		got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+		got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 		require.Equal(t, maxContainerSize, avgOtherContainerSize(got))
 		require.Equal(t, extraBytes/2/(keySlotU16+maxContainerSize),
-			got.keys.maxKeys()-bm.CompactedToBuf(nil, getPool(exactCompactedBuf)).keys.maxKeys())
+			got.keys.maxKeys()-bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf))).keys.maxKeys())
 	})
 }
 
-func TestCompactedToBufWithHeadroomAbsorbsNewKeys(t *testing.T) {
+func TestCompactedToSplitAbsorbsNewKeys(t *testing.T) {
 	everyOtherKey := func() *Bitmap { return bitmapOf(sortedSeq(20, 2<<16)...) }
 	// Key 0 is pre-created, so no insert can land below the first key.
 	for _, tc := range []struct {
@@ -5292,7 +5537,7 @@ func TestCompactedToBufWithHeadroomAbsorbsNewKeys(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(tc.spare)))
+			got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(tc.spare))})
 
 			budget := got.keys.maxKeys() - got.keys.numKeys() - 1
 			require.Positive(t, budget, "an exact-size result has no budget at all")
@@ -5313,17 +5558,17 @@ func TestCompactedToBufWithHeadroomAbsorbsNewKeys(t *testing.T) {
 	}
 }
 
-func TestCompactedToBufWithHeadroomDirtyBuffer(t *testing.T) {
+func TestCompactedToSplitDirtyBuffer(t *testing.T) {
 	bm := bitmapWithSparseBitmapContainer()
 	want := bm.ToArray()
 
-	got := bm.CompactedToBufWithHeadroom(nil, getPool(func(sizeBytes int) []byte {
+	got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(func(sizeBytes int) []byte {
 		buf := make([]byte, sizeBytes+1<<14)
 		for i := range buf {
 			buf[i] = 0xff
 		}
 		return buf
-	}))
+	})})
 
 	require.Equal(t, want, got.ToArray())
 	for i := 0; i < got.keys.numKeys(); i++ {
@@ -5339,7 +5584,7 @@ func TestCompactedToBufWithHeadroomDirtyBuffer(t *testing.T) {
 	require.Equal(t, got.ToArray(), FromBuffer(got.ToBufferWithCopy()).ToArray())
 }
 
-func TestCompactedToBufWithHeadroomSingleKey(t *testing.T) {
+func TestCompactedToSplitSingleKey(t *testing.T) {
 	const extraBytes = 1 << 14
 	for _, tc := range []struct {
 		name  string
@@ -5352,9 +5597,9 @@ func TestCompactedToBufWithHeadroomSingleKey(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			exact := bm.CompactedToBuf(nil, getPool(exactCompactedBuf))
+			exact := bm.CompactedTo(nil, tailOnly(getPool(exactCompactedBuf)))
 
-			got := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+			got := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 
 			// Key 0's own container is the only estimate available here.
 			require.Equal(t, 1, got.keys.numKeys())
@@ -5368,15 +5613,15 @@ func TestCompactedToBufWithHeadroomSingleKey(t *testing.T) {
 	}
 }
 
-func TestCompactedToBufWithHeadroomPooledStruct(t *testing.T) {
+func TestCompactedToSplitPooledStruct(t *testing.T) {
 	const extraBytes = 1 << 14
 	for _, tc := range compactionCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			bm := tc.build()
-			want := bm.CompactedToBufWithHeadroom(nil, getPool(surplusCompactedBuf(extraBytes)))
+			want := bm.CompactedTo(nil, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 
 			reused := bitmapOf(99, 100_000)
-			got := bm.CompactedToBufWithHeadroom(reused, getPool(surplusCompactedBuf(extraBytes)))
+			got := bm.CompactedTo(reused, BuildOpts{Pool: getPool(surplusCompactedBuf(extraBytes))})
 
 			require.Same(t, reused, got)
 			require.Equal(t, want.keys.maxKeys(), got.keys.maxKeys())
@@ -5391,7 +5636,7 @@ func TestCompactedToBufWithHeadroomPooledStruct(t *testing.T) {
 		buf := make([]byte, 1<<16)
 		pool := getPool(func(int) []byte { return buf })
 
-		allocs := testing.AllocsPerRun(10, func() { bm.CompactedToBufWithHeadroom(pooled, pool) })
+		allocs := testing.AllocsPerRun(10, func() { bm.CompactedTo(pooled, BuildOpts{Pool: pool}) })
 
 		require.Zero(t, allocs)
 		require.Greater(t, pooled.keys.maxKeys(), bm.Compacted().keys.maxKeys(),

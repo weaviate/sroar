@@ -299,29 +299,22 @@ func containerSizeForCard(n int) (sz uint16, typ uint16) {
 	return maxContainerSize, typeBitmap
 }
 
-// FromSortedListToBuf is [FromSortedList] building into a buffer from pool, on
-// [NewBitmapToBuf]'s terms for dst. pool.Get is called once, after the order
-// check, with the bytes the result needs. The build reads vals while writing the
-// buffer, so the two must not overlap.
-func FromSortedListToBuf(dst *Bitmap, vals []uint64, pool BufPool) *Bitmap {
-	return fromSortedListToBuf("FromSortedListToBuf", dst, vals, pool)
+// FromSortedListTo is [FromSortedList] building per opts, on [NewBitmapTo]'s
+// terms for dst. The build reads vals while writing the buffer, so the two must
+// not overlap.
+func FromSortedListTo(dst *Bitmap, vals []uint64, opts BuildOpts) *Bitmap {
+	return fromSortedListTo("FromSortedListTo", dst, vals, opts)
 }
 
-// FromSortedList32ToBuf is [FromSortedListToBuf] for values that fit in 32 bits.
-func FromSortedList32ToBuf(dst *Bitmap, vals []uint32, pool BufPool) *Bitmap {
-	return fromSortedListToBuf("FromSortedList32ToBuf", dst, vals, pool)
+// FromSortedList32To is [FromSortedListTo] for values that fit in 32 bits.
+func FromSortedList32To(dst *Bitmap, vals []uint32, opts BuildOpts) *Bitmap {
+	return fromSortedListTo("FromSortedList32To", dst, vals, opts)
 }
 
-// fromSortedListToBuf reports panics under name, the exported method called.
-func fromSortedListToBuf[T sortedListVal](name string, dst *Bitmap, vals []T, pool BufPool) *Bitmap {
+// fromSortedListTo reports panics under name, the exported method called.
+func fromSortedListTo[T sortedListVal](name string, dst *Bitmap, vals []T, opts BuildOpts) *Bitmap {
 	numKeys, sizeContainer0, sizeOtherContainers := fromSortedLayout(name, vals)
-	// +1 is the spare slot buildFromSortedInto relies on.
-	sizeKeys := calcSizeKeys(numKeys + 1)
-	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
-
-	buf, release := getBuf(name, pool, sizeTotal*2)
-	dst = ensureDst(dst)
-	layOutSizedInBuf(dst, buf, sizeKeys, sizeContainer0).adoptPool(pool, release)
+	dst = layOutSizedTo(name, dst, opts, numKeys, sizeContainer0, sizeOtherContainers)
 	return buildFromSortedInto(dst, vals)
 }
 
@@ -379,13 +372,13 @@ func fromSortedLayout[T sortedListVal](name string, vals []T) (numKeys, sizeCont
 
 // buildFromSortedInto builds the containers into ra, whose data array must
 // already have capacity for the full layout and whose keys node must be
-// sized with one spare slot beyond the result's keys (the numKeys+1 at the
-// call sites), so setKey never expands the node or moves containers.
+// sized with one spare slot beyond the result's keys (numKeys+1 in
+// fromSortedList and layOutSizedTo), so setKey never expands the node or moves containers.
 // Containers are first sized by segment length, matching fromSortedLayout;
 // when the fill finds duplicates, the just-filled container — still the
 // tail of ra.data — is truncated to its canonical size (or rewritten as
-// the array a bitmap collapses into) before the next append, so the final
-// layout always matches a duplicate-free build's. Only the padded
+// the array a bitmap collapses into) before the next append, so the
+// containers always match a duplicate-free build's. Only the padded
 // capacity remains. Returns ra.
 func buildFromSortedInto[T sortedListVal](ra *Bitmap, vals []T) *Bitmap {
 	if len(vals) == 0 {
@@ -509,57 +502,26 @@ func (ra *Bitmap) Compacted() *Bitmap {
 	return ra.compactInto("Compacted", res)
 }
 
-// CompactedToBuf is [Bitmap.Compacted] building into a buffer from pool, on
-// [NewBitmapToBuf]'s terms for dst, which must not be ra. pool.Get is called
-// once with the result's size, and must neither touch ra nor return memory
-// overlapping it. Either leaves both bitmaps undefined.
-func (ra *Bitmap) CompactedToBuf(dst *Bitmap, pool BufPool) *Bitmap {
-	return ra.compactedToBuf("CompactedToBuf", dst, pool, false)
+// CompactedTo is [Bitmap.Compacted] building per opts, on [NewBitmapTo]'s terms
+// for dst, which must not be ra. The pool must neither touch ra nor return
+// memory overlapping it. ToBuffer() carries any spare key slots.
+func (ra *Bitmap) CompactedTo(dst *Bitmap, opts BuildOpts) *Bitmap {
+	return ra.compactedTo("CompactedTo", dst, opts)
 }
 
-// CompactedToBufWithHeadroom is [Bitmap.CompactedToBuf] with the capacity past
-// the requested size spent on key slots as well as container room, so inserts
-// at new keys stop moving every container. Get is still called once with the
-// exact size, and a buffer with no spare capacity opts out. Each slot is budgeted
-// a container as big as the source's own, so dense containers buy few slots,
-// though any usable surplus buys one. The result's size follows the buffer's,
-// and ToBuffer() carries the padding, so serialize a Compacted result instead.
-func (ra *Bitmap) CompactedToBufWithHeadroom(dst *Bitmap, pool BufPool) *Bitmap {
-	return ra.compactedToBuf("CompactedToBufWithHeadroom", dst, pool, true)
-}
-
-// compactedToBuf reports panics under name, the exported method called.
-// headroom sizes the keys node from the buffer Get returned.
-func (ra *Bitmap) compactedToBuf(name string, dst *Bitmap, pool BufPool, headroom bool) *Bitmap {
-	if ra != nil && dst == ra {
-		panic(name + ": dst is the source bitmap")
-	}
+// compactedTo reports panics under name, the exported method called.
+func (ra *Bitmap) compactedTo(name string, dst *Bitmap, opts BuildOpts) *Bitmap {
+	ra.requireNotDst(name, dst)
 	numKeys, sizeContainer0, sizeOtherContainers := ra.compactLayout()
-	sizeKeys := calcSizeKeys(numKeys + 1)
-	sizeTotal := sizeKeys + sizeContainer0 + sizeOtherContainers
-
-	buf, release := getBuf(name, pool, sizeTotal*2)
-	dst = ensureDst(dst)
-	if headroom {
-		extraKeys := extraKeySlots(len(buf)/2-sizeTotal, numKeys, sizeContainer0, sizeOtherContainers)
-		sizeKeys = calcSizeKeys(numKeys + 1 + extraKeys)
-	}
-	layOutSizedInBuf(dst, buf, sizeKeys, sizeContainer0).adoptPool(pool, release)
+	dst = layOutSizedTo(name, dst, opts, numKeys, sizeContainer0, sizeOtherContainers)
 	return ra.compactInto(name, dst)
 }
 
-// extraKeySlots divides surplus uint16s between key slots and the container
-// each new key needs, so neither runs out first, estimating a new container
-// from the layout's own. One slot is the floor, whatever that estimate says.
-func extraKeySlots(surplus, numKeys, sizeContainer0, sizeOtherContainers int) int {
-	if surplus < keySlotU16+minContainerSize {
-		return 0
+// requireNotDst panics if dst is ra. name is the exported method reported.
+func (ra *Bitmap) requireNotDst(name string, dst *Bitmap) {
+	if ra != nil && dst == ra {
+		panic(name + ": dst is the source bitmap")
 	}
-	avgContainer := sizeContainer0
-	if numKeys > 1 {
-		avgContainer = sizeOtherContainers / (numKeys - 1)
-	}
-	return max(1, surplus/(keySlotU16+avgContainer))
 }
 
 // compactLayout sizes a compacted copy of ra from container headers alone.
@@ -1245,46 +1207,104 @@ func (ra *Bitmap) CapInBytes() int {
 	return cap(ra.data) * 2
 }
 
-// CloneToBuf clones ra into a buffer of ra's size from pool, on
-// [NewBitmapToBuf]'s terms. A nil or zero-value ra clones to an empty bitmap.
-func (ra *Bitmap) CloneToBuf(dst *Bitmap, pool BufPool) *Bitmap {
-	return ra.cloneToBuf("CloneToBuf", dst, pool)
+// CloneTo clones ra per opts, on [Bitmap.CompactedTo]'s terms for dst and the
+// pool. The clone keeps ra's layout, dead space included, apart from the key
+// slots spare capacity adds. A nil or zero-value ra clones to an empty bitmap.
+func (ra *Bitmap) CloneTo(dst *Bitmap, opts BuildOpts) *Bitmap {
+	return ra.cloneTo("CloneTo", dst, opts)
 }
 
-// cloneToBuf is CloneToBuf reporting panics under name, the exported method
-// called.
-func (src *Bitmap) cloneToBuf(name string, dst *Bitmap, pool BufPool) *Bitmap {
-	srcLen := src.LenInBytes()
-	buf, release := getBuf(name, pool, max(srcLen, emptyBitmapBytes))
+// cloneTo is CloneTo reporting panics under name, the exported method called.
+func (ra *Bitmap) cloneTo(name string, dst *Bitmap, opts BuildOpts) *Bitmap {
+	dst, hasContainers := ra.layOutKeysTo(name, dst, opts)
+	if hasContainers {
+		copy(dst.data[dst.keys.size():], ra.data[ra.keys.size():])
+	}
+	return dst
+}
+
+// ZeroedLayoutTo is [Bitmap.CloneTo] without ra's values. From a pool, ToBuffer()
+// carries the buffer's old bytes past each array's cardinality and in dead space.
+func (ra *Bitmap) ZeroedLayoutTo(dst *Bitmap, opts BuildOpts) *Bitmap {
+	return ra.zeroedLayoutTo("ZeroedLayoutTo", dst, opts)
+}
+
+// zeroedLayoutTo reports panics under name, the exported method called.
+func (ra *Bitmap) zeroedLayoutTo(name string, dst *Bitmap, opts BuildOpts) *Bitmap {
+	dst, hasContainers := ra.layOutKeysTo(name, dst, opts)
+	if hasContainers {
+		// A pool's buffer may be dirty, heap memory is zero.
+		writeZeroedContainers(ra, dst, opts.Pool != nil)
+	}
+	return dst
+}
+
+// layOutKeysTo lays out dst per opts as a copy of ra whose containers the caller
+// writes. A nil, zero-value or zero-length ra has none, so dst is complete.
+func (ra *Bitmap) layOutKeysTo(name string, dst *Bitmap, opts BuildOpts) (_ *Bitmap, hasContainers bool) {
+	ra.requireNotDst(name, dst)
+	if ra.LenInBytes() == 0 {
+		return newBitmapTo(name, dst, opts), false
+	}
+	numKeys, sizeContainer0, sizeOtherContainers := ra.layoutSizes()
+	buf, release := opts.getBuf(name, ra.LenInBytes())
+	spareKeys := opts.spareKeySlots(buf, len(ra.data), numKeys, sizeContainer0, sizeOtherContainers)
+
 	dst = ensureDst(dst)
-
-	// Nothing to clone — parsing an empty src would fail.
-	if srcLen == 0 {
-		return layOutEmptyInBuf(dst, buf).adoptPool(pool, release)
-	}
-
-	// Copy at the uint16 level into the destination buffer, then trim data
-	// to the used length while keeping the full buffer capacity available
-	// for future growth.
-	copy(byteToUint16SliceUnsafe(buf), src.data)
-	pointAtSerialized(dst, buf)
-	dst.data = dst.data[:srcLen/2]
-	return dst.adoptPool(pool, release)
+	ra.layOutKeysInBuf(dst, buf, spareKeys)
+	return dst.adoptPool(opts.Pool, release), true
 }
 
-// FromBufferToBuf points the result at the serialized bitmap in buf without
-// copying, using its full capacity, on [NewBitmapToBuf]'s terms. It takes ownership of release,
-// which may free a larger buffer that buf is a sub-slice of. A buf under 8 bytes
-// holds no bitmap, so it is released and the result is NewBitmapToBuf's.
-func FromBufferToBuf(dst *Bitmap, buf []byte, release func(), pool BufPool) *Bitmap {
-	if pool == nil {
-		panic("FromBufferToBuf: pool is nil")
+// layOutKeysInBuf points dst at buf and writes ra's keys node into it, widened
+// by spareKeys slots, with each container offset shifted to match. Its free key
+// slots are kept.
+func (ra *Bitmap) layOutKeysInBuf(dst *Bitmap, buf []byte, spareKeys int) {
+	shift := keySlotU16 * spareKeys
+	sizeKeys := ra.keys.size() + shift
+	data := byteToUint16SliceUnsafe(buf)[:len(ra.data)+shift]
+	*dst = Bitmap{data: data, keys: uint16To64SliceUnsafe(data[:sizeKeys]), _ptr: buf}
+	if spareKeys == 0 {
+		copy(data[:sizeKeys], ra.data)
+		return
 	}
+
+	numKeys := ra.keys.numKeys()
+	dst.keys.setNodeSize(sizeKeys)
+	dst.keys.setNumKeys(numKeys)
+	srcPairs, pairs := ra.keys[keyOffset(0):keyOffset(numKeys)], dst.keys[keyOffset(0):keyOffset(numKeys)]
+	for i := 0; i+1 < len(pairs); i += 2 {
+		pairs[i], pairs[i+1] = srcPairs[i], srcPairs[i+1]+uint64(shift)
+	}
+	clear(data[4*keyOffset(numKeys) : sizeKeys]) // sizeKeys may not be a multiple of 4.
+}
+
+// writeZeroedContainers writes an empty header into dst for each of src's
+// containers. clearBitmaps also clears bitmap payloads, for memory holding old
+// values. An array's payload is never read past its cardinality.
+func writeZeroedContainers(src, dst *Bitmap, clearBitmaps bool) {
+	data, delta := dst.data, uint64(dst.keys.size()-src.keys.size())
+	for i, n := 0, src.keys.numKeys(); i < n; i++ {
+		off := src.keys.val(i)
+		size, typ := src.data[off+uint64(indexSize)], src.data[off+uint64(indexType)]
+		c := data[off+delta : off+delta+uint64(size)]
+		c[indexSize], c[indexType] = size, typ
+		c[indexCardinality], c[indexCardinality+1] = 0, 0
+		if clearBitmaps && typ == typeBitmap {
+			clear(c[startIdx:])
+		}
+	}
+}
+
+// FromBufferOwned points the result at the serialized bitmap in buf without
+// copying, using its full capacity, on [NewBitmapTo]'s terms for dst. It grows
+// through pool, or on the heap if pool is nil, and owns release, which may free a
+// larger buffer. A buf under 8 bytes is released and gives an empty bitmap.
+func FromBufferOwned(dst *Bitmap, buf []byte, release func(), pool BufPool) *Bitmap {
 	if len(buf) < 8 {
 		if release != nil {
 			release()
 		}
-		return newBitmapToBuf("FromBufferToBuf", dst, pool, 0)
+		return newBitmapTo("FromBufferOwned", dst, BuildOpts{Pool: pool, SpareTailOnly: true})
 	}
 	return pointAtSerialized(ensureDst(dst), buf).adoptPool(pool, release)
 }
@@ -1348,6 +1368,7 @@ func (ra *Bitmap) FillUp(maxX uint64) {
 
 		bm := &Bitmap{}
 		if minimalSizeTotal <= cap(ra.data) {
+			clear(ra.data[:minimalSizeKeys]) // Reaches into capacity, which may be dirty.
 			layOutEmpty(bm, minimalSizeKeys, maxContainerSize, ra.data)
 		} else {
 			layOutEmptyOnHeap(bm, int(maxContainersCount)+1+1, maxContainerSize, int(maxContainersCount)*maxContainerSize)
@@ -1675,16 +1696,38 @@ func (ra *Bitmap) expandConditionally(newKeys int, sizeContainers int) {
 // Keys that collapse to the same masked value have their containers merged
 // via container-level OR operations.
 func (ra *Bitmap) Masked(mask uint64) *Bitmap {
-	return ra.maskedInto(mask, NewBitmap())
+	return ra.maskedInto(mask, NewBitmap(), 0)
 }
 
-// MaskedToBuf is like Masked but builds the result in a buffer from pool with
-// room for ra's bytes, on [NewBitmapToBuf]'s terms for dst, which must not be ra.
-func (ra *Bitmap) MaskedToBuf(dst *Bitmap, mask uint64, pool BufPool) *Bitmap {
-	if dst != nil && dst == ra {
-		panic("MaskedToBuf: dst is the source bitmap")
-	}
-	return ra.maskedInto(mask, newBitmapToBuf("MaskedToBuf", dst, pool, ra.LenInBytes()))
+// MaskedTo is [Bitmap.Masked] building per opts, on [NewBitmapTo]'s terms for
+// dst, which must not be ra. ra's size estimates the result's, so
+// opts.InitialSpareRatio scales an estimate and the build may still grow.
+func (ra *Bitmap) MaskedTo(dst *Bitmap, mask uint64, opts BuildOpts) *Bitmap {
+	const name = "MaskedTo"
+	ra.requireNotDst(name, dst)
+	res, spareKeys := newMaskedTo(name, dst, ra, opts)
+	return ra.maskedInto(mask, res, spareKeys)
+}
+
+// newMaskedTo lays out an empty bitmap with room for as many bytes as est, which
+// is only read, occupies. It returns the key slots the spare buys for the caller
+// to add.
+func newMaskedTo(name string, dst, est *Bitmap, opts BuildOpts) (_ *Bitmap, spareKeys int) {
+	sizeBytes := emptyBitmapBytes + est.LenInBytes()
+	numKeys, sizeContainer0, sizeOtherContainers := est.layoutSizes()
+	buf, release := opts.getBuf(name, sizeBytes)
+	spareKeys = opts.spareKeySlots(buf, sizeBytes/2, numKeys, sizeContainer0, sizeOtherContainers)
+	return layOutEmptyInBuf(ensureDst(dst), buf).adoptPool(opts.Pool, release), spareKeys
+}
+
+// layOutEmptyInBuf clears buf, which holds at least emptyBitmapBytes, and lays
+// out a ready-to-use empty bitmap over it. Returns dst.
+func layOutEmptyInBuf(dst *Bitmap, buf []byte) *Bitmap {
+	bufU16 := byteToUint16SliceUnsafe(buf)
+	clear(bufU16)
+	layOutEmpty(dst, calcSizeKeys(2), minContainerSize, bufU16)
+	dst._ptr = buf
+	return dst
 }
 
 // writeToMaskedResult writes src into res under maskedKey, OR-merging with
@@ -1716,7 +1759,8 @@ func writeToMaskedResult(res *Bitmap, maskedKey uint64, src, orBuf []uint16) {
 	}
 }
 
-// maskedInto is the core implementation of Masked and MaskedToBuf.
+// maskedInto is the core implementation of Masked and MaskedTo. spareKeys is how
+// many key slots b gets past those the build asks for.
 //
 // Alternative approach was considered and benchmarked: sort source keys by
 // masked value upfront, count distinct masked keys for exact key pre-allocation,
@@ -1726,21 +1770,18 @@ func writeToMaskedResult(res *Bitmap, maskedKey uint64, src, orBuf []uint16) {
 // (maskedEntry slice + two scratch buffers vs one) and the sort cost outweigh
 // the savings from avoiding binary searches and in-place OR. Memory consumption
 // was also higher in most cases. Current approach wins.
-func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
-	if ra == nil {
-		return b
-	}
-	an := ra.keys.numKeys()
-	if an == 0 {
-		return b
-	}
+func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap, spareKeys int) *Bitmap {
+	an := ra.NumContainers()
 
 	// Ensure the mask has its lowest 16 bits unset, since keys always do.
 	mask &= 0xFFFFFFFFFFFF0000
 
 	// Pre-size key space so that expandConditionally calls inside the loop
 	// don't need to repeatedly move container data to make room for keys.
-	b.expandConditionally(an, 0)
+	b.expandConditionally(an+spareKeys, 0)
+	if an == 0 {
+		return b
+	}
 
 	buf := make([]uint16, maxContainerSize)
 	for ai := 0; ai < an; ai++ {
@@ -1764,22 +1805,31 @@ func (ra *Bitmap) maskedInto(mask uint64, b *Bitmap) *Bitmap {
 // but allocates only one bitmap instead of two. Neither a nor b is modified.
 // The lowest 16 bits of keys are always zeroed.
 func MaskedAnd(a, b *Bitmap, mask uint64) *Bitmap {
-	return maskedAndInto(a, b, mask, NewBitmap())
+	return maskedAndInto(a, b, mask, NewBitmap(), 0)
 }
 
-// MaskedAndToBuf is like MaskedAnd but builds the result in a buffer from pool
-// with room for the smaller input's bytes. dst is on [NewBitmapToBuf]'s terms
-// and must be neither a nor b. The lowest 16 bits of keys are always zeroed.
-func MaskedAndToBuf(dst, a, b *Bitmap, mask uint64, pool BufPool) *Bitmap {
+// MaskedAndTo is [MaskedAnd] building per opts, on [NewBitmapTo]'s terms for
+// dst, which must be neither a nor b. The smaller input's size estimates the
+// result's, so opts.InitialSpareRatio scales an estimate and the build may still
+// grow.
+func MaskedAndTo(dst, a, b *Bitmap, mask uint64, opts BuildOpts) *Bitmap {
+	const name = "MaskedAndTo"
 	if dst != nil && (dst == a || dst == b) {
-		panic("MaskedAndToBuf: dst is a source bitmap")
+		panic(name + ": dst is a source bitmap")
 	}
-	extraBytes := min(a.LenInBytes(), b.LenInBytes())
-	return maskedAndInto(a, b, mask, newBitmapToBuf("MaskedAndToBuf", dst, pool, extraBytes))
+	smaller := a
+	if b.LenInBytes() < a.LenInBytes() {
+		smaller = b
+	}
+	res, spareKeys := newMaskedTo(name, dst, smaller, opts)
+	return maskedAndInto(a, b, mask, res, spareKeys)
 }
 
-func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap) *Bitmap {
+// maskedAndInto is the shared body of [MaskedAnd] and [MaskedAndTo]. spareKeys
+// is how many key slots res gets past those the build asks for.
+func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap, spareKeys int) *Bitmap {
 	if a.IsEmpty() || b.IsEmpty() {
+		res.expandConditionally(spareKeys, 0)
 		return res
 	}
 
@@ -1790,7 +1840,7 @@ func maskedAndInto(a, b *Bitmap, mask uint64, res *Bitmap) *Bitmap {
 
 	// AND can produce at most min(an, bn) distinct keys before masking.
 	minKeys := min(an, bn)
-	res.expandConditionally(minKeys, 0)
+	res.expandConditionally(minKeys+spareKeys, 0)
 
 	// Only the larger side can trigger galloping — the smaller side can never
 	// satisfy candidate > threshold*8, so exactly one flag can be true.
@@ -1967,42 +2017,45 @@ func CopresenceByMask(bms []*Bitmap, mask uint64) *Bitmap {
 	if len(bms) == 1 {
 		return bms[0].Clone()
 	}
-	return copresenceByMaskInto(bms, mask, NewBitmap())
+	return copresenceByMaskInto(bms, mask, NewBitmap(), 0)
 }
 
-// CopresenceByMaskToBuf is like [CopresenceByMask] but builds the result in a
-// buffer from pool with room for the largest input's bytes. dst is on
-// [NewBitmapToBuf]'s terms and must not be in bms.
+// CopresenceByMaskTo is [CopresenceByMask] building per opts, on [NewBitmapTo]'s
+// terms for dst, which must not be in bms. The largest input's size estimates
+// the result's, so opts.InitialSpareRatio scales an estimate and the build may still
+// grow.
 //
 // Same mask shape requirement as [CopresenceByMask]: mask & 0xFFFF == 0xFFFF.
-func CopresenceByMaskToBuf(dst *Bitmap, bms []*Bitmap, mask uint64, pool BufPool) *Bitmap {
-	const name = "CopresenceByMaskToBuf"
+func CopresenceByMaskTo(dst *Bitmap, bms []*Bitmap, mask uint64, opts BuildOpts) *Bitmap {
+	const name = "CopresenceByMaskTo"
 	if dst != nil && slices.Contains(bms, dst) {
 		panic(name + ": dst is a source bitmap")
 	}
-	if len(bms) == 1 {
-		return bms[0].cloneToBuf(name, dst, pool)
+	if len(bms) == 0 {
+		return newBitmapTo(name, dst, opts)
 	}
-	extraBytes := 0
+	if len(bms) == 1 {
+		return bms[0].cloneTo(name, dst, opts)
+	}
+	largest := bms[0]
 	for _, bm := range bms {
 		if bm.IsEmpty() { // The result is empty too.
-			extraBytes = 0
-			break
+			return newBitmapTo(name, dst, opts)
 		}
-		extraBytes = max(extraBytes, bm.LenInBytes())
+		if bm.LenInBytes() > largest.LenInBytes() {
+			largest = bm
+		}
 	}
-	res := newBitmapToBuf(name, dst, pool, extraBytes)
-	if len(bms) == 0 {
-		return res
-	}
-	return copresenceByMaskInto(bms, mask, res)
+	res, spareKeys := newMaskedTo(name, dst, largest, opts)
+	return copresenceByMaskInto(bms, mask, res, spareKeys)
 }
 
 // copresenceByMaskInto is the shared body of [CopresenceByMask] and
-// [CopresenceByMaskToBuf]. Caller must ensure len(bms) >= 2; the N=0 and
+// [CopresenceByMaskTo]. Caller must ensure len(bms) >= 2; the N=0 and
 // N=1 short-circuits are handled at the public entry points because they
-// differ in how `res` is constructed.
-func copresenceByMaskInto(bms []*Bitmap, mask uint64, res *Bitmap) *Bitmap {
+// differ in how `res` is constructed. spareKeys is how many key slots res gets
+// past those the build asks for.
+func copresenceByMaskInto(bms []*Bitmap, mask uint64, res *Bitmap, spareKeys int) *Bitmap {
 	n := len(bms)
 	for _, bm := range bms {
 		if bm.IsEmpty() {
@@ -2029,7 +2082,7 @@ func copresenceByMaskInto(bms []*Bitmap, mask uint64, res *Bitmap) *Bitmap {
 	// estimate: under-estimates only when distinct keys-per-masked-group
 	// exceed the per-input average. Under-allocation is recoverable
 	// (expandKeys still fires); the goal is to skip it in the common case.
-	res.expandConditionally(totalEntries/n, 0)
+	res.expandConditionally(totalEntries/n+spareKeys, 0)
 
 	// Three scratch buffers carry the full algorithm:
 	//   - posBufA / posFallbackA back the OR over the seed group. The result
